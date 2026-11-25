@@ -11,7 +11,7 @@ from .config import SettingsStore
 from .database import Database
 from .diagnostics import LOG, SUCCESS, log_error, redact
 from .highlights import select_highlights
-from .media import acquire_source
+from .media import DownloadProgress, acquire_source
 from .models import ProjectOptions, RenderedClip, Transcript
 from .paths import CACHE_DIR, OUTPUT_DIR
 from .process import CancelledError, ProcessManager
@@ -31,7 +31,9 @@ class Pipeline:
         self.manager = manager or ProcessManager()
 
     def run(self, project_id: str, options: ProjectOptions, progress: Progress, *,
-            resume_analysis: bool = False, warning: Callable[[str], None] | None = None) -> list[RenderedClip]:
+            resume_analysis: bool = False, warning: Callable[[str], None] | None = None,
+            download_progress: Callable[[DownloadProgress], None] | None = None,
+            download_log: Callable[[str], None] | None = None) -> list[RenderedClip]:
         if resume_analysis:
             if not self.database.claim_analysis_retry(project_id, asdict(options)):
                 raise RuntimeError("This project is no longer waiting for an AI analysis retry.")
@@ -49,7 +51,8 @@ class Pipeline:
             else:
                 self._update(project_id, 3, "Acquiring source video", progress)
                 source = acquire_source(
-                    options.source, options.cache_enabled, self.manager, self._logger(progress, 4), job_dir=job_dir,
+                    options.source, options.cache_enabled, self.manager,
+                    download_log or self._logger(progress, 4), job_dir=job_dir, progress=download_progress,
                 )
                 dimensions = source_dimensions(source, self.manager)
                 self._update(project_id, 12, "Generating timestamped transcript", progress)

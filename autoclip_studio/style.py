@@ -28,6 +28,21 @@ QTableWidget { background: #11161e; alternate-background-color: #151b24; border:
 QHeaderView::section { background: #1b212b; color: #aeb7c5; border: none; border-bottom: 1px solid #303744; padding: 9px; }
 QProgressBar { background: #171c24; border: none; border-radius: 5px; height: 10px; text-align: center; color: transparent; }
 QProgressBar::chunk { background: #7566ff; border-radius: 5px; }
+QWidget#downloadView, QWidget#downloadView QLabel { background: transparent; }
+QFrame#transferIndicator { background: #9f90ff; border-radius: 3px; }
+QLabel#transferStatus { color: #e6e9ef; font-weight: 600; }
+QLabel#transferSummary, QLabel#transferMetric, QLabel#transferPercent { font-family: "Consolas", "Courier New"; }
+QLabel#transferSummary { color: #a9b2c5; }
+QLabel#transferMetricLabel { color: #a9b2c5; font-size: 12px; }
+QLabel#transferMetric { color: #e6e9ef; font-size: 14px; }
+QLabel#transferPercent { min-width: 88px; color: #c5baff; font-size: 23px; font-weight: 700; }
+QProgressBar#downloadTransfer { background: #25243a; border-radius: 4px; }
+QProgressBar#downloadTransfer::chunk { background: #8876ff; border-radius: 4px; }
+QPushButton#cancelDownload { color: #f4a1aa; background: transparent; border: 1px solid #774a55; padding: 6px 10px; }
+QPushButton#cancelDownload:hover { background: #35232d; border-color: #b26979; }
+QPushButton#cancelDownload:pressed { background: #452731; border-color: #d58a99; }
+QPushButton#cancelDownload:focus { border-color: #f4a1aa; }
+QPushButton#cancelDownload:disabled { border-color: #503940; color: #9b737d; }
 QCheckBox { spacing: 8px; }
 QCheckBox::indicator { width: 17px; height: 17px; }
 QScrollBar:vertical { width: 9px; background: transparent; }

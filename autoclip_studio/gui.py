@@ -22,8 +22,9 @@ from .captions import TEMPLATES
 from .config import SettingsStore
 from .database import Database
 from .diagnostics import LOG, SUCCESS, log_error, redact
+from .download_view import DownloadView
 from .log_view import LogView
-from .media import is_youtube_url
+from .media import DownloadProgress, is_youtube_url
 from .models import ProjectOptions
 from .paths import APP_ROOT, OUTPUT_DIR, ensure_directories
 from .pipeline import Pipeline
@@ -245,7 +246,9 @@ class MainWindow(QMainWindow):
         outer, page = self._page("Processing Queue", "Heavy media tasks run one at a time")
         status_card = QFrame(objectName="card")
         layout = QVBoxLayout(status_card)
-        row = QHBoxLayout()
+        self.processing_status_row = QWidget()
+        row = QHBoxLayout(self.processing_status_row)
+        row.setContentsMargins(0, 0, 0, 0)
         self.queue_status = self._wrapping_label("Idle")
         self.queue_status.setTextFormat(Qt.TextFormat.PlainText)
         self.cancel_button = QPushButton("Cancel processing", objectName="danger")
@@ -255,6 +258,9 @@ class MainWindow(QMainWindow):
         self.progress_bar = QProgressBar(); self.progress_bar.setRange(0, 100)
         self.progress_bar.setAccessibleName("Project progress")
         self.progress_text = QLabel("0%")
+        self.download_view = DownloadView()
+        self.download_view.cancel_button.clicked.connect(self.cancel_processing)
+        self.download_view.hide()
         self.live_logs = LogView()
         log_actions = QHBoxLayout()
         copy_logs = QPushButton("Copy Logs")
@@ -266,10 +272,15 @@ class MainWindow(QMainWindow):
         for button in (copy_logs, clear_logs, export_logs):
             log_actions.addWidget(button)
         log_actions.addStretch()
-        progress_row = QHBoxLayout()
+        self.processing_progress_row = QWidget()
+        progress_row = QHBoxLayout(self.processing_progress_row)
+        progress_row.setContentsMargins(0, 0, 0, 0)
         progress_row.addWidget(self.progress_bar, 1)
         progress_row.addWidget(self.progress_text)
-        layout.addLayout(row); layout.addLayout(progress_row); layout.addWidget(self.live_logs)
+        layout.addWidget(self.processing_status_row)
+        layout.addWidget(self.processing_progress_row)
+        layout.addWidget(self.download_view)
+        layout.addWidget(self.live_logs, 1)
         layout.addLayout(log_actions)
         page.addWidget(status_card, 2)
         history = QHBoxLayout()
@@ -454,6 +465,8 @@ class MainWindow(QMainWindow):
         self.worker.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.on_progress)
+        self.worker.download_progress.connect(self.on_download_progress)
+        self.worker.download_log.connect(self.on_download_log)
         self.worker.warning.connect(self._provider_warning)
         self.worker.completed.connect(self.on_completed)
         self.worker.failed.connect(self.on_failed)
@@ -465,6 +478,7 @@ class MainWindow(QMainWindow):
         progress = 40 if resume_analysis else 0
         self.progress_bar.setValue(progress)
         self.progress_text.setText(f"{progress}%")
+        self.show_download(not resume_analysis and is_youtube_url(options.source))
         self.worker_thread.start(); self.show_page(2)
 
     def _selected_project(self) -> dict | None:
@@ -492,14 +506,39 @@ class MainWindow(QMainWindow):
         self._start_worker(project["id"], options, resume_analysis=True)
 
     def cancel_processing(self) -> None:
-        if self.worker and self.cancel_button.isEnabled():
-            self.cancel_button.setEnabled(False)
-            self.queue_status.setText("Cancelling…")
+        downloading = not self.download_view.isHidden()
+        button = self.download_view.cancel_button if downloading else self.cancel_button
+        if self.worker and button.isEnabled():
+            button.setEnabled(False)
+            if downloading:
+                self.download_view.status.setText("Cancelling download…")
+            else:
+                self.queue_status.setText("Cancelling…")
             self.pipeline.manager.cancel()
+
+    def show_download(self, active: bool) -> None:
+        if active:
+            self.download_view.reset()
+        else:
+            self.download_view.animation.stop()
+        self.processing_status_row.setVisible(not active)
+        self.processing_progress_row.setVisible(not active)
+        self.download_view.setVisible(active)
+
+    @Slot(object)
+    def on_download_progress(self, progress: DownloadProgress) -> None:
+        if not self.download_view.isHidden() and not self.pipeline.manager.cancel_event.is_set():
+            self.download_view.update_transfer(progress)
+
+    @Slot(str)
+    def on_download_log(self, message: str) -> None:
+        self.live_logs.add_entry("INFO", message)
 
     def on_progress(self, value: int, message: str) -> None:
         if self.pipeline.manager.cancel_event.is_set():
             return
+        if value >= 12 and not self.download_view.isHidden():
+            self.show_download(False)
         if value:
             self.progress_bar.setValue(value)
             self.progress_text.setText(f"{value}%")
@@ -508,11 +547,13 @@ class MainWindow(QMainWindow):
         self.metric_active.findChild(QLabel, "metricValue").setText(f"{value}%")
 
     def on_completed(self, _project_id: str, count: int) -> None:
+        self.show_download(False)
         self.queue_status.setText(f"Completed {count} clips")
         self.live_logs.add_entry("SUCCESS", "All outputs passed MP4 validation.")
         self.refresh_all()
 
     def on_failed(self, project_id: str, message: str) -> None:
+        self.show_download(False)
         self.refresh_all()
         cancelled = message == "Processing cancelled"
         retryable = False

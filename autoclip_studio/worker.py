@@ -10,6 +10,8 @@ from .process import CancelledError
 
 class PipelineWorker(QObject):
     progress = Signal(int, str)
+    download_progress = Signal(object)
+    download_log = Signal(str)
     warning = Signal(str)
     completed = Signal(str, int)
     failed = Signal(str, str)
@@ -27,7 +29,8 @@ class PipelineWorker(QObject):
     def run(self) -> None:
         try:
             clips = self.pipeline.run(self.project_id, self.options, self.progress.emit,
-                                      resume_analysis=self.resume_analysis, warning=self.warning.emit)
+                                      resume_analysis=self.resume_analysis, warning=self.warning.emit,
+                                      download_progress=self.download_progress.emit, download_log=self.download_log.emit)
             self.completed.emit(self.project_id, len(clips))
         except CancelledError:
             self.failed.emit(self.project_id, "Processing cancelled")

@@ -4,6 +4,8 @@ import hashlib
 import json
 import re
 import sys
+from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 from tempfile import TemporaryDirectory, mkdtemp
 from typing import Callable
@@ -15,6 +17,61 @@ from .process import ProcessManager, find_media_tool
 
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
 MEDIA_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov"}
+_TRANSFER_PREFIX = "AUTOCLIP_TRANSFER\t"
+# Expose the CLI's downloader hook fields in both Python and bundled executable builds.
+_TRANSFER_TEMPLATE = "download:" + _TRANSFER_PREFIX + "\t".join((
+    "%(progress.status)s", "%(progress.downloaded_bytes)j", "%(progress.total_bytes)j",
+    "%(progress.total_bytes_estimate)j", "%(progress.speed)j", "%(progress.eta)j",
+    "%(info.vcodec)s", "%(info.acodec)s", "%(progress._default_template)s",
+))
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadProgress:
+    downloaded: int | None
+    total: int | None
+    estimated: bool
+    bytes_per_second: float | None
+    eta_seconds: float | None
+    stream: str
+    finished: bool
+
+
+def _hook_number(raw: str) -> int | float | None:
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return None
+    if type(value) in (int, float) and isfinite(value) and value >= 0:
+        return value
+    return None
+
+
+def _log_transfer(line: str, log: Callable[[str], None], progress: Callable[[DownloadProgress], None]) -> None:
+    if not line.startswith(_TRANSFER_PREFIX):
+        log(line)
+        return
+    fields = line[len(_TRANSFER_PREFIX):].split("\t", 8)
+    if len(fields) != 9:
+        log(line)
+        return
+    status, downloaded, total, estimate, speed, eta, video_codec, audio_codec, detail = fields
+    log(f"[download] {detail}")
+    if status not in {"downloading", "finished"}:
+        return
+    downloaded, total, estimate, speed, eta = map(_hook_number, (downloaded, total, estimate, speed, eta))
+    size = total or estimate
+    if status == "finished" and downloaded is None:
+        downloaded = total
+    stream = ""
+    if video_codec == "none" and audio_codec not in {"none", "NA"}:
+        stream = "audio"
+    elif audio_codec == "none" and video_codec not in {"none", "NA"}:
+        stream = "video"
+    progress(DownloadProgress(
+        int(downloaded) if downloaded is not None else None, int(size) if size else None,
+        not total and bool(estimate), speed, eta, stream, status == "finished",
+    ))
 
 
 def is_youtube_url(value: str) -> bool:
@@ -39,7 +96,8 @@ def youtube_id(url: str) -> str | None:
 
 
 def acquire_source(source: str, cache: bool, manager: ProcessManager,
-                   log: Callable[[str], None] = lambda _line: None, *, job_dir: Path | None = None) -> Path:
+                   log: Callable[[str], None] = lambda _line: None, *, job_dir: Path | None = None,
+                   progress: Callable[[DownloadProgress], None] | None = None) -> Path:
     local = Path(source).expanduser()
     if local.is_file():
         return local.resolve()
@@ -50,7 +108,7 @@ def acquire_source(source: str, cache: bool, manager: ProcessManager,
     if not cache:
         target = job_dir / "download" if job_dir else Path(mkdtemp(prefix="autoclip-download-"))
         target.mkdir(parents=True, exist_ok=True)
-        return _download_youtube(source, target, key, manager, log)
+        return _download_youtube(source, target, key, manager, log, progress=progress)
 
     downloads = CACHE_DIR / "downloads"
     downloads.mkdir(parents=True, exist_ok=True)
@@ -59,14 +117,14 @@ def acquire_source(source: str, cache: bool, manager: ProcessManager,
             log(f"Using cached download: {item.name}")
             return item
     with TemporaryDirectory(prefix="incoming-", dir=downloads) as staging:
-        video = _download_youtube(source, Path(staging), key, manager, log)
+        video = _download_youtube(source, Path(staging), key, manager, log, progress=progress)
         destination = downloads / video.name
         video.replace(destination)
         return destination
 
 
 def _download_youtube(source: str, target: Path, key: str, manager: ProcessManager,
-                      log: Callable[[str], None]) -> Path:
+                      log: Callable[[str], None], *, progress: Callable[[DownloadProgress], None] | None = None) -> Path:
     template = str(target / f"{key}.%(ext)s")
     receipt = target / "downloaded-path.txt"
     downloader = bundled_binary("yt-dlp")
@@ -76,6 +134,13 @@ def _download_youtube(source: str, target: Path, key: str, manager: ProcessManag
     if getattr(sys, "frozen", False) and downloader is None:
         raise FileNotFoundError("The bundled yt-dlp executable is missing. Restore the complete application folder.")
     command = [str(downloader)] if downloader else [str(python), "-m", "yt_dlp"]
+    deno = bundled_binary("deno")
+    if deno:
+        command += ["--js-runtimes", f"deno:{deno}"]
+    on_output = log
+    if progress is not None:
+        command += ["--progress", "--progress-delta", "0.2", "--progress-template", _TRANSFER_TEMPLATE]
+        on_output = lambda line: _log_transfer(line, log, progress)
     command += [
         "--no-playlist", "--no-simulate", "--newline", "--restrict-filenames",
         "--cache-dir", str(CACHE_DIR / "yt-dlp"),
@@ -84,10 +149,7 @@ def _download_youtube(source: str, target: Path, key: str, manager: ProcessManag
         "bv*[height<=1080]+ba/b[height<=1080]/best", "-o", template,
         "--print-to-file", "after_move:filepath", str(receipt), source,
     ]
-    deno = bundled_binary("deno")
-    if deno:
-        command[1:1] = ["--js-runtimes", f"deno:{deno}"]
-    manager.run(command, on_output=log, output_tail=40)
+    manager.run(command, on_output=on_output, output_tail=40)
     if receipt.is_file():
         paths = receipt.read_text(encoding="utf-8").splitlines()
         receipt.unlink()
