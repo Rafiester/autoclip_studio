@@ -44,12 +44,12 @@ def test_gemini_poll_cancellation_deletes_uploaded_file(monkeypatch, tmp_path):
 
     def post(url, **kwargs):
         if "data" not in kwargs:
-            return SimpleNamespace(headers={"X-Goog-Upload-URL": "https://upload.invalid"}, raise_for_status=lambda: None)
+            return SimpleNamespace(headers={"X-Goog-Upload-URL": "https://upload.invalid"}, status_code=200)
         assert kwargs["data"].read() == b"sample"
         event.set()
         return SimpleNamespace(
             json=lambda: {"file": {"name": "files/example", "state": "PROCESSING"}},
-            raise_for_status=lambda: None,
+            status_code=200,
         )
 
     monkeypatch.setattr("autoclip_studio.providers.requests.post", post)

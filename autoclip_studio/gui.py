@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import sys
 from dataclasses import asdict
 from pathlib import Path
+from threading import Event
 from typing import Callable
 
 from PySide6.QtCore import QSignalBlocker, QThread, Qt, QUrl, Signal, Slot
@@ -12,19 +14,21 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
+    QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
     QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .captions import TEMPLATES
 from .config import SettingsStore
 from .database import Database
-from .diagnostics import log_error
+from .diagnostics import LOG, SUCCESS, log_error, redact
+from .log_view import LogView
 from .media import is_youtube_url
 from .models import ProjectOptions
 from .paths import APP_ROOT, OUTPUT_DIR, ensure_directories
 from .pipeline import Pipeline
-from .providers import AIProvider
+from .process import CancelledError
+from .providers import AIProvider, ProviderError
 from .style import STYLESHEET
 from .worker import PipelineWorker
 
@@ -32,6 +36,7 @@ from .worker import PipelineWorker
 class FunctionThread(QThread):
     succeeded = Signal(object)
     failed = Signal(str)
+    warning = Signal(str)
 
     def __init__(self, function: Callable[[], object], parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -40,9 +45,13 @@ class FunctionThread(QThread):
     def run(self) -> None:
         try:
             self.succeeded.emit(self.function())
+        except CancelledError:
+            return
+        except ProviderError as error:
+            self.failed.emit(redact(str(error)))
         except Exception as error:
             log_error("Provider settings operation failed", error)
-            self.failed.emit(str(error))
+            self.failed.emit(f"Provider operation failed ({type(error).__name__}).")
 
 
 class MainWindow(QMainWindow):
@@ -57,6 +66,7 @@ class MainWindow(QMainWindow):
         self.worker_thread: QThread | None = None
         self.worker: PipelineWorker | None = None
         self.utility_threads: list[FunctionThread] = []
+        self.utility_cancel = Event()
         self.utility_done: Callable[[object], None] | None = None
         self.project_rows: list[dict] | None = None
         self.clip_rows: list[dict] | None = None
@@ -237,6 +247,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(status_card)
         row = QHBoxLayout()
         self.queue_status = self._wrapping_label("Idle")
+        self.queue_status.setTextFormat(Qt.TextFormat.PlainText)
         self.cancel_button = QPushButton("Cancel processing", objectName="danger")
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(self.cancel_processing)
@@ -244,16 +255,47 @@ class MainWindow(QMainWindow):
         self.progress_bar = QProgressBar(); self.progress_bar.setRange(0, 100)
         self.progress_bar.setAccessibleName("Project progress")
         self.progress_text = QLabel("0%")
-        self.live_logs = QPlainTextEdit(); self.live_logs.setReadOnly(True); self.live_logs.setMaximumBlockCount(500)
+        self.live_logs = LogView()
+        log_actions = QHBoxLayout()
+        copy_logs = QPushButton("Copy Logs")
+        clear_logs = QPushButton("Clear Logs")
+        export_logs = QPushButton("Export Logs")
+        copy_logs.clicked.connect(self.live_logs.copy_all)
+        clear_logs.clicked.connect(self.live_logs.clear)
+        export_logs.clicked.connect(self.export_logs)
+        for button in (copy_logs, clear_logs, export_logs):
+            log_actions.addWidget(button)
+        log_actions.addStretch()
         progress_row = QHBoxLayout()
         progress_row.addWidget(self.progress_bar, 1)
         progress_row.addWidget(self.progress_text)
         layout.addLayout(row); layout.addLayout(progress_row); layout.addWidget(self.live_logs)
+        layout.addLayout(log_actions)
         page.addWidget(status_card, 2)
-        page.addWidget(QLabel("Project history"))
+        history = QHBoxLayout()
+        history.addWidget(QLabel("Project history"), 1)
+        self.retry_analysis_button = QPushButton("Retry AI Analysis")
+        self.retry_analysis_button.setEnabled(False)
+        self.retry_analysis_button.clicked.connect(self.retry_analysis)
+        history.addWidget(self.retry_analysis_button)
+        page.addLayout(history)
         self.queue_table = self._table(["Source", "Status", "Progress", "Error"])
+        self.queue_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.queue_table.itemSelectionChanged.connect(self._update_retry_button)
         page.addWidget(self.queue_table, 1)
         return outer
+
+    def export_logs(self) -> None:
+        filename, _ = QFileDialog.getSaveFileName(self, "Export logs", "autoclip-logs.txt", "Text files (*.txt)")
+        if not filename:
+            return
+        path = Path(filename)
+        if not path.suffix:
+            path = path.with_suffix(".txt")
+        try:
+            path.write_text(self.live_logs.log_text(), encoding="utf-8")
+        except OSError as error:
+            QMessageBox.warning(self, "Log export failed", redact(str(error)))
 
     def _clips_page(self) -> QWidget:
         outer, page = self._page("Generated Clips", "Preview, inspect, and open finished exports")
@@ -313,11 +355,17 @@ class MainWindow(QMainWindow):
         self.api_key_input = QLineEdit(); self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.base_url_input = QLineEdit()
         self.model_input = QComboBox(); self.model_input.setEditable(True)
+        self.fallback_models_input = QLineEdit()
+        self.fallback_models_input.setPlaceholderText("Comma-separated model IDs, in retry order")
+        self.auto_fallback_check = QCheckBox("Automatically try fallback models")
+        self.auto_fallback_check.toggled.connect(self.fallback_models_input.setEnabled)
         self.settings_provider.currentTextChanged.connect(self.load_provider_form)
         form.addRow("Provider", self.settings_provider)
         form.addRow("API key", self.api_key_input)
         form.addRow("Base URL", self.base_url_input)
         form.addRow("Model", self.model_input)
+        form.addRow("Fallback models", self.fallback_models_input)
+        form.addRow(self.auto_fallback_check)
         buttons = QGridLayout()
         save = QPushButton("Save settings", objectName="primary"); save.clicked.connect(self.save_provider)
         test = QPushButton("Test connection"); test.clicked.connect(self.test_provider)
@@ -340,6 +388,7 @@ class MainWindow(QMainWindow):
         local_form.addRow(save_local)
         page.addWidget(local)
         self.connection_status = self._wrapping_label("", object_name="muted")
+        self.connection_status.setTextFormat(Qt.TextFormat.PlainText)
         page.addWidget(self.connection_status)
         page.addStretch()
         self.load_provider_form(self.settings_provider.currentText())
@@ -375,7 +424,7 @@ class MainWindow(QMainWindow):
         if path: self.output_input.setText(path)
 
     def generate(self) -> None:
-        if self.worker_thread and self.worker_thread.isRunning():
+        if self.worker_thread:
             QMessageBox.information(self, "Processing active", "Wait for or cancel the current project first.")
             return
         source = self.source_input.text().strip()
@@ -396,21 +445,48 @@ class MainWindow(QMainWindow):
             whisper_device=self.whisper_device.currentText(), output_dir=self.settings.data.get("output_dir", ""),
         )
         project_id = self.database.create_project(source, asdict(options))
+        self._start_worker(project_id, options)
+
+    def _start_worker(self, project_id: str, options: ProjectOptions, *, resume_analysis: bool = False) -> None:
         self.pipeline.manager.reset()
         self.worker_thread = QThread(self)
-        self.worker = PipelineWorker(self.pipeline, project_id, options)
+        self.worker = PipelineWorker(self.pipeline, project_id, options, resume_analysis=resume_analysis)
         self.worker.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.on_progress)
+        self.worker.warning.connect(self._provider_warning)
         self.worker.completed.connect(self.on_completed)
         self.worker.failed.connect(self.on_failed)
         self.worker.finished.connect(self.worker_thread.quit)
         self.worker.finished.connect(self.worker.deleteLater)
         self.worker_thread.finished.connect(self._worker_finished)
         self.generate_button.setEnabled(False); self.cancel_button.setEnabled(True)
-        self.live_logs.clear(); self.progress_bar.setValue(0)
-        self.progress_text.setText("0%")
+        self.retry_analysis_button.setEnabled(False)
+        progress = 40 if resume_analysis else 0
+        self.progress_bar.setValue(progress)
+        self.progress_text.setText(f"{progress}%")
         self.worker_thread.start(); self.show_page(2)
+
+    def _selected_project(self) -> dict | None:
+        rows = self.queue_table.selectionModel().selectedRows()
+        return rows[0].data(Qt.ItemDataRole.UserRole) if rows else None
+
+    def _update_retry_button(self) -> None:
+        project = self._selected_project()
+        self.retry_analysis_button.setEnabled(
+            bool(project and project["status"] == "analysis_failed" and not self.worker_thread and not self.closing)
+        )
+
+    def retry_analysis(self) -> None:
+        project = self._selected_project()
+        if not project or self.worker_thread or project["status"] != "analysis_failed":
+            return
+        try:
+            options = ProjectOptions(**json.loads(project["options"]))
+        except (ValueError, TypeError):
+            QMessageBox.warning(self, "Cannot retry AI analysis", "This project's saved settings could not be read.")
+            return
+        self._start_worker(project["id"], options, resume_analysis=True)
 
     def cancel_processing(self) -> None:
         if self.worker and self.cancel_button.isEnabled():
@@ -424,39 +500,57 @@ class MainWindow(QMainWindow):
         if value:
             self.progress_bar.setValue(value)
             self.progress_text.setText(f"{value}%")
-        self.queue_status.setText(message)
-        self.live_logs.appendPlainText(message)
+        self.queue_status.setText(redact(message).partition("\n")[0])
+        self.live_logs.add_entry("INFO", message)
         self.metric_active.findChild(QLabel, "metricValue").setText(f"{value}%")
 
     def on_completed(self, _project_id: str, count: int) -> None:
         self.queue_status.setText(f"Completed {count} clips")
-        self.live_logs.appendPlainText("All outputs passed MP4 validation.")
+        self.live_logs.add_entry("SUCCESS", "All outputs passed MP4 validation.")
         self.refresh_all()
 
-    def on_failed(self, _project_id: str, message: str) -> None:
-        self.queue_status.setText(message)
-        self.live_logs.appendPlainText(message)
-        state = "Cancelled" if message == "Processing cancelled" else "Error"
-        self.metric_active.findChild(QLabel, "metricValue").setText(state)
-        if message != "Processing cancelled" and not self.closing:
-            QMessageBox.critical(self, "Processing failed", message)
+    def on_failed(self, project_id: str, message: str) -> None:
         self.refresh_all()
+        cancelled = message == "Processing cancelled"
+        retryable = False
+        for index, project in enumerate(self.project_rows or []):
+            if project["id"] == project_id and project["status"] == "analysis_failed":
+                self.queue_table.selectRow(index)
+                retryable = True
+                break
+        summary = message.partition("\n")[0]
+        self.queue_status.setText(f"{summary}\nSelect Retry AI Analysis to continue." if retryable else summary)
+        self.live_logs.add_entry("WARNING" if cancelled else "ERROR", message)
+        state = "Cancelled" if cancelled else "Error"
+        self.metric_active.findChild(QLabel, "metricValue").setText(state)
+        if not cancelled and not retryable and not self.closing:
+            QMessageBox.critical(self, "Processing failed", message)
 
     def _worker_finished(self) -> None:
         self.generate_button.setEnabled(True); self.cancel_button.setEnabled(False)
         if self.worker_thread:
             self.worker_thread.deleteLater()
         self.worker_thread = None; self.worker = None
+        self._update_retry_button()
         self.metric_active.findChild(QLabel, "metricValue").setText("Idle")
         self._finish_close()
 
     def refresh_all(self) -> None:
         projects, clips = self.database.projects(), self.database.clips()
         if projects != self.project_rows:
+            selected_project = self._selected_project()
             self._fill_projects(self.recent_table, projects[:8], compact=True)
-            self._fill_projects(self.queue_table, projects, compact=False)
+            with QSignalBlocker(self.queue_table):
+                self.queue_table.clearSelection()
+                self._fill_projects(self.queue_table, projects, compact=False)
+                if selected_project:
+                    for row, item in enumerate(projects):
+                        if item["id"] == selected_project["id"]:
+                            self.queue_table.selectRow(row)
+                            break
             self.metric_projects.findChild(QLabel, "metricValue").setText(str(self.database.project_count()))
             self.project_rows = projects
+            self._update_retry_button()
         if clips == self.clip_rows:
             return
         selected = self._selected_clip()
@@ -480,9 +574,14 @@ class MainWindow(QMainWindow):
         table.setRowCount(len(projects))
         for row, project in enumerate(projects):
             source = Path(project["source"]).name if not is_youtube_url(project["source"]) else project["source"]
-            values = ([source, project["status"], f"{project['progress']}%", project["created_at"][:16].replace("T", " ")]
-                      if compact else [source, project["status"], f"{project['progress']}%", project["error"]])
-            for column, value in enumerate(values): table.setItem(row, column, QTableWidgetItem(str(value)))
+            status = "AI analysis failed" if project["status"] == "analysis_failed" else project["status"]
+            detail = (project["created_at"][:16].replace("T", " ") if compact else redact(project["error"]))
+            values = [redact(source), status, f"{project['progress']}%", detail.partition("\n")[0]]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if column == 0 and not compact:
+                    item.setData(Qt.ItemDataRole.UserRole, project)
+                table.setItem(row, column, item)
 
     def preview_selected(self) -> None:
         clip = self._selected_clip()
@@ -540,24 +639,43 @@ class MainWindow(QMainWindow):
         self.api_key_input.setText(self.settings.api_key(name))
         self.base_url_input.setText(values.get("base_url", ""))
         self.model_input.clear(); self.model_input.addItem(values.get("model", ""))
+        self.fallback_models_input.setText(", ".join(values.get("fallback_models", [])))
+        enabled = bool(values.get("auto_fallback"))
+        self.auto_fallback_check.setChecked(enabled)
+        self.fallback_models_input.setEnabled(enabled)
+
+    def _fallback_models(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(
+            model.strip() for model in self.fallback_models_input.text().split(",") if model.strip()
+        ))
 
     def save_provider(self) -> None:
         name = self.settings_provider.currentText()
         self.settings.data["active_provider"] = name
-        self.settings.data["providers"][name] = {"provider": name, "base_url": self.base_url_input.text().strip(), "model": self.model_input.currentText().strip()}
+        self.settings.data["providers"][name] = {
+            "provider": name, "base_url": self.base_url_input.text().strip(),
+            "model": self.model_input.currentText().strip(),
+            "fallback_models": list(self._fallback_models()),
+            "auto_fallback": self.auto_fallback_check.isChecked(),
+        }
         try:
             self.settings.set_api_key(name, self.api_key_input.text().strip()); self.settings.save()
         except Exception as error:
-            QMessageBox.critical(self, "Credential error", str(error)); return
+            QMessageBox.critical(self, "Credential error", redact(str(error), self.api_key_input.text())); return
         self.project_provider.setCurrentText(name); self._project_provider_changed(name)
         self.connection_status.setText("Settings saved securely.")
 
     def _form_provider(self) -> AIProvider:
-        return AIProvider(self.settings_provider.currentText(), self.api_key_input.text().strip(), self.base_url_input.text().strip(), self.model_input.currentText().strip())
+        return AIProvider(
+            self.settings_provider.currentText(), self.api_key_input.text().strip(),
+            self.base_url_input.text().strip(), self.model_input.currentText().strip(),
+            fallback_models=self._fallback_models(), auto_fallback=self.auto_fallback_check.isChecked(),
+            cancel_event=self.utility_cancel,
+        )
 
     def test_provider(self) -> None:
         provider = self._form_provider(); self.connection_status.setText("Testing connection…")
-        self._run_utility(provider.test, lambda result: self.connection_status.setText(f"Connected: {result}"))
+        self._run_utility(provider, provider.test, lambda result: self.connection_status.setText(f"Connected: {result}"))
 
     def load_models(self) -> None:
         provider = self._form_provider(); self.connection_status.setText("Loading models…")
@@ -565,28 +683,49 @@ class MainWindow(QMainWindow):
             values = list(models); current = self.model_input.currentText(); self.model_input.clear(); self.model_input.addItems(values)
             if current in values: self.model_input.setCurrentText(current)
             self.connection_status.setText(f"Loaded {len(values)} models.")
-        self._run_utility(provider.list_models, done)
+        self._run_utility(provider, provider.list_models, done)
 
-    def _run_utility(self, function: Callable[[], object], done: Callable[[object], None]) -> None:
+    def _run_utility(self, provider: AIProvider, function: Callable[[], object],
+                     done: Callable[[object], None]) -> None:
         if self.utility_threads:
             return
         self.provider_group.setEnabled(False)
         self.utility_done = done
+        self.utility_cancel.clear()
         thread = FunctionThread(function, self); self.utility_threads.append(thread)
+        provider.notify = thread.warning.emit
         thread.succeeded.connect(self._utility_succeeded)
         thread.failed.connect(self._utility_failed)
+        thread.warning.connect(self._utility_warning)
         thread.finished.connect(self._utility_finished)
         thread.start()
+
+    @Slot(str)
+    def _provider_warning(self, message: str) -> None:
+        self.live_logs.add_entry("WARNING", message)
+        if not self.pipeline.manager.cancel_event.is_set():
+            self.queue_status.setText(message.rpartition("\n")[2])
+
+    @Slot(str)
+    def _utility_warning(self, message: str) -> None:
+        self.live_logs.add_entry("WARNING", message)
+        if not self.closing:
+            self.connection_status.setText(message.rpartition("\n")[2])
 
     @Slot(object)
     def _utility_succeeded(self, result: object) -> None:
         if self.utility_done and not self.closing:
             self.utility_done(result)
+            self.live_logs.add_entry("SUCCESS", "AI provider operation completed.")
+            LOG.log(SUCCESS, "AI provider operation completed")
 
     @Slot(str)
     def _utility_failed(self, message: str) -> None:
+        self.live_logs.add_entry("ERROR", message)
+        LOG.error("AI provider operation failed\n%s", message)
         if not self.closing:
-            self.connection_status.setText(f"Error: {message}")
+            summary = message.partition("\n")[0]
+            self.connection_status.setText(f"{summary}\nSee Processing Queue for details.")
 
     def _utility_finished(self) -> None:
         thread = self.sender()
@@ -610,6 +749,7 @@ class MainWindow(QMainWindow):
             self.closing = True
             self.player.stop()
             self.pipeline.manager.cancel()
+            self.utility_cancel.set()
         if self.worker_thread or self.utility_threads:
             self.setEnabled(False)
             self.setWindowTitle("AutoClip Studio — Shutting down…")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,8 @@ class ProviderSettings:
     provider: str = "gemini"
     base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     model: str = "gemini-2.5-flash"
+    fallback_models: list[str] = field(default_factory=list)
+    auto_fallback: bool = False
 
 
 DEFAULTS: dict[str, Any] = {
@@ -61,7 +63,7 @@ class SettingsStore:
         temp.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
         os.replace(temp, self.path)
 
-    def provider(self, name: str | None = None) -> dict[str, str]:
+    def provider(self, name: str | None = None) -> dict[str, Any]:
         selected = name or self.data["active_provider"]
         return dict(self.data["providers"].get(selected, {}))
 

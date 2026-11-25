@@ -64,6 +64,14 @@ class Database:
         with self._lock, closing(self._connect()) as db, db:
             db.execute(f"UPDATE projects SET {', '.join(changes)} WHERE id = ?", values)
 
+    def claim_analysis_retry(self, project_id: str) -> bool:
+        with self._lock, closing(self._connect()) as db, db:
+            return db.execute(
+                "UPDATE projects SET status = 'processing', updated_at = ?, error = '' "
+                "WHERE id = ? AND status = 'analysis_failed'",
+                (datetime.now(timezone.utc).isoformat(), project_id),
+            ).rowcount == 1
+
     def add_clip(self, project_id: str, path: str, title: str, hook: str,
                  description: str, score: int, duration: float) -> str:
         clip_id = uuid.uuid4().hex

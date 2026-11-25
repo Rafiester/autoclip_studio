@@ -9,10 +9,10 @@ from typing import Callable
 
 from .config import SettingsStore
 from .database import Database
-from .diagnostics import LOG, log_error
+from .diagnostics import LOG, SUCCESS, log_error, redact
 from .highlights import select_highlights
 from .media import acquire_source
-from .models import ProjectOptions, RenderedClip
+from .models import ProjectOptions, RenderedClip, Transcript
 from .paths import CACHE_DIR, OUTPUT_DIR
 from .process import CancelledError, ProcessManager
 from .providers import AIProvider, ProviderError
@@ -30,30 +30,56 @@ class Pipeline:
         self.settings = settings
         self.manager = manager or ProcessManager()
 
-    def run(self, project_id: str, options: ProjectOptions, progress: Progress) -> list[RenderedClip]:
-        LOG.info("Project %s started", project_id)
-        self.database.update_project(project_id, status="processing", progress=1, error="")
+    def run(self, project_id: str, options: ProjectOptions, progress: Progress, *,
+            resume_analysis: bool = False, warning: Callable[[str], None] | None = None) -> list[RenderedClip]:
+        if resume_analysis:
+            if not self.database.claim_analysis_retry(project_id):
+                raise RuntimeError("This project is no longer waiting for an AI analysis retry.")
+        else:
+            self.database.update_project(project_id, status="processing", progress=1, error="")
+        LOG.info("Project %s %s", project_id, "retrying AI analysis" if resume_analysis else "started")
         job_dir = CACHE_DIR / "jobs" / project_id
-        job_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint = job_dir / "analysis.json"
+        keep_job = False
+        analysis_pending = resume_analysis
         try:
-            self._update(project_id, 3, "Acquiring source video", progress)
-            source = acquire_source(
-                options.source, options.cache_enabled, self.manager, self._logger(progress, 4), job_dir=job_dir,
-            )
-            dimensions = source_dimensions(source, self.manager)
-            self._update(project_id, 12, "Generating timestamped transcript", progress)
-            transcript = transcribe(
-                source, options.whisper_model, options.whisper_device, options.language,
-                options.cache_enabled, self.manager, self._logger(progress, 13),
-            )
+            job_dir.mkdir(parents=True, exist_ok=True)
+            if resume_analysis:
+                source, dimensions, transcript = _load_analysis(checkpoint)
+                progress(40, "Retrying AI analysis with the prepared video and transcript")
+            else:
+                self._update(project_id, 3, "Acquiring source video", progress)
+                source = acquire_source(
+                    options.source, options.cache_enabled, self.manager, self._logger(progress, 4), job_dir=job_dir,
+                )
+                dimensions = source_dimensions(source, self.manager)
+                self._update(project_id, 12, "Generating timestamped transcript", progress)
+                transcript = transcribe(
+                    source, options.whisper_model, options.whisper_device, options.language,
+                    options.cache_enabled, self.manager, self._logger(progress, 13),
+                )
+                self._update(project_id, 40, "Selecting the strongest highlights", progress)
             self.manager.check_cancelled()
-            self._update(project_id, 40, "Selecting the strongest highlights", progress)
-            provider = self._provider(options.provider, options.model)
-            highlights = select_highlights(
-                transcript, options.clip_count, options.min_duration, options.max_duration,
-                provider, self._logger(progress, 42), source, options.multimodal, manager=self.manager,
-            )
+            try:
+                provider = self._provider(options.provider, options.model, warning)
+                if resume_analysis and provider is None:
+                    raise ProviderError("No API key is configured. Save a key in AI Provider Settings, then retry.",
+                                        category="credentials")
+                highlights = select_highlights(
+                    transcript, options.clip_count, options.min_duration, options.max_duration,
+                    provider, self._logger(progress, 40), source, options.multimodal, manager=self.manager,
+                )
+            except ProviderError as error:
+                self.manager.check_cancelled()
+                if not resume_analysis:
+                    _save_analysis(checkpoint, source, dimensions, transcript)
+                keep_job = True
+                message = redact(str(error))
+                self.database.update_project(project_id, status="analysis_failed", progress=40, error=message)
+                LOG.error("Project %s AI analysis failed\n%s", project_id, message)
+                raise
             self.manager.check_cancelled()
+            analysis_pending = False
             if not highlights:
                 raise RuntimeError("No usable highlights were found. Try shorter minimum duration or another video.")
             project_output = self._output_root(options) / project_id
@@ -96,29 +122,38 @@ class Pipeline:
                 pending_manifest.unlink(missing_ok=True)
             self._update(project_id, 100, f"Completed {len(rendered)} clips", progress)
             self.database.update_project(project_id, status="completed", progress=100)
+            LOG.log(SUCCESS, "Project %s completed with %s clips", project_id, len(rendered))
             return rendered
         except CancelledError:
-            self.database.update_project(project_id, status="cancelled", error="Cancelled by user")
-            progress(0, "Processing cancelled")
+            if analysis_pending and checkpoint.exists():
+                keep_job = True
+                self.database.update_project(project_id, status="analysis_failed", error="AI analysis retry cancelled")
+            else:
+                self.database.update_project(project_id, status="cancelled", error="Cancelled by user")
             raise
         except Exception as error:
+            if keep_job:
+                raise
             if self.manager.cancel_event.is_set():
                 self.database.update_project(project_id, status="cancelled", error="Cancelled by user")
-                progress(0, "Processing cancelled")
                 raise CancelledError("Processing cancelled") from error
             log_error(f"Project {project_id} failed", error)
-            self.database.update_project(project_id, status="failed", error=str(error))
-            progress(0, f"Failed: {error}")
+            self.database.update_project(project_id, status="failed", error=redact(str(error)))
             raise
         finally:
-            shutil.rmtree(job_dir, ignore_errors=True)
+            if not keep_job:
+                shutil.rmtree(job_dir, ignore_errors=True)
 
-    def _provider(self, name: str, model: str) -> AIProvider | None:
+    def _provider(self, name: str, model: str, warning: Callable[[str], None] | None) -> AIProvider | None:
         values = self.settings.provider(name)
         key = self.settings.api_key(name)
         if not key:
             return None
-        return AIProvider(name, key, values.get("base_url", ""), model or values.get("model", ""))
+        return AIProvider(
+            name, key, values.get("base_url", ""), model or values.get("model", ""),
+            fallback_models=tuple(values.get("fallback_models", [])), auto_fallback=bool(values.get("auto_fallback")),
+            cancel_event=self.manager.cancel_event, notify=warning,
+        )
 
     def _output_root(self, options: ProjectOptions) -> Path:
         configured = options.output_dir or self.settings.data.get("output_dir")
@@ -140,3 +175,27 @@ class Pipeline:
 
 def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")[:55]
+
+
+def _save_analysis(path: Path, source: Path, dimensions: tuple[int, int], transcript: Transcript) -> None:
+    pending = path.with_suffix(".tmp")
+    try:
+        with pending.open("w", encoding="utf-8") as stream:
+            json.dump({"source": str(source.resolve()), "dimensions": dimensions, "transcript": transcript.to_dict()}, stream)
+        pending.replace(path)
+    finally:
+        pending.unlink(missing_ok=True)
+
+
+def _load_analysis(path: Path) -> tuple[Path, tuple[int, int], Transcript]:
+    try:
+        with path.open(encoding="utf-8") as stream:
+            state = json.load(stream)
+        source = Path(state["source"])
+        width, height = state["dimensions"]
+        transcript = Transcript.from_dict(state["transcript"])
+        if source.is_file() and transcript.segments and width > 0 and height > 0:
+            return source, (width, height), transcript
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    raise RuntimeError("The prepared video or transcript is unavailable. Start a new project to prepare it again.")
