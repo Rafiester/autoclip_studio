@@ -28,3 +28,7 @@ For work focused on FFmpeg, encoders, or GPU compatibility, inspect the bundled 
 - Make incremental changes. Preserve existing user workflows, CPU fallbacks, clip and caption behavior, exported data, settings, SQLite compatibility, Windows Credential Manager integration, and owned-process cleanup unless the task explicitly changes a behavior.
 - For optimization work, present a prioritized plan before editing application source. Use comparable inputs, record cold and warm state, and measure the affected stages. For hardware work, distinguish advertised support from a successful runtime test and check the CPU path.
 - Use `.\.venv\Scripts\python.exe -m pytest` for the unit suite and `.\.venv\Scripts\python.exe -m tests.integration_smoke` for media changes. Check the relevant native window or packaged entry point when changing UI, startup, shutdown, or dependencies.
+
+## Commit completed changes
+
+- After validating each task that changes repository files, create a local Git commit for the task before reporting completion. Stage only the task's changes unless the user asks to include other work. Include the commit hash in the handoff. Push only when the user requests it.

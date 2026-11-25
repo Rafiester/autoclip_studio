@@ -1,5 +1,5 @@
 import os
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 from threading import Event
 from time import monotonic
@@ -174,14 +174,22 @@ def test_provider_settings_persist_and_background_retry_keeps_gui_responsive(app
     assert starts == [True]
 
 
-def test_retry_button_restores_saved_project_options(app, monkeypatch, tmp_path):
+def test_retry_button_switches_to_saved_custom_provider_and_keeps_clip_options(app, monkeypatch, tmp_path):
     db = Database(tmp_path / "test.db")
+    settings = SettingsStore(tmp_path / "settings.json")
+    monkeypatch.setattr(settings, "api_key", lambda *_args: "")
+    monkeypatch.setattr(settings, "set_api_key", lambda *_args: None)
+    monkeypatch.setattr("autoclip_studio.gui.SettingsStore", lambda: settings)
     monkeypatch.setattr("autoclip_studio.gui.Database", lambda: db)
-    monkeypatch.setattr("autoclip_studio.config.SettingsStore.api_key", lambda *_args: "")
-    options = ProjectOptions("https://www.youtube.com/watch?v=example", clip_count=2, model="project-model")
+    options = ProjectOptions("https://www.youtube.com/watch?v=example", clip_count=2,
+                             model="gemini-model", multimodal=True)
     project_id = db.create_project(options.source, asdict(options))
     db.update_project(project_id, status="analysis_failed", progress=40, error="Quota exhausted")
     window = MainWindow()
+    window.settings_provider.setCurrentText("custom")
+    window.base_url_input.setText("https://custom.invalid/v1")
+    window.model_input.setCurrentText("custom-model")
+    window.save_provider()
     dispatched = []
     monkeypatch.setattr(window, "_start_worker", lambda *args, **kwargs: dispatched.append((args, kwargs)))
     window.show_page(2)
@@ -189,5 +197,6 @@ def test_retry_button_restores_saved_project_options(app, monkeypatch, tmp_path)
     window.queue_table.selectRow(0)
     assert window.retry_analysis_button.isEnabled()
     window.retry_analysis_button.click()
-    assert dispatched == [((project_id, options), {"resume_analysis": True})]
+    switched = replace(options, provider="custom", model="custom-model", multimodal=False)
+    assert dispatched == [((project_id, switched), {"resume_analysis": True})]
     window.close()

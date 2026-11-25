@@ -33,7 +33,7 @@ class Pipeline:
     def run(self, project_id: str, options: ProjectOptions, progress: Progress, *,
             resume_analysis: bool = False, warning: Callable[[str], None] | None = None) -> list[RenderedClip]:
         if resume_analysis:
-            if not self.database.claim_analysis_retry(project_id):
+            if not self.database.claim_analysis_retry(project_id, asdict(options)):
                 raise RuntimeError("This project is no longer waiting for an AI analysis retry.")
         else:
             self.database.update_project(project_id, status="processing", progress=1, error="")
@@ -46,7 +46,6 @@ class Pipeline:
             job_dir.mkdir(parents=True, exist_ok=True)
             if resume_analysis:
                 source, dimensions, transcript = _load_analysis(checkpoint)
-                progress(40, "Retrying AI analysis with the prepared video and transcript")
             else:
                 self._update(project_id, 3, "Acquiring source video", progress)
                 source = acquire_source(
@@ -62,9 +61,14 @@ class Pipeline:
             self.manager.check_cancelled()
             try:
                 provider = self._provider(options.provider, options.model, warning)
-                if resume_analysis and provider is None:
-                    raise ProviderError("No API key is configured. Save a key in AI Provider Settings, then retry.",
-                                        category="credentials")
+                if resume_analysis:
+                    if provider is None:
+                        raise ProviderError("No API key is configured. Save a key in AI Provider Settings, then retry.",
+                                            category="credentials")
+                    progress(40, redact(
+                        f"Retrying AI analysis with {provider.kind} model {provider.model} "
+                        "using the prepared video and transcript", provider.api_key,
+                    ))
                 highlights = select_highlights(
                     transcript, options.clip_count, options.min_duration, options.max_duration,
                     provider, self._logger(progress, 40), source, options.multimodal, manager=self.manager,

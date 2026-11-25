@@ -49,7 +49,7 @@ Gemini's optional multimodal checkbox uploads the source through the Gemini File
 
 Provider requests retry temporary gateway and overload errors up to five attempts per request and model. Temporary rate limits follow the provider's Retry-After header when supplied. Zero allocation and exhausted billing quota stop retries for that model. Under **AI Provider Settings**, enter comma-separated fallback model IDs for the selected provider and enable **Automatically try fallback models** to use them in order.
 
-When provider analysis fails, the project remains in **Processing Queue** with its progress and prepared transcript. Select that project and click **Retry AI Analysis** after resolving the provider issue. The retry uses the same project options and current provider credentials and fallback settings. It reuses the prepared video and transcript, including when regular caching was disabled.
+When provider analysis fails, the project remains in **Processing Queue** with its progress and prepared transcript. To switch providers, choose the provider and model in **AI Provider Settings** and click **Save settings**. Select the failed project and click **Retry AI Analysis**. The retry uses the active saved provider, model, credentials, and fallbacks while reusing the prepared video, transcript, and clip settings. Providers other than Gemini use transcript analysis.
 
 The queue log supports mouse selection, Ctrl+A, Ctrl+C, and a right-click menu. **Copy Logs** copies all entries in the panel, **Export Logs** saves them as a TXT file, and **Clear Logs** clears the panel. Entries include timestamps and severity. Provider diagnostics are redacted before display and storage.
 

@@ -64,12 +64,12 @@ class Database:
         with self._lock, closing(self._connect()) as db, db:
             db.execute(f"UPDATE projects SET {', '.join(changes)} WHERE id = ?", values)
 
-    def claim_analysis_retry(self, project_id: str) -> bool:
+    def claim_analysis_retry(self, project_id: str, options: dict[str, Any]) -> bool:
         with self._lock, closing(self._connect()) as db, db:
             return db.execute(
-                "UPDATE projects SET status = 'processing', updated_at = ?, error = '' "
+                "UPDATE projects SET status = 'processing', updated_at = ?, error = '', options = ? "
                 "WHERE id = ? AND status = 'analysis_failed'",
-                (datetime.now(timezone.utc).isoformat(), project_id),
+                (datetime.now(timezone.utc).isoformat(), json.dumps(options), project_id),
             ).rowcount == 1
 
     def add_clip(self, project_id: str, path: str, title: str, hook: str,

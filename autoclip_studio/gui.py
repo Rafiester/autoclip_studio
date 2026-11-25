@@ -486,6 +486,9 @@ class MainWindow(QMainWindow):
         except (ValueError, TypeError):
             QMessageBox.warning(self, "Cannot retry AI analysis", "This project's saved settings could not be read.")
             return
+        options.provider = self.settings.data["active_provider"]
+        options.model = self.settings.provider(options.provider).get("model", "")
+        options.multimodal = options.multimodal and options.provider == "gemini"
         self._start_worker(project["id"], options, resume_analysis=True)
 
     def cancel_processing(self) -> None:

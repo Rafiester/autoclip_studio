@@ -1,5 +1,5 @@
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from threading import Event
@@ -169,10 +169,11 @@ def test_gemini_fallback_reuses_the_uploaded_video(monkeypatch, tmp_path, delays
 
 def test_ai_retry_resumes_from_disk_with_cache_disabled(monkeypatch, tmp_path):
     monkeypatch.setattr("autoclip_studio.pipeline.CACHE_DIR", tmp_path / "cache")
-    options = ProjectOptions(source="https://www.youtube.com/watch?v=example", provider="openai",
+    options = ProjectOptions(source="https://www.youtube.com/watch?v=example", provider="gemini",
                              model="primary", cache_enabled=False, output_dir=str(tmp_path / "exports"))
     db = Database(tmp_path / "projects.db")
     settings = SettingsStore(tmp_path / "settings.json")
+    settings.data["providers"]["custom"]["base_url"] = "https://custom.invalid/v1"
     monkeypatch.setattr(settings, "api_key", lambda _provider: "private-value")
     project_id = db.create_project(options.source, asdict(options))
     calls = []
@@ -202,7 +203,13 @@ def test_ai_retry_resumes_from_disk_with_cache_disabled(monkeypatch, tmp_path):
     monkeypatch.setattr("autoclip_studio.pipeline.source_dimensions", lambda *_args: (1280, 720))
     monkeypatch.setattr("autoclip_studio.pipeline.transcribe", transcribe)
     monkeypatch.setattr("autoclip_studio.pipeline.render_clip", render)
-    monkeypatch.setattr(requests, "post", lambda *_args, **_kwargs: next(replies))
+    requests_sent = []
+
+    def post(url, **kwargs):
+        requests_sent.append((url, kwargs["json"].get("model")))
+        return next(replies)
+
+    monkeypatch.setattr(requests, "post", post)
     progress = []
     report = lambda value, _message: progress.append(value)
 
@@ -217,8 +224,14 @@ def test_ai_retry_resumes_from_disk_with_cache_disabled(monkeypatch, tmp_path):
     with pytest.raises(ProviderError):
         Pipeline(db, settings).run(project_id, options, report, resume_analysis=True)
     assert db.projects()[0]["status"] == "analysis_failed"
-    assert len(Pipeline(db, settings).run(project_id, options, report, resume_analysis=True)) == 1
+    switched = replace(options, provider="custom", model="custom-model")
+    clips = Pipeline(db, settings).run(project_id, switched, report, resume_analysis=True)
+    assert len(clips) == 1
+    assert [url.rsplit("/", 1)[-1] for url, _model in requests_sent[:2]] == ["primary:generateContent"] * 2
+    assert requests_sent[-1] == ("https://custom.invalid/v1/chat/completions", "custom-model")
     assert calls == ["download", "transcript"]
     assert db.projects()[0]["status"] == "completed"
+    assert json.loads(db.projects()[0]["options"]) == asdict(switched)
+    assert json.loads((clips[0].path.parent / "project.json").read_text(encoding="utf-8"))["options"] == asdict(switched)
     assert len(db.projects()) == 1
     assert not job.exists()
