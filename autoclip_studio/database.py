@@ -38,9 +38,23 @@ class Database:
                     id TEXT PRIMARY KEY, project_id TEXT NOT NULL, path TEXT NOT NULL,
                     title TEXT NOT NULL, hook TEXT NOT NULL, description TEXT NOT NULL,
                     score INTEGER NOT NULL, duration REAL NOT NULL, created_at TEXT NOT NULL,
+                    thumbnail_path TEXT NOT NULL DEFAULT '',
+                    thumbnail_raw_path TEXT NOT NULL DEFAULT '',
+                    thumbnail_timestamp REAL,
+                    thumbnail_cache_key TEXT NOT NULL DEFAULT '',
                     FOREIGN KEY(project_id) REFERENCES projects(id)
                 );
             """)
+            existing = {row["name"] for row in db.execute("PRAGMA table_info(clips)")}
+            migrations = (
+                ("thumbnail_path", "TEXT NOT NULL DEFAULT ''"),
+                ("thumbnail_raw_path", "TEXT NOT NULL DEFAULT ''"),
+                ("thumbnail_timestamp", "REAL"),
+                ("thumbnail_cache_key", "TEXT NOT NULL DEFAULT ''"),
+            )
+            for column, definition in migrations:
+                if column not in existing:
+                    db.execute(f"ALTER TABLE clips ADD COLUMN {column} {definition}")
 
     def create_project(self, source: str, options: dict[str, Any]) -> str:
         project_id = uuid.uuid4().hex
@@ -73,15 +87,38 @@ class Database:
             ).rowcount == 1
 
     def add_clip(self, project_id: str, path: str, title: str, hook: str,
-                 description: str, score: int, duration: float) -> str:
+                 description: str, score: int, duration: float, *,
+                 thumbnail_path: str = "", thumbnail_raw_path: str = "",
+                 thumbnail_timestamp: float | None = None,
+                 thumbnail_cache_key: str = "") -> str:
         clip_id = uuid.uuid4().hex
         with self._lock, closing(self._connect()) as db, db:
             db.execute(
-                "INSERT INTO clips VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO clips (id, project_id, path, title, hook, description, score, duration, created_at, "
+                "thumbnail_path, thumbnail_raw_path, thumbnail_timestamp, thumbnail_cache_key) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (clip_id, project_id, path, title, hook, description, score, duration,
-                 datetime.now(timezone.utc).isoformat()),
+                 datetime.now(timezone.utc).isoformat(), thumbnail_path, thumbnail_raw_path,
+                 thumbnail_timestamp, thumbnail_cache_key),
             )
         return clip_id
+
+    def update_clip_thumbnail(self, clip_id: str, thumbnail_path: str, thumbnail_raw_path: str,
+                              thumbnail_timestamp: float | None, thumbnail_cache_key: str) -> None:
+        with self._lock, closing(self._connect()) as db, db:
+            db.execute(
+                "UPDATE clips SET thumbnail_path = ?, thumbnail_raw_path = ?, "
+                "thumbnail_timestamp = ?, thumbnail_cache_key = ? WHERE id = ?",
+                (thumbnail_path, thumbnail_raw_path, thumbnail_timestamp, thumbnail_cache_key, clip_id),
+            )
+
+    def delete_clip(self, clip_id: str) -> dict[str, Any] | None:
+        with self._lock, closing(self._connect()) as db, db:
+            row = db.execute("SELECT * FROM clips WHERE id = ?", (clip_id,)).fetchone()
+            if row is None:
+                return None
+            db.execute("DELETE FROM clips WHERE id = ?", (clip_id,))
+            return dict(row)
 
     def projects(self, limit: int = 100) -> list[dict[str, Any]]:
         with closing(self._connect()) as db:

@@ -18,6 +18,7 @@ from .performance import HardwareMonitor, resolve_profile_limits
 from .process import CancelledError, ProcessManager
 from .providers import AIProvider, ProviderError
 from .rendering import render_clip, source_dimensions
+from .thumbnails import generate_clip_thumbnail
 from .transcription import SpeechProgress, export_transcript, transcribe
 
 
@@ -132,9 +133,24 @@ class Pipeline:
                 )
                 rendered_clip = RenderedClip(output, highlight, duration)
                 rendered.append(rendered_clip)
+                thumb_path = thumb_raw = thumb_key = ""
+                thumb_ts: float | None = None
+                try:
+                    thumb = generate_clip_thumbnail(
+                        output, project_output / "thumbnails",
+                        title=highlight.title, profile=limits.profile,
+                    )
+                    thumb_path = str(thumb.preview_path)
+                    thumb_raw = str(thumb.raw_path)
+                    thumb_ts = thumb.timestamp
+                    thumb_key = thumb.cache_key
+                except Exception as thumb_error:
+                    LOG.warning("Thumbnail generation failed for %s: %s", output.name, thumb_error)
                 self.database.add_clip(
                     project_id, str(output), highlight.title, highlight.hook,
                     highlight.description, highlight.score, duration,
+                    thumbnail_path=thumb_path, thumbnail_raw_path=thumb_raw,
+                    thumbnail_timestamp=thumb_ts, thumbnail_cache_key=thumb_key,
                 )
             manifest = {
                 "project_id": project_id,

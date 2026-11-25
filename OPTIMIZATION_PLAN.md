@@ -57,6 +57,13 @@ Target: Windows 11, Ryzen 5 6600-series CPU, RTX 3050 laptop GPU, 16 GB dual-cha
 - [x] Use the same available local test clip and equivalent output settings for baseline and each profile. Measure wall time by stage, peak RAM/VRAM, CPU/GPU utilization, available temperatures, UI responsiveness and output quality. Record hardware, model, settings and sample duration. Do not invent results or claim improvements without measurements. If baseline or GPU testing is unavailable, document why.
 - [x] Verify cancellation, repeated jobs, cache invalidation, missing sensors, simulated OOM, gaming detection and no orphan processes. Run existing tests and relevant smoke tests. Keep benchmark artifacts out of Git and avoid deleting user media.
 
+## Phase 4 — Automatic clip thumbnail generation
+- [x] Automatically extract and score candidate frames locally via FFmpeg/OpenCV using the final clip crop/aspect ratio, avoiding black/blurry/transition frames and falling back to midpoint.
+- [x] Preserve original extracted frame separately from styled/preview thumbnails; support optional 1080x1920 export and optional title overlay using caption typography and red brand guidelines.
+- [x] Store thumbnails in the project directory, persist metadata in SQLite, cache with invalidation, support existing clips without thumbnails, and delete thumbnail files on clip deletion.
+- [x] Update Generated Clips UI with unique thumbnails, duration/status badges, loading skeleton, Regenerate Thumbnail, Select Frame timeline dialog, and Export Thumbnail actions.
+- [x] Run generation asynchronously with profile-aware concurrency limits without blocking UI or consuming AI API tokens; validate multi-speaker, dark, fast-motion, and no-face clips.
+
 ## Final handoff
 - [x] Update AGENTS.md with concise architectural changes and operational notes, if appropriate.
 - [x] Record each phase as complete, partial or blocked, changed files, tests actually run, benchmark results, known limitations and any decisions made without user guidance.

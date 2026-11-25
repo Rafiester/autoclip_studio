@@ -7,12 +7,12 @@ from pathlib import Path
 from threading import Event
 from typing import Callable
 
-from PySide6.QtCore import QFileInfo, QSignalBlocker, QThread, Qt, QUrl, Slot
-from PySide6.QtGui import QCloseEvent, QDesktopServices, QIcon, QPixmap
+from PySide6.QtCore import QFileInfo, QSignalBlocker, QSize, QThread, Qt, QUrl, Slot
+from PySide6.QtGui import QCloseEvent, QDesktopServices, QIcon, QImage, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFileIconProvider, QFormLayout, QFrame, QGridLayout,
+    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFileIconProvider, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
     QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
     QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
@@ -28,8 +28,12 @@ from .paths import APP_ROOT, OUTPUT_DIR, asset_path, ensure_directories
 from .pipeline import Pipeline
 from .providers import AIProvider, ProviderError
 from .speech_engine import MODELS
+from .thumbnails import export_thumbnail
 from .transcription import SpeechProgress
 from .ui.caption_library import CaptionLibrary
+from .ui.clips_view import (
+    ClipThumbnailPreview, ExportThumbnailDialog, FramePickerDialog, ThumbnailTaskRunner,
+)
 from .ui.download_view import DownloadView
 from .ui.log_view import LogView
 from .ui.performance_view import PerformanceView
@@ -59,6 +63,9 @@ class MainWindow(QMainWindow):
         self.project_rows: list[dict] | None = None
         self.clip_rows: list[dict] | None = None
         self.closing = False
+        self.thumb_runner = ThumbnailTaskRunner(self.settings.performance().profile, self)
+        self.thumb_runner.completed.connect(self._on_thumbnail_ready)
+        self.thumb_runner.failed.connect(self._on_thumbnail_failed)
         self.setWindowTitle("AutoClip Studio")
         if (app := QApplication.instance()) is not None and not app.windowIcon().isNull():
             self.setWindowIcon(app.windowIcon())
@@ -349,22 +356,41 @@ class MainWindow(QMainWindow):
         split = QHBoxLayout()
         self.clips_table = self._table(["Title", "Score", "Duration", "File"])
         self.clips_table.setAccessibleName("Generated clips")
+        self.clips_table.setIconSize(QSize(34, 60))
+        self.clips_table.verticalHeader().setDefaultSectionSize(66)
         self.clips_table.itemSelectionChanged.connect(self.preview_selected)
         split.addWidget(self.clips_table, 3)
         preview_card = QFrame(objectName="card")
         preview_layout = QVBoxLayout(preview_card)
+        self.clip_preview_stack = QStackedWidget()
+        self.clip_thumb_preview = ClipThumbnailPreview()
         self.video_widget = QVideoWidget(); self.video_widget.setMinimumSize(200, 235)
+        self.clip_preview_stack.addWidget(self.clip_thumb_preview)
+        self.clip_preview_stack.addWidget(self.video_widget)
         self.audio_output = QAudioOutput(); self.audio_output.setVolume(0.8)
         self.player = QMediaPlayer(); self.player.setAudioOutput(self.audio_output); self.player.setVideoOutput(self.video_widget)
         self.player.errorOccurred.connect(self._preview_error)
+        self.player.playbackStateChanged.connect(self._playback_state_changed)
         controls = QHBoxLayout()
         self.play_button = QPushButton("Play / Pause"); self.play_button.clicked.connect(self.toggle_play)
         self.open_clip_button = QPushButton("Open file"); self.open_clip_button.clicked.connect(self.open_selected_clip)
+        self.delete_clip_button = QPushButton("Delete", objectName="danger"); self.delete_clip_button.clicked.connect(self.delete_selected_clip)
         self.play_button.setEnabled(False)
         self.open_clip_button.setEnabled(False)
-        controls.addWidget(self.play_button); controls.addWidget(self.open_clip_button)
+        self.delete_clip_button.setEnabled(False)
+        controls.addWidget(self.play_button); controls.addWidget(self.open_clip_button); controls.addWidget(self.delete_clip_button)
+        thumb_controls = QHBoxLayout()
+        self.regen_thumb_button = QPushButton("Regenerate Thumbnail"); self.regen_thumb_button.clicked.connect(self.regenerate_thumbnail)
+        self.pick_frame_button = QPushButton("Select Frame…"); self.pick_frame_button.clicked.connect(self.select_thumbnail_frame)
+        self.export_thumb_button = QPushButton("Export Thumbnail…"); self.export_thumb_button.clicked.connect(self.export_selected_thumbnail)
+        for btn in (self.regen_thumb_button, self.pick_frame_button, self.export_thumb_button):
+            btn.setEnabled(False)
+            thumb_controls.addWidget(btn)
         self.clip_meta = self._wrapping_label("Select a clip to preview", object_name="muted")
-        preview_layout.addWidget(self.video_widget, 1); preview_layout.addLayout(controls); preview_layout.addWidget(self.clip_meta)
+        preview_layout.addWidget(self.clip_preview_stack, 1)
+        preview_layout.addLayout(controls)
+        preview_layout.addLayout(thumb_controls)
+        preview_layout.addWidget(self.clip_meta)
         split.addWidget(preview_card, 2)
         page.addLayout(split, 1)
         folder = QPushButton("Open output folder")
@@ -695,10 +721,20 @@ class MainWindow(QMainWindow):
             self.clips_table.setRowCount(len(clips))
             for row, clip in enumerate(clips):
                 values = [clip["title"], str(clip["score"]), f"{clip['duration']:.1f}s", Path(clip["path"]).name]
+                thumb_file = Path(clip.get("thumbnail_path") or "")
+                clip_file = Path(clip["path"])
+                if clip_file.is_file() and (not thumb_file.is_file()):
+                    self.thumb_runner.submit(
+                        clip["id"], clip_file, title=clip["title"],
+                        profile=self.settings.performance().profile,
+                        existing_cache_key=clip.get("thumbnail_cache_key", ""),
+                    )
                 for column, value in enumerate(values):
                     item = QTableWidgetItem(value)
                     if column == 0:
                         item.setData(Qt.ItemDataRole.UserRole, clip)
+                        if thumb_file.is_file():
+                            item.setIcon(QIcon(str(thumb_file)))
                     self.clips_table.setItem(row, column, item)
                 if selected and clip["id"] == selected["id"]:
                     self.clips_table.selectRow(row)
@@ -730,20 +766,149 @@ class MainWindow(QMainWindow):
         clip = self._selected_clip()
         self.play_button.setEnabled(bool(clip))
         self.open_clip_button.setEnabled(bool(clip))
+        self.delete_clip_button.setEnabled(bool(clip))
+        for btn in (self.regen_thumb_button, self.pick_frame_button, self.export_thumb_button):
+            btn.setEnabled(False)
         if not clip:
             self.player.setSource(QUrl())
+            self.clip_preview_stack.setCurrentIndex(0)
+            self.clip_thumb_preview.set_thumbnail(None, 0.0, status="Select a clip to preview")
             self.clip_meta.setText("Select a clip to preview")
             return
-        if not Path(clip["path"]).is_file():
+        clip_path = Path(clip["path"])
+        if not clip_path.is_file():
             self.player.setSource(QUrl())
             self.play_button.setEnabled(False)
             self.open_clip_button.setEnabled(False)
+            self.clip_preview_stack.setCurrentIndex(0)
+            self.clip_thumb_preview.set_thumbnail(None, float(clip.get("duration") or 0.0), status="Clip file missing")
             self.clip_meta.setText("The exported clip file could not be found.")
             return
+        for btn in (self.regen_thumb_button, self.pick_frame_button, self.export_thumb_button):
+            btn.setEnabled(True)
         source = QUrl.fromLocalFile(clip["path"])
         if source != self.player.source():
             self.player.setSource(source)
-        self.clip_meta.setText(f"{clip['title']}\nScore {clip['score']}/100 • {clip['duration']:.1f}s\n{clip['description']}")
+            self.clip_preview_stack.setCurrentIndex(0)
+        thumb_path = Path(clip.get("thumbnail_path") or "")
+        busy = self.thumb_runner.is_busy(clip["id"])
+        if thumb_path.is_file() and not busy:
+            self.clip_thumb_preview.set_thumbnail(QImage(str(thumb_path)), float(clip["duration"]))
+            thumb_status = "Thumbnail ready"
+        elif busy:
+            self.clip_thumb_preview.set_thumbnail(None, float(clip["duration"]), loading=True)
+            thumb_status = "Generating thumbnail…"
+        else:
+            self.clip_thumb_preview.set_thumbnail(None, float(clip["duration"]), loading=True)
+            thumb_status = "Thumbnail queued"
+        self.clip_meta.setText(
+            f"{clip['title']}\nScore {clip['score']}/100 • {clip['duration']:.1f}s • {thumb_status}\n{clip['description']}"
+        )
+
+    @Slot(QMediaPlayer.PlaybackState)
+    def _playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
+        if state == QMediaPlayer.PlaybackState.PlayingState:
+            self.clip_preview_stack.setCurrentIndex(1)
+        elif state == QMediaPlayer.PlaybackState.StoppedState:
+            self.clip_preview_stack.setCurrentIndex(0)
+
+    @Slot(str, object)
+    def _on_thumbnail_ready(self, clip_id: str, result) -> None:
+        self.database.update_clip_thumbnail(
+            clip_id, str(result.preview_path), str(result.raw_path), result.timestamp, result.cache_key,
+        )
+        self.clip_rows = None
+        self.refresh_all()
+
+    @Slot(str, str)
+    def _on_thumbnail_failed(self, clip_id: str, message: str) -> None:
+        LOG.warning("Thumbnail generation failed for %s: %s", clip_id, message)
+        selected = self._selected_clip()
+        if selected and selected["id"] == clip_id:
+            self.clip_thumb_preview.set_thumbnail(None, float(selected["duration"]), status="Thumbnail unavailable")
+
+    def regenerate_thumbnail(self) -> None:
+        clip = self._selected_clip()
+        if not clip:
+            return
+        clip_path = Path(clip["path"])
+        if not clip_path.is_file():
+            return
+        self.clip_preview_stack.setCurrentIndex(0)
+        self.clip_thumb_preview.set_thumbnail(None, float(clip["duration"]), loading=True)
+        self.thumb_runner.submit(
+            clip["id"], clip_path, title=clip["title"],
+            profile=self.settings.performance().profile, force=True,
+        )
+
+    def select_thumbnail_frame(self) -> None:
+        clip = self._selected_clip()
+        if not clip:
+            return
+        clip_path = Path(clip["path"])
+        if not clip_path.is_file():
+            return
+        dialog = FramePickerDialog(clip_path, float(clip["duration"]), clip.get("thumbnail_timestamp"), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.clip_preview_stack.setCurrentIndex(0)
+        self.clip_thumb_preview.set_thumbnail(None, float(clip["duration"]), loading=True)
+        self.thumb_runner.submit(
+            clip["id"], clip_path, title=clip["title"],
+            timestamp=dialog.selected_timestamp,
+            profile=self.settings.performance().profile, force=True,
+        )
+
+    def export_selected_thumbnail(self) -> None:
+        clip = self._selected_clip()
+        if not clip:
+            return
+        raw_path = Path(clip.get("thumbnail_raw_path") or "")
+        source = raw_path if raw_path.is_file() else Path(clip["path"])
+        if not source.is_file():
+            QMessageBox.warning(self, "Export unavailable", "Neither the clip nor its raw thumbnail frame was found.")
+            return
+        options_dialog = ExportThumbnailDialog(clip["title"], self)
+        if options_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        default_name = f"{Path(clip['path']).stem}-thumbnail-1080x1920.jpg"
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Export Thumbnail", default_name, "JPEG images (*.jpg);;PNG images (*.png)",
+        )
+        if not filename:
+            return
+        try:
+            export_thumbnail(
+                source, Path(filename), title=clip["title"],
+                overlay_title=options_dialog.overlay_check.isChecked(),
+                size=(1080, 1920), template_name=self.default_template(),
+                timestamp=clip.get("thumbnail_timestamp"),
+            )
+        except Exception as error:
+            QMessageBox.warning(self, "Thumbnail export failed", redact(str(error)))
+
+    def delete_selected_clip(self) -> None:
+        clip = self._selected_clip()
+        if not clip:
+            return
+        if QMessageBox.question(
+            self, "Delete clip",
+            f"Delete '{clip['title']}' and its thumbnail files?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self.player.setSource(QUrl())
+        removed = self.database.delete_clip(clip["id"])
+        if removed:
+            for key in ("path", "thumbnail_path", "thumbnail_raw_path"):
+                target = Path(removed.get(key) or "")
+                if target.is_file():
+                    try:
+                        target.unlink()
+                    except OSError:
+                        pass
+        self.clip_rows = None
+        self.refresh_all()
 
     def _preview_error(self, _error: QMediaPlayer.Error, message: str) -> None:
         self.clip_meta.setText(f"Preview unavailable. {message}")
@@ -951,6 +1116,8 @@ class MainWindow(QMainWindow):
             self.caption_library.stop()
             if hasattr(self, "performance_view"):
                 self.performance_view.set_polling(False)
+            if hasattr(self, "thumb_runner"):
+                self.thumb_runner.shutdown()
             self.youtube_preview.cancel()
             self.pipeline.manager.cancel()
             self.utility_cancel.set()
