@@ -8,7 +8,7 @@ from threading import Event
 from typing import Callable
 
 from PySide6.QtCore import QFileInfo, QSignalBlocker, QThread, Qt, QUrl, Slot
-from PySide6.QtGui import QCloseEvent, QDesktopServices, QIcon
+from PySide6.QtGui import QCloseEvent, QDesktopServices, QIcon, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -24,7 +24,7 @@ from .database import Database
 from .diagnostics import LOG, SUCCESS, log_error, redact
 from .media import DownloadProgress, is_youtube_url, youtube_id, youtube_source_error
 from .models import ProjectOptions
-from .paths import APP_ROOT, OUTPUT_DIR, ensure_directories
+from .paths import APP_ROOT, OUTPUT_DIR, asset_path, ensure_directories
 from .pipeline import Pipeline
 from .providers import AIProvider, ProviderError
 from .speech_engine import MODELS
@@ -59,6 +59,10 @@ class MainWindow(QMainWindow):
         self.clip_rows: list[dict] | None = None
         self.closing = False
         self.setWindowTitle("AutoClip Studio")
+        if (app := QApplication.instance()) is not None and not app.windowIcon().isNull():
+            self.setWindowIcon(app.windowIcon())
+        elif (icon_path := asset_path("autoclip.ico")).is_file():
+            self.setWindowIcon(QIcon(str(icon_path)))
         self.resize(1280, 820)
         self.setMinimumSize(760, 560)
         self.setStyleSheet(STYLESHEET)
@@ -70,12 +74,12 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         sidebar = QFrame(objectName="sidebar")
-        sidebar.setFixedWidth(185)
+        sidebar.setFixedWidth(204)
         side_layout = QVBoxLayout(sidebar)
-        side_layout.setContentsMargins(12, 18, 12, 18)
-        brand = self._wrapping_label("✦  AutoClip Studio", object_name="brand")
+        side_layout.setContentsMargins(12, 16, 12, 16)
+        brand = self._build_brand_header(180)
         side_layout.addWidget(brand)
-        side_layout.addSpacing(20)
+        side_layout.addSpacing(12)
         self.nav_buttons: list[QPushButton] = []
         for index, name in enumerate(self.NAV_ITEMS):
             button = QPushButton(name, objectName="nav")
@@ -98,6 +102,27 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.stack, 1)
         self.setCentralWidget(root)
         self.show_page(0)
+
+    def _build_brand_header(self, target_width: int) -> QLabel:
+        brand = QLabel(objectName="brand")
+        brand.setAccessibleName("AutoClip Studio")
+        brand.setToolTip("AutoClip Studio")
+        brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        wordmark_path = asset_path("AutoClipTrans.png")
+        pixmap = QPixmap(str(wordmark_path)) if wordmark_path.is_file() else QPixmap()
+        if not pixmap.isNull():
+            dpr = max(1.0, self.devicePixelRatioF())
+            scaled = pixmap.scaledToWidth(
+                int(round(target_width * dpr)),
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            scaled.setDevicePixelRatio(dpr)
+            brand.setPixmap(scaled)
+            brand.setFixedHeight(max(44, int(round(scaled.height() / dpr))))
+        else:
+            brand.setText("AutoClip Studio")
+            brand.setWordWrap(True)
+        return brand
 
     def _page(self, title: str, subtitle: str) -> tuple[QWidget, QVBoxLayout]:
         outer = QWidget()
@@ -916,10 +941,13 @@ def run() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("AutoClip Studio")
     app.setOrganizationName("AutoClip")
-    icon_path = APP_ROOT / "assets" / "autoclip.ico"
+    icon_path = asset_path("autoclip.ico")
+    symbol_path = asset_path("symbol.png")
     launcher = APP_ROOT / "AutoClipStudio.exe"
     if icon_path.is_file():
         app.setWindowIcon(QIcon(str(icon_path)))
+    elif symbol_path.is_file():
+        app.setWindowIcon(QIcon(str(symbol_path)))
     elif launcher.is_file():
         app.setWindowIcon(QFileIconProvider().icon(QFileInfo(str(launcher))))
     window = MainWindow(); window.show()

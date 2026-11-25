@@ -76,7 +76,7 @@ def main() -> None:
     parser.add_argument("--iscc", type=Path, help="Inno Setup compiler path.")
     options = parser.parse_args()
     ensure_runtime()
-    icon = ROOT / "build" / "assets" / "autoclip.ico"
+    icon = ROOT / "autoclip_studio" / "assets" / "autoclip.ico"
     run(PYTHON, PACKAGING / "make_icon.py", icon)
     build_launcher(icon)
     if options.standalone or options.installer:

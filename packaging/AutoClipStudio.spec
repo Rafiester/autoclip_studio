@@ -4,7 +4,8 @@ from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
 packaging_dir = Path(SPECPATH)
 root = packaging_dir.parent
-icon = root / "build" / "assets" / "autoclip.ico"
+icon = root / "autoclip_studio" / "assets" / "autoclip.ico"
+assets_dir = root / "autoclip_studio" / "assets"
 ffmpeg = root / "tools" / "ffmpeg"
 helpers = root / "tools" / "package"
 media_files = [
@@ -20,6 +21,7 @@ media_files += [
 ]
 data = media_files + [
     (str(icon), "assets"),
+    (str(assets_dir), "autoclip_studio/assets"),
     (str(root / "docs" / "THIRD_PARTY_NOTICES.md"), "."),
 ]
 for package in ("faster_whisper", "cv2"):
