@@ -11,6 +11,7 @@ DATA_ROOT = Path(os.environ.get("AUTOCLIP_DATA_DIR", user_data_dir("AutoClip Stu
 CACHE_DIR = DATA_ROOT / "cache"
 OUTPUT_DIR = DATA_ROOT / "output"
 LOG_DIR = DATA_ROOT / "logs"
+MODEL_CACHE = CACHE_DIR / "models"
 DB_PATH = DATA_ROOT / "autoclip.db"
 SETTINGS_PATH = DATA_ROOT / "settings.json"
 
@@ -25,6 +26,7 @@ def bundled_binary(name: str) -> Path | None:
     candidates = [
         APP_ROOT / "tools" / "ffmpeg" / "bin" / f"{name}{suffix}",
         APP_ROOT / "tools" / "ffmpeg" / f"{name}{suffix}",
+        APP_ROOT / "tools" / "package" / f"{name}{suffix}",
     ]
     return next((path for path in candidates if path.exists()), None)
 

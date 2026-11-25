@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from .models import Highlight, Segment, Transcript
+from .process import CancelledError, ProcessManager
 from .providers import AIProvider, ProviderError
 
 
@@ -41,7 +42,7 @@ def chunk_transcript(transcript: Transcript, chunk_seconds: int = 1200,
 def select_highlights(transcript: Transcript, count: int, min_duration: int,
                       max_duration: int, provider: AIProvider | None,
                       log: Callable[[str], None], video_path: Path | None = None,
-                      multimodal: bool = False) -> list[Highlight]:
+                      multimodal: bool = False, *, manager: ProcessManager | None = None) -> list[Highlight]:
     candidates: list[Highlight] = []
     if multimodal and provider and provider.kind == "gemini" and video_path:
         log("Uploading source to Gemini for optional multimodal analysis")
@@ -51,10 +52,16 @@ def select_highlights(transcript: Transcript, count: int, min_duration: int,
             "Return a JSON object with a highlights array containing start, end, title, hook, "
             "description, score, and reason."
         )
-        candidates.extend(parse_highlights(provider.complete_video(video_path, video_prompt), transcript.duration))
+        if manager is None:
+            raw = provider.complete_video(video_path, video_prompt)
+        else:
+            raw = provider.complete_video(video_path, video_prompt, cancel_event=manager.cancel_event)
+        candidates.extend(parse_highlights(raw, transcript.duration))
     if provider and not candidates:
         chunks = chunk_transcript(transcript)
         for index, chunk in enumerate(chunks, 1):
+            if manager:
+                manager.check_cancelled()
             desired = max(count + 2, math.ceil(count / len(chunks)) + 2)
             prompt = (
                 f"Select up to {desired} excerpts lasting {min_duration}-{max_duration} seconds. "
@@ -64,16 +71,17 @@ def select_highlights(transcript: Transcript, count: int, min_duration: int,
             log(f"Analyzing transcript chunk {index}/{len(chunks)} with {provider.kind}")
             try:
                 candidates.extend(parse_highlights(provider.complete(SYSTEM_PROMPT, prompt), transcript.duration))
-            except ProviderError:
+            except (CancelledError, ProviderError):
                 raise
             except Exception as error:
                 log(f"Could not parse provider result for chunk {index}: {error}")
+    if manager:
+        manager.check_cancelled()
     if not candidates:
         log("Using local transcript scoring (configure an API key for semantic AI ranking)")
-        candidates = local_highlights(transcript, max(count * 3, count), min_duration, max_duration)
+        candidates = local_highlights(transcript, max(count * 3, count), min_duration, max_duration, manager=manager)
     valid = [item for item in candidates if min_duration * 0.6 <= item.end - item.start <= max_duration * 1.25]
-    valid = dedupe(valid or candidates)
-    return valid[:count]
+    return dedupe(valid or candidates, limit=count)
 
 
 def parse_highlights(raw: str, duration: float) -> list[Highlight]:
@@ -86,12 +94,18 @@ def parse_highlights(raw: str, duration: float) -> list[Highlight]:
         if not match:
             raise ValueError("Provider did not return JSON")
         value = json.loads(match.group(0))
-    items = value.get("highlights", value if isinstance(value, list) else [])
+    items = value.get("highlights", []) if isinstance(value, dict) else value
+    if not isinstance(items, list):
+        return []
     results: list[Highlight] = []
     for item in items:
+        if not isinstance(item, dict):
+            continue
         try:
             highlight = Highlight.from_dict(item)
-        except (TypeError, ValueError, KeyError):
+        except (TypeError, ValueError, KeyError, OverflowError):
+            continue
+        if not math.isfinite(highlight.start) or not math.isfinite(highlight.end):
             continue
         highlight.start = max(0, min(duration, highlight.start))
         highlight.end = max(highlight.start, min(duration, highlight.end))
@@ -101,7 +115,7 @@ def parse_highlights(raw: str, duration: float) -> list[Highlight]:
 
 
 def local_highlights(transcript: Transcript, count: int, min_duration: int,
-                     max_duration: int) -> list[Highlight]:
+                     max_duration: int, *, manager: ProcessManager | None = None) -> list[Highlight]:
     """Useful no-key fallback based on speech density and hook vocabulary."""
     signals = {
         "why", "how", "secret", "mistake", "never", "best", "worst", "important",
@@ -111,9 +125,12 @@ def local_highlights(transcript: Transcript, count: int, min_duration: int,
     candidates: list[Highlight] = []
     segments = transcript.segments
     for anchor, segment in enumerate(segments):
+        if manager and anchor % 128 == 0:
+            manager.check_cancelled()
         start = segment.start
         selected: list[Segment] = []
-        for item in segments[anchor:]:
+        for index in range(anchor, len(segments)):
+            item = segments[index]
             if item.end - start > max_duration:
                 break
             selected.append(item)
@@ -133,14 +150,14 @@ def local_highlights(transcript: Transcript, count: int, min_duration: int,
             start, selected[-1].end, " ".join(title_words).rstrip(".,!?"), first_sentence,
             text[:240], score, "Strong speech density and a self-contained thought",
         ))
-    return dedupe(candidates)[:count]
+    return dedupe(candidates, limit=count)
 
 
 def _looks_complete(text: str) -> bool:
     return text.rstrip().endswith((".", "!", "?"))
 
 
-def dedupe(highlights: list[Highlight]) -> list[Highlight]:
+def dedupe(highlights: list[Highlight], *, limit: int | None = None) -> list[Highlight]:
     kept: list[Highlight] = []
     for candidate in sorted(highlights, key=lambda item: item.score, reverse=True):
         duration = max(0.1, candidate.end - candidate.start)
@@ -152,5 +169,7 @@ def dedupe(highlights: list[Highlight]) -> list[Highlight]:
                 break
         if not overlaps:
             kept.append(candidate)
-    return kept
+            if limit is not None and limit > 0 and len(kept) == limit:
+                break
+    return kept[:limit]
 

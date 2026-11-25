@@ -3,20 +3,20 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import traceback
 from dataclasses import asdict
 from pathlib import Path
 from typing import Callable
 
 from .config import SettingsStore
 from .database import Database
+from .diagnostics import LOG, log_error
 from .highlights import select_highlights
 from .media import acquire_source
 from .models import ProjectOptions, RenderedClip
 from .paths import CACHE_DIR, OUTPUT_DIR
 from .process import CancelledError, ProcessManager
 from .providers import AIProvider, ProviderError
-from .rendering import render_clip
+from .rendering import render_clip, source_dimensions
 from .transcription import transcribe
 
 
@@ -31,14 +31,16 @@ class Pipeline:
         self.manager = manager or ProcessManager()
 
     def run(self, project_id: str, options: ProjectOptions, progress: Progress) -> list[RenderedClip]:
-        self.manager.reset()
+        LOG.info("Project %s started", project_id)
         self.database.update_project(project_id, status="processing", progress=1, error="")
         job_dir = CACHE_DIR / "jobs" / project_id
         job_dir.mkdir(parents=True, exist_ok=True)
-        successful = False
         try:
             self._update(project_id, 3, "Acquiring source video", progress)
-            source = acquire_source(options.source, options.cache_enabled, self.manager, self._logger(progress, 4))
+            source = acquire_source(
+                options.source, options.cache_enabled, self.manager, self._logger(progress, 4), job_dir=job_dir,
+            )
+            dimensions = source_dimensions(source, self.manager)
             self._update(project_id, 12, "Generating timestamped transcript", progress)
             transcript = transcribe(
                 source, options.whisper_model, options.whisper_device, options.language,
@@ -49,13 +51,16 @@ class Pipeline:
             provider = self._provider(options.provider, options.model)
             highlights = select_highlights(
                 transcript, options.clip_count, options.min_duration, options.max_duration,
-                provider, self._logger(progress, 42), source, options.multimodal,
+                provider, self._logger(progress, 42), source, options.multimodal, manager=self.manager,
             )
+            self.manager.check_cancelled()
             if not highlights:
                 raise RuntimeError("No usable highlights were found. Try shorter minimum duration or another video.")
             project_output = self._output_root(options) / project_id
             project_output.mkdir(parents=True, exist_ok=True)
             rendered: list[RenderedClip] = []
+            encoder_support: dict[str, bool] = {}
+            hardware_encoding = bool(self.settings.data.get("hardware_encoding", True))
             for index, highlight in enumerate(highlights, 1):
                 self.manager.check_cancelled()
                 start_progress = 48 + round((index - 1) / len(highlights) * 47)
@@ -66,8 +71,8 @@ class Pipeline:
                     source, highlight, transcript, output, job_dir / f"clip-{index}",
                     options.output_size, options.aspect_ratio, options.face_tracking,
                     options.captions, options.caption_template,
-                    bool(self.settings.data.get("hardware_encoding", True)), self.manager,
-                    self._logger(progress, start_progress),
+                    hardware_encoding, self.manager, self._logger(progress, start_progress),
+                    dimensions=dimensions, encoder_support=encoder_support,
                 )
                 rendered_clip = RenderedClip(output, highlight, duration)
                 rendered.append(rendered_clip)
@@ -76,29 +81,37 @@ class Pipeline:
                     highlight.description, highlight.score, duration,
                 )
             manifest = {
-                "project_id": project_id, "source": str(source),
+                "project_id": project_id,
+                "source": options.source if source.is_relative_to(job_dir.resolve()) else str(source),
                 "options": asdict(options),
                 "clips": [{"path": str(item.path), "duration": item.duration,
                            "highlight": asdict(item.highlight)} for item in rendered],
             }
-            (project_output / "project.json").write_text(
-                json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
+            self.manager.check_cancelled()
+            pending_manifest = project_output / "project.json.tmp"
+            try:
+                pending_manifest.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+                pending_manifest.replace(project_output / "project.json")
+            finally:
+                pending_manifest.unlink(missing_ok=True)
             self._update(project_id, 100, f"Completed {len(rendered)} clips", progress)
             self.database.update_project(project_id, status="completed", progress=100)
-            successful = True
             return rendered
         except CancelledError:
             self.database.update_project(project_id, status="cancelled", error="Cancelled by user")
             progress(0, "Processing cancelled")
             raise
         except Exception as error:
+            if self.manager.cancel_event.is_set():
+                self.database.update_project(project_id, status="cancelled", error="Cancelled by user")
+                progress(0, "Processing cancelled")
+                raise CancelledError("Processing cancelled") from error
+            log_error(f"Project {project_id} failed", error)
             self.database.update_project(project_id, status="failed", error=str(error))
             progress(0, f"Failed: {error}")
             raise
         finally:
-            if successful:
-                shutil.rmtree(job_dir, ignore_errors=True)
+            shutil.rmtree(job_dir, ignore_errors=True)
 
     def _provider(self, name: str, model: str) -> AIProvider | None:
         values = self.settings.provider(name)
@@ -112,12 +125,17 @@ class Pipeline:
         return Path(configured).expanduser() if configured else OUTPUT_DIR
 
     def _update(self, project_id: str, value: int, message: str, callback: Progress) -> None:
+        LOG.info("Project %s: %s", project_id, message)
         self.database.update_project(project_id, progress=value)
         callback(value, message)
 
     @staticmethod
     def _logger(callback: Progress, value: int) -> Callable[[str], None]:
-        return lambda message: callback(value, message)
+        def emit(message: str) -> None:
+            if message.startswith(("Loading Faster-Whisper", "Rendering with")):
+                LOG.info("%s", message)
+            callback(value, message)
+        return emit
 
 
 def _slug(value: str) -> str:

@@ -38,26 +38,58 @@ Write-Host '[3/4] Installing Python dependencies...'
 & $UvExe pip install --python (Join-Path $VenvRoot 'Scripts\python.exe') -r (Join-Path $ProjectRoot 'requirements.txt')
 if ($LASTEXITCODE -ne 0) { throw 'Python dependency installation failed.' }
 
-if (-not (Test-Path -LiteralPath (Join-Path $FfmpegRoot 'bin\ffmpeg.exe'))) {
+if (!(Test-Path -LiteralPath (Join-Path $FfmpegRoot 'bin\ffmpeg.exe')) -or
+    !(Test-Path -LiteralPath (Join-Path $FfmpegRoot 'bin\ffprobe.exe'))) {
     Write-Host '[4/4] Downloading a project-local FFmpeg build...'
     $FfmpegZip = Join-Path $env:TEMP ('autoclip-ffmpeg-' + [guid]::NewGuid().ToString('N') + '.zip')
     $FfmpegExtract = Join-Path $env:TEMP ('autoclip-ffmpeg-' + [guid]::NewGuid().ToString('N'))
-    & curl.exe --fail --location --retry 2 --connect-timeout 20 --output $FfmpegZip 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
-    if ($LASTEXITCODE -ne 0 -or (Get-Item -LiteralPath $FfmpegZip).Length -lt 1000000) {
-        Write-Host 'Primary FFmpeg mirror unavailable; using the GitHub release mirror...'
-        & curl.exe --fail --location --retry 2 --connect-timeout 20 --output $FfmpegZip 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl-shared.zip'
+    $FfmpegRelease = 'ffmpeg-9.1-essentials_build.zip'
+    $FfmpegSha = 'b9bbbb3acece000cbeec994f856649354e52c773807841e78908374b24d658fd'
+    $Backup = $null
+    try {
+        & curl.exe --fail --location --retry 2 --connect-timeout 20 --max-time 600 --output $FfmpegZip "https://github.com/GyanD/codexffmpeg/releases/download/9.1/$FfmpegRelease"
+        if ($LASTEXITCODE -ne 0) {
+            & curl.exe --fail --location --retry 2 --connect-timeout 20 --max-time 600 --output $FfmpegZip "https://www.gyan.dev/ffmpeg/builds/packages/$FfmpegRelease"
+        }
+        if ($LASTEXITCODE -ne 0) { throw 'Unable to download FFmpeg.' }
+        if ((Get-FileHash -LiteralPath $FfmpegZip -Algorithm SHA256).Hash -ne $FfmpegSha) {
+            throw 'The FFmpeg archive did not match the pinned SHA-256 checksum.'
+        }
+        Expand-Archive -LiteralPath $FfmpegZip -DestinationPath $FfmpegExtract
+        $ExtractedRoot = Join-Path $FfmpegExtract 'ffmpeg-9.1-essentials_build'
+        if (!(Test-Path -LiteralPath (Join-Path $ExtractedRoot 'bin\ffmpeg.exe')) -or
+            !(Test-Path -LiteralPath (Join-Path $ExtractedRoot 'bin\ffprobe.exe'))) {
+            throw 'The FFmpeg archive did not contain both required executables.'
+        }
+        if (Test-Path -LiteralPath $FfmpegRoot) {
+            $Backup = Join-Path $ToolsRoot ('ffmpeg-backup-' + [guid]::NewGuid().ToString('N'))
+            Move-Item -LiteralPath $FfmpegRoot -Destination $Backup
+        }
+        try {
+            Move-Item -LiteralPath $ExtractedRoot -Destination $FfmpegRoot
+        } catch {
+            if ($Backup -and !(Test-Path -LiteralPath $FfmpegRoot)) {
+                Move-Item -LiteralPath $Backup -Destination $FfmpegRoot
+            }
+            throw
+        }
+    } finally {
+        if (Test-Path -LiteralPath $FfmpegZip) { Remove-Item -LiteralPath $FfmpegZip -Force }
+        if (Test-Path -LiteralPath $FfmpegExtract) {
+            $ResolvedExtract = (Resolve-Path -LiteralPath $FfmpegExtract).Path
+            $ResolvedTemp = (Resolve-Path -LiteralPath $env:TEMP).Path.TrimEnd('\')
+            if ($ResolvedExtract.StartsWith("$ResolvedTemp\", [StringComparison]::OrdinalIgnoreCase)) {
+                Remove-Item -LiteralPath $ResolvedExtract -Recurse -Force
+            }
+        }
     }
-    if ($LASTEXITCODE -ne 0 -or (Get-Item -LiteralPath $FfmpegZip).Length -lt 1000000) { throw 'Unable to download FFmpeg.' }
-    Expand-Archive -LiteralPath $FfmpegZip -DestinationPath $FfmpegExtract
-    $ExtractedRoot = Get-ChildItem -LiteralPath $FfmpegExtract -Directory | Select-Object -First 1
-    if (-not $ExtractedRoot) { throw 'The FFmpeg archive did not contain an expected directory.' }
-    if (Test-Path -LiteralPath $FfmpegRoot) { Remove-Item -LiteralPath $FfmpegRoot -Recurse -Force }
-    Move-Item -LiteralPath $ExtractedRoot.FullName -Destination $FfmpegRoot
-    Remove-Item -LiteralPath $FfmpegZip -Force
-    Remove-Item -LiteralPath $FfmpegExtract -Recurse -Force
 } else {
     Write-Host '[4/4] FFmpeg is already installed.'
 }
+& (Join-Path $FfmpegRoot 'bin\ffmpeg.exe') -version | Select-Object -First 1
+if ($LASTEXITCODE -ne 0) { throw 'The project-local FFmpeg executable could not start.' }
+& (Join-Path $FfmpegRoot 'bin\ffprobe.exe') -version | Select-Object -First 1
+if ($LASTEXITCODE -ne 0) { throw 'The project-local ffprobe executable could not start.' }
 
 Write-Host ''
 Write-Host 'Running the core test suite...'

@@ -4,6 +4,7 @@ import json
 import sqlite3
 import threading
 import uuid
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -24,7 +25,7 @@ class Database:
         return connection
 
     def _initialize(self) -> None:
-        with self._connect() as db:
+        with closing(self._connect()) as db, db:
             db.executescript("""
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS projects (
@@ -44,7 +45,7 @@ class Database:
     def create_project(self, source: str, options: dict[str, Any]) -> str:
         project_id = uuid.uuid4().hex
         now = datetime.now(timezone.utc).isoformat()
-        with self._lock, self._connect() as db:
+        with self._lock, closing(self._connect()) as db, db:
             db.execute(
                 "INSERT INTO projects VALUES (?, ?, 'queued', 0, ?, '', ?, ?)",
                 (project_id, source, json.dumps(options), now, now),
@@ -60,13 +61,13 @@ class Database:
                 changes.append(f"{column} = ?")
                 values.append(value)
         values.append(project_id)
-        with self._lock, self._connect() as db:
+        with self._lock, closing(self._connect()) as db, db:
             db.execute(f"UPDATE projects SET {', '.join(changes)} WHERE id = ?", values)
 
     def add_clip(self, project_id: str, path: str, title: str, hook: str,
                  description: str, score: int, duration: float) -> str:
         clip_id = uuid.uuid4().hex
-        with self._lock, self._connect() as db:
+        with self._lock, closing(self._connect()) as db, db:
             db.execute(
                 "INSERT INTO clips VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (clip_id, project_id, path, title, hook, description, score, duration,
@@ -75,13 +76,21 @@ class Database:
         return clip_id
 
     def projects(self, limit: int = 100) -> list[dict[str, Any]]:
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             return [dict(row) for row in db.execute(
                 "SELECT * FROM projects ORDER BY created_at DESC LIMIT ?", (limit,)
             )]
 
     def clips(self, limit: int = 200) -> list[dict[str, Any]]:
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             return [dict(row) for row in db.execute(
                 "SELECT * FROM clips ORDER BY created_at DESC LIMIT ?", (limit,)
             )]
+
+    def project_count(self) -> int:
+        with closing(self._connect()) as db:
+            return int(db.execute("SELECT count(*) FROM projects").fetchone()[0])
+
+    def clip_count(self) -> int:
+        with closing(self._connect()) as db:
+            return int(db.execute("SELECT count(*) FROM clips").fetchone()[0])

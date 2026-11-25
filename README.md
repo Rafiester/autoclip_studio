@@ -6,6 +6,12 @@ The media pipeline runs on your PC. An AI API is optional: without a key, AutoCl
 
 ## Quick start
 
+### Packaged Windows application
+
+Open `dist\AutoClipStudio\AutoClipStudio.exe` directly. Keep its `_internal` folder beside the executable. Alternatively, run `release\AutoClipStudio-Setup-x64.exe` to install for the current Windows user with a Start Menu shortcut and an optional desktop shortcut. Uninstall from **Settings → Apps → Installed apps**. User settings, credentials, exports and caches survive uninstall.
+
+### Source checkout
+
 Requirements: Windows 11, an internet connection for initial setup/model downloads, and approximately 2 GB of free disk space. An NVIDIA GPU is optional.
 
 1. Double-click `SETUP.bat` once. It downloads an isolated Python 3.12 runtime to `.runtime`, creates `.venv`, installs pinned packages, downloads FFmpeg into `tools`, and runs the unit tests. It does not alter the system Python or PATH.
@@ -48,11 +54,19 @@ By default, application data is stored below `%LOCALAPPDATA%\AutoClip\AutoClip S
 - `autoclip.db` — projects and generated clip metadata
 - `settings.json` — non-secret preferences
 - `cache` — optional downloads, transcript JSON, and in-progress work
+- `cache\models` — Faster-Whisper model weights. Set `HF_HUB_CACHE` to reuse an existing Hugging Face cache.
+- `logs\autoclip.log` — rotating startup, project, and error diagnostics
 - `output` — project folders, MP4 clips, and `project.json` manifests
 
 Set `AUTOCLIP_DATA_DIR` before launch to use another data root, or choose an output folder in Settings.
 
 ## Development and validation
+
+Run `BUILD.bat` from a Windows x64 checkout to create the PyInstaller OneDir build. FFmpeg, ffprobe, yt-dlp, Deno, the Qt plugins and Python runtime travel with it. An NVIDIA driver is required for NVENC. CUDA transcription requires compatible NVIDIA CUDA and cuDNN libraries available to CTranslate2 on the host. CPU transcription and encoding remain available.
+
+Fresh setups install the SHA-256-verified FFmpeg 9.1 Windows Essentials archive. Setup checks the executables in existing tool folders and reports their versions. The source launcher uses the Python yt-dlp version in `requirements.txt` when there is no project-local yt-dlp executable. OneDir uses the version pinned alongside Deno in `scripts/build.ps1`.
+
+Run `BUILD.bat -Installer` with Inno Setup 6 or 7 installed, or supply `BUILD.bat -Installer -IsccPath "C:\path\to\ISCC.exe"`. The executable and installer are unsigned unless you sign them using your own Authenticode certificate.
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest

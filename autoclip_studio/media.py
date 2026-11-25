@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory, mkdtemp
+from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
-from .paths import CACHE_DIR
+from .paths import CACHE_DIR, bundled_binary
 from .process import ProcessManager, find_media_tool
 
 
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
+MEDIA_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov"}
 
 
 def is_youtube_url(value: str) -> bool:
@@ -27,7 +31,7 @@ def youtube_id(url: str) -> str | None:
         candidate = parsed.path.strip("/").split("/")[0]
     elif parsed.path == "/watch":
         candidate = parse_qs(parsed.query).get("v", [""])[0]
-    elif parsed.path.startswith(("/shorts/", "/embed/")):
+    elif parsed.path.startswith(("/shorts/", "/embed/", "/live/", "/v/")):
         candidate = parsed.path.split("/")[2]
     else:
         candidate = ""
@@ -35,40 +39,70 @@ def youtube_id(url: str) -> str | None:
 
 
 def acquire_source(source: str, cache: bool, manager: ProcessManager,
-                   log: callable = lambda _line: None) -> Path:
+                   log: Callable[[str], None] = lambda _line: None, *, job_dir: Path | None = None) -> Path:
     local = Path(source).expanduser()
     if local.is_file():
         return local.resolve()
     if not is_youtube_url(source):
         raise ValueError("Choose an existing local video or enter a valid YouTube URL.")
-    video_id = youtube_id(source) or "video"
-    target_dir = CACHE_DIR / "downloads"
-    target_dir.mkdir(parents=True, exist_ok=True)
-    existing = sorted(target_dir.glob(f"{video_id}.*"))
-    existing = [item for item in existing if item.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}]
-    if cache and existing:
-        log(f"Using cached download: {existing[0].name}")
-        return existing[0]
-    template = str(target_dir / f"{video_id}.%(ext)s")
-    command = [
-        sys.executable, "-m", "yt_dlp", "--no-playlist", "--newline", "--restrict-filenames",
+    manager.check_cancelled()
+    key = youtube_id(source) or "url-" + hashlib.sha256(source.encode()).hexdigest()[:24]
+    if not cache:
+        target = job_dir / "download" if job_dir else Path(mkdtemp(prefix="autoclip-download-"))
+        target.mkdir(parents=True, exist_ok=True)
+        return _download_youtube(source, target, key, manager, log)
+
+    downloads = CACHE_DIR / "downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+    for item in sorted(downloads.glob(f"{key}.*")):
+        if item.suffix.lower() in MEDIA_EXTENSIONS and item.is_file() and item.stat().st_size:
+            log(f"Using cached download: {item.name}")
+            return item
+    with TemporaryDirectory(prefix="incoming-", dir=downloads) as staging:
+        video = _download_youtube(source, Path(staging), key, manager, log)
+        destination = downloads / video.name
+        video.replace(destination)
+        return destination
+
+
+def _download_youtube(source: str, target: Path, key: str, manager: ProcessManager,
+                      log: Callable[[str], None]) -> Path:
+    template = str(target / f"{key}.%(ext)s")
+    receipt = target / "downloaded-path.txt"
+    downloader = bundled_binary("yt-dlp")
+    python = Path(sys.executable)
+    if python.name.lower() == "pythonw.exe":
+        python = python.with_name("python.exe")
+    if getattr(sys, "frozen", False) and downloader is None:
+        raise FileNotFoundError("The bundled yt-dlp executable is missing. Restore the complete application folder.")
+    command = [str(downloader)] if downloader else [str(python), "-m", "yt_dlp"]
+    command += [
+        "--no-playlist", "--no-simulate", "--newline", "--restrict-filenames",
+        "--cache-dir", str(CACHE_DIR / "yt-dlp"),
+        "--ffmpeg-location", str(Path(find_media_tool("ffmpeg")).parent),
         "--merge-output-format", "mp4", "-f",
-        "bv*[height<=1080]+ba/b[height<=1080]/best", "-o", template, source,
+        "bv*[height<=1080]+ba/b[height<=1080]/best", "-o", template,
+        "--print-to-file", "after_move:filepath", str(receipt), source,
     ]
-    ffmpeg = Path(find_media_tool("ffmpeg"))
-    command[3:3] = ["--ffmpeg-location", str(ffmpeg.parent)]
-    manager.run(command, on_output=log)
-    results = sorted(target_dir.glob(f"{video_id}.*"), key=lambda item: item.stat().st_mtime, reverse=True)
-    if not results:
-        raise RuntimeError("yt-dlp completed but produced no video file.")
-    return results[0]
+    deno = bundled_binary("deno")
+    if deno:
+        command[1:1] = ["--js-runtimes", f"deno:{deno}"]
+    manager.run(command, on_output=log, output_tail=40)
+    if receipt.is_file():
+        paths = receipt.read_text(encoding="utf-8").splitlines()
+        receipt.unlink()
+        if paths:
+            result = Path(paths[-1]).resolve()
+            if result.parent == target.resolve() and result.is_file() and result.stat().st_size:
+                return result
+    raise RuntimeError("yt-dlp completed but produced no video file.")
 
 
 def probe(path: Path, manager: ProcessManager | None = None) -> dict:
     runner = manager or ProcessManager()
     result = runner.run([
         find_media_tool("ffprobe"), "-v", "error", "-show_entries",
-        "format=duration:stream=index,codec_type,codec_name,width,height,avg_frame_rate",
+        "format=duration:stream=index,codec_type,codec_name,width,height,avg_frame_rate:stream_side_data=rotation",
         "-of", "json", path,
     ])
     return json.loads(result.stdout)

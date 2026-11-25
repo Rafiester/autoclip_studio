@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import traceback
-
 from PySide6.QtCore import QObject, Signal, Slot
 
 from .models import ProjectOptions

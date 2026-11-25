@@ -4,15 +4,30 @@ import json
 import mimetypes
 import time
 from dataclasses import dataclass
+from io import BufferedReader
 from pathlib import Path
+from threading import Event
 from typing import Any
 from urllib.parse import urlparse
 
 import requests
 
+from .process import CancelledError
+
 
 class ProviderError(RuntimeError):
     pass
+
+
+class _UploadStream(BufferedReader):
+    def __init__(self, path: Path, cancel_event: Event | None) -> None:
+        super().__init__(path.open("rb", buffering=0))
+        self.cancel_event = cancel_event
+
+    def read(self, size: int = -1) -> bytes:
+        if self.cancel_event and self.cancel_event.is_set():
+            raise CancelledError("Processing cancelled")
+        return super().read(size)
 
 
 @dataclass(slots=True)
@@ -37,13 +52,15 @@ class AIProvider:
             raise ProviderError("The provider returned an empty response.")
         return result.strip()
 
-    def complete_video(self, video_path: Path, prompt: str) -> str:
+    def complete_video(self, video_path: Path, prompt: str, *, cancel_event: Event | None = None) -> str:
         """Upload a video to Gemini Files, analyze it, then remove the remote file."""
         if self.kind != "gemini":
             raise ProviderError("Multimodal video analysis is available only with Gemini.")
         if not self.api_key:
             raise ProviderError("No Gemini API key is configured.")
         self._validate_url()
+        if cancel_event and cancel_event.is_set():
+            raise CancelledError("Processing cancelled")
         mime = mimetypes.guess_type(video_path.name)[0] or "video/mp4"
         base = self.base_url.rstrip("/")
         upload_base = base.rsplit("/v1beta", 1)[0] + "/upload/v1beta" if "/v1beta" in base else base + "/upload/v1beta"
@@ -60,22 +77,30 @@ class AIProvider:
         upload_url = start.headers.get("X-Goog-Upload-URL")
         if not upload_url:
             raise ProviderError("Gemini did not return a resumable upload URL.")
-        with video_path.open("rb") as stream:
+        if cancel_event and cancel_event.is_set():
+            raise CancelledError("Processing cancelled")
+        with _UploadStream(video_path, cancel_event) as stream:
             uploaded = requests.post(
                 upload_url, data=stream,
                 headers={"Content-Length": str(video_path.stat().st_size), "X-Goog-Upload-Offset": "0",
-                         "X-Goog-Upload-Command": "upload, finalize"}, timeout=max(self.timeout, 600),
+                         "X-Goog-Upload-Command": "upload, finalize"}, timeout=(10, max(self.timeout, 600)),
             )
         self._raise(uploaded)
-        file_info = uploaded.json().get("file", uploaded.json())
+        response_data = uploaded.json()
+        file_info = response_data.get("file", response_data)
         file_name = file_info.get("name", "")
         try:
             deadline = time.monotonic() + 600
             while file_info.get("state") == "PROCESSING" and time.monotonic() < deadline:
-                time.sleep(2)
+                if cancel_event is None:
+                    time.sleep(2)
+                elif cancel_event.wait(2):
+                    raise CancelledError("Processing cancelled")
                 status = requests.get(f"{base}/{file_name}", params={"key": self.api_key}, timeout=30)
                 self._raise(status)
                 file_info = status.json()
+            if cancel_event and cancel_event.is_set():
+                raise CancelledError("Processing cancelled")
             if file_info.get("state") not in {None, "ACTIVE"}:
                 raise ProviderError(f"Gemini video processing ended in state {file_info.get('state')}.")
             return self._gemini_parts([

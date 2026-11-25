@@ -4,11 +4,19 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import threading
+from collections import deque
 from pathlib import Path
 from typing import Callable, Sequence
 
 from .paths import bundled_binary
+
+if os.name == "nt":
+    import pywintypes
+    import win32api
+    import win32con
+    import win32job
 
 
 class CancelledError(RuntimeError):
@@ -20,7 +28,7 @@ class ProcessManager:
 
     def __init__(self) -> None:
         self.cancel_event = threading.Event()
-        self._processes: set[subprocess.Popen[str]] = set()
+        self._processes: dict[subprocess.Popen[str], object] = {}
         self._lock = threading.Lock()
 
     def reset(self) -> None:
@@ -36,18 +44,44 @@ class ProcessManager:
 
     def run(self, command: Sequence[str | Path], *, cwd: Path | None = None,
             on_output: Callable[[str], None] | None = None,
-            env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-        self.check_cancelled()
+            env: dict[str, str] | None = None,
+            output_tail: int | None = None) -> subprocess.CompletedProcess[str]:
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        process = subprocess.Popen(
-            [str(item) for item in command], cwd=cwd, env=env,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace",
-            creationflags=flags,
-        )
         with self._lock:
-            self._processes.add(process)
-        lines: list[str] = []
+            self.check_cancelled()
+            job = win32job.CreateJobObject(None, "") if os.name == "nt" else None
+            process = None
+            try:
+                if job is not None:
+                    limits = win32job.QueryInformationJobObject(job, win32job.JobObjectExtendedLimitInformation)
+                    limits["BasicLimitInformation"]["LimitFlags"] = win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                    win32job.SetInformationJobObject(job, win32job.JobObjectExtendedLimitInformation, limits)
+                process = subprocess.Popen(
+                    [str(item) for item in command], cwd=cwd, env=env,
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace", creationflags=flags,
+                )
+                if job is not None and process.poll() is None:
+                    handle = win32api.OpenProcess(
+                        win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE, False, process.pid
+                    )
+                    try:
+                        win32job.AssignProcessToJobObject(job, handle)
+                    except pywintypes.error:
+                        if process.poll() is None:
+                            raise
+                    finally:
+                        handle.Close()
+                self._processes[process] = job
+            except BaseException:
+                if job is not None:
+                    job.Close()
+                if process is not None:
+                    process.kill()
+                    process.wait()
+                    process.stdout.close()
+                raise
+        lines = [] if output_tail is None else deque(maxlen=output_tail)
         try:
             assert process.stdout is not None
             for line in iter(process.stdout.readline, ""):
@@ -57,12 +91,16 @@ class ProcessManager:
                 if on_output and stripped:
                     on_output(stripped)
             code = process.wait()
-        except CancelledError:
-            self._terminate(process)
-            raise
+            self.check_cancelled()
         finally:
+            process.stdout.close()
             with self._lock:
-                self._processes.discard(process)
+                self._processes.pop(process, None)
+                if job is not None:
+                    job.Close()
+                elif process.poll() is None:
+                    self._terminate(process)
+            process.wait()
         output = "\n".join(lines)
         result = subprocess.CompletedProcess(command, code, output, "")
         if code:
@@ -71,23 +109,19 @@ class ProcessManager:
 
     def terminate_all(self) -> None:
         with self._lock:
-            processes = list(self._processes)
-        for process in processes:
-            self._terminate(process)
+            for process, job in self._processes.items():
+                if job is not None:
+                    win32job.TerminateJobObject(job, 1)
+                else:
+                    self._terminate(process)
 
     @staticmethod
     def _terminate(process: subprocess.Popen[str]) -> None:
         if process.poll() is not None:
             return
         try:
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                    capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, check=False,
-                )
-            else:
-                process.send_signal(signal.SIGTERM)
-                process.wait(timeout=4)
+            process.send_signal(signal.SIGTERM)
+            process.wait(timeout=4)
         except (OSError, subprocess.TimeoutExpired):
             process.kill()
 
@@ -99,6 +133,8 @@ def find_media_tool(name: str) -> str:
     found = shutil.which(name)
     if found:
         return found
+    if getattr(sys, "frozen", False):
+        raise FileNotFoundError(f"Bundled {name} is missing. Restore the complete application folder.")
     raise FileNotFoundError(
         f"{name} was not found. Run SETUP.bat to install the project-local FFmpeg tools."
     )
