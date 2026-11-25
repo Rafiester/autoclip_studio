@@ -30,10 +30,14 @@ def build_launcher(icon: Path) -> None:
         f"/out:{executable}", f"/win32icon:{icon}",
         "/reference:System.Drawing.dll", "/reference:System.Windows.Forms.dll",
         "/reference:System.IO.Compression.dll", "/reference:System.IO.Compression.FileSystem.dll",
-        "/reference:System.Web.Extensions.dll", launcher / "Launcher.cs", launcher / "WindowsJob.cs",
+        "/reference:System.Web.Extensions.dll",
+        launcher / "Launcher.cs", launcher / "SetupWizard.cs", launcher / "WindowsJob.cs",
     )
-    executable.replace(output)
-    print(f"Source launcher built: {output}", flush=True)
+    try:
+        executable.replace(output)
+        print(f"Source launcher built: {output}", flush=True)
+    except PermissionError:
+        print(f"Source launcher compiled at {executable}; close running AutoClipStudio.exe to replace {output}", flush=True)
 
 
 def prepare_packaged_tools() -> None:

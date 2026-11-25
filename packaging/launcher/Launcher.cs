@@ -83,8 +83,8 @@ internal static class Launcher
         if (option == "--setup" || !ready)
         {
             if (option != "--setup" && MessageBox.Show(
-                "The project-local Python environment or media tools need setup or repair.\n\n" +
-                "Install the required dependencies now? An internet connection may be needed.\n\n" +
+                "Some required AutoClip Studio components need first-time setup or repair.\n\n" +
+                "Open the Setup Wizard to inspect and install missing dependencies?\n\n" +
                 "Details: " + LogPath, Title, MessageBoxButtons.YesNo, MessageBoxIcon.Information) != DialogResult.Yes)
                 return 1;
             if (!RunSetupDialog(job, stop)) return 1;
@@ -137,50 +137,9 @@ internal static class Launcher
 
     private static bool RunSetupDialog(WindowsJob job, EventWaitHandle stop)
     {
-        using (var form = new Form())
-        using (var timer = new System.Windows.Forms.Timer())
+        using (var wizard = new SetupWizardForm(Root, Python, SetupScript, job, stop, Log))
         {
-            form.Text = Title + " Setup";
-            form.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-            form.ClientSize = new Size(425, 155);
-            form.FormBorderStyle = FormBorderStyle.FixedDialog;
-            form.StartPosition = FormStartPosition.CenterScreen;
-            form.MaximizeBox = false;
-            form.MinimizeBox = false;
-            var text = new Label { Left = 18, Top = 17, Width = 385, Height = 42,
-                Text = "Preparing the project-local Python environment and media tools. This may take a few minutes." };
-            var bar = new ProgressBar { Left = 18, Top = 66, Width = 389, Height = 13,
-                Style = ProgressBarStyle.Marquee, AccessibleName = "Preparing dependencies" };
-            var cancel = new Button { Left = 307, Top = 102, Width = 100, Height = 30,
-                Text = "Cancel setup", DialogResult = DialogResult.Cancel };
-            form.Controls.AddRange(new Control[] { text, bar, cancel });
-            form.CancelButton = cancel;
-            Exception failure = null;
-            timer.Interval = 200;
-            timer.Tick += delegate
-            {
-                if (stop.WaitOne(0)) form.DialogResult = DialogResult.Cancel;
-            };
-            form.Shown += delegate
-            {
-                timer.Start();
-                ThreadPool.QueueUserWorkItem(delegate
-                {
-                    try { Install(job); }
-                    catch (Exception error) { failure = error; }
-                    try
-                    {
-                        form.BeginInvoke((Action)delegate
-                        {
-                            form.DialogResult = failure == null ? DialogResult.OK : DialogResult.Abort;
-                        });
-                    }
-                    catch (InvalidOperationException) { }
-                });
-            };
-            DialogResult result = form.ShowDialog();
-            if (result == DialogResult.Abort && failure != null) throw failure;
-            return result == DialogResult.OK;
+            return wizard.ShowDialog() == DialogResult.OK;
         }
     }
 

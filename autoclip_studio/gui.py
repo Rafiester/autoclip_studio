@@ -32,6 +32,7 @@ from .transcription import SpeechProgress
 from .ui.caption_library import CaptionLibrary
 from .ui.clips_view import ExportThumbnailDialog, FramePickerDialog, ThumbnailTaskRunner
 from .ui.clips_workspace import ClipDetailPlayerPanel, ClipLibraryPanel
+from .ui.dependency_view import DependencyManagerView
 from .ui.download_view import DownloadView
 from .ui.log_view import LogView
 from .ui.performance_view import PerformanceView
@@ -44,7 +45,7 @@ from .youtube_metadata import YouTubeMetadata
 
 class MainWindow(QMainWindow):
     NAV_ITEMS = ["Dashboard", "New Project", "Processing Queue", "Generated Clips", "Caption Templates",
-                 "AI Provider Settings", "Speech-to-Text", "Performance"]
+                 "AI Provider Settings", "Speech-to-Text", "Performance", "Dependencies"]
 
     def __init__(self) -> None:
         super().__init__()
@@ -105,6 +106,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self._scroll_page(self._settings_page()))
         self.stack.addWidget(self._scroll_page(self._speech_settings_page()))
         self.stack.addWidget(self._scroll_page(self._performance_page()))
+        self.stack.addWidget(self._scroll_page(self._dependencies_page()))
         layout.addWidget(sidebar)
         layout.addWidget(self.stack, 1)
         self.setCentralWidget(root)
@@ -451,6 +453,12 @@ class MainWindow(QMainWindow):
             self._save_performance_settings,
         )
         page.addWidget(self.performance_view, 1)
+        return outer
+
+    def _dependencies_page(self) -> QWidget:
+        outer, page = self._page("Dependency Manager", "Inspect, repair, and manage runtimes, tools, and Whisper models")
+        self.dependency_view = DependencyManagerView(self.settings.speech)
+        page.addWidget(self.dependency_view, 1)
         return outer
 
     def _save_performance_settings(self, perf) -> None:
