@@ -454,6 +454,19 @@ QPushButton#viewToggle:checked {{
     border-color: {t["brand_primary"]};
     color: {t["text_primary"]};
 }}
+QPushButton#sourceTab {{
+    background: {t["bg_elevated"]};
+    border: 1px solid {t["border_subtle"]};
+    border-radius: 8px;
+    padding: 6px 14px;
+    color: {t["text_secondary"]};
+    font-weight: 600;
+}}
+QPushButton#sourceTab:checked {{
+    background: {t["brand_tint"]};
+    border-color: {t["brand_primary"]};
+    color: {t["text_primary"]};
+}}
 QFrame#playerStage {{
     background: #0B0C10;
     border: 1px solid {t["border_subtle"]};

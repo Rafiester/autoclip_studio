@@ -101,7 +101,14 @@ def ass_timestamp(seconds: float) -> str:
 
 def _escape(text: str) -> str:
     # libass treats an opening brace as markup. A zero-width space breaks control escapes.
-    return text.replace("\\", "\\\u200b").replace("{", "\\{").replace("}", "\\}").replace("\n", " ")
+    return (
+        text.replace("\\", "\\\u200b")
+        .replace("{", "\\{")
+        .replace("}", "\\}")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\n", r"\N")
+    )
 
 
 def _ass_color(color: str, alpha: str = "") -> str:

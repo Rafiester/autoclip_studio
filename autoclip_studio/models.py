@@ -92,6 +92,8 @@ class ProjectOptions:
     output_dir: str = "output"
     project_name: str = ""
     youtube_metadata: dict[str, str | int | None] | None = None
+    srt_path: str = ""
+    srt_offset_seconds: float = 0.0
 
     @property
     def output_size(self) -> tuple[int, int]:

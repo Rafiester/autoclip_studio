@@ -11,7 +11,7 @@ from typing import Callable
 from PySide6.QtCore import QFileInfo, QSignalBlocker, QSize, QThread, Qt, QUrl, Slot
 from PySide6.QtGui import QCloseEvent, QDesktopServices, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFileIconProvider, QFormLayout, QFrame, QGridLayout,
+    QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFileIconProvider, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
     QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
     QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
@@ -27,6 +27,7 @@ from .paths import APP_ROOT, OUTPUT_DIR, asset_path, ensure_directories
 from .pipeline import Pipeline
 from .providers import AIProvider, ProviderError
 from .speech_engine import MODELS
+from .subtitles import SrtValidationError, SrtValidationResult, parse_srt_file
 from .thumbnails import export_thumbnail
 from .transcription import SpeechProgress
 from .ui.caption_library import CaptionLibrary
@@ -34,6 +35,7 @@ from .ui.clips_view import ExportThumbnailDialog, FramePickerDialog, ThumbnailTa
 from .ui.clips_workspace import ClipDetailPlayerPanel, ClipLibraryPanel
 from .ui.dependency_view import DependencyManagerView
 from .ui.download_view import DownloadView
+from .ui.local_preview import LocalVideoDropZone, LocalVideoMetadata, LocalVideoPreview
 from .ui.log_view import LogView
 from .ui.performance_view import PerformanceView
 from .ui.speech_view import SpeechProgressView, SpeechSettingsView
@@ -205,20 +207,99 @@ class MainWindow(QMainWindow):
         form.setContentsMargins(4, 6, 4, 6)
         source_group = QGroupBox("Source video")
         source_layout = QVBoxLayout(source_group)
-        source_row = QHBoxLayout()
+
+        # Compact source tabs: YouTube Link (default) | Local File
+        tab_bar = QHBoxLayout()
+        tab_bar.setSpacing(8)
+        self.youtube_tab_btn = QPushButton("YouTube Link", objectName="sourceTab")
+        self.youtube_tab_btn.setCheckable(True)
+        self.youtube_tab_btn.setChecked(True)
+        self.local_tab_btn = QPushButton("Local File", objectName="sourceTab")
+        self.local_tab_btn.setCheckable(True)
+        self.youtube_tab_btn.clicked.connect(lambda: self.set_source_tab(0))
+        self.local_tab_btn.clicked.connect(lambda: self.set_source_tab(1))
+        tab_bar.addWidget(self.youtube_tab_btn)
+        tab_bar.addWidget(self.local_tab_btn)
+        tab_bar.addStretch()
+        source_layout.addLayout(tab_bar)
+
+        self.source_stack = QStackedWidget()
+        # Tab 0: YouTube Link (preserved)
+        yt_pane = QWidget()
+        yt_layout = QVBoxLayout(yt_pane)
+        yt_layout.setContentsMargins(0, 4, 0, 0)
+        yt_layout.setSpacing(8)
         self.source_input = QLineEdit()
-        self.source_input.setAccessibleName("Source video path or YouTube URL")
-        self.source_input.setPlaceholderText("Paste a YouTube URL or choose a local video…")
-        browse = QPushButton("Browse")
-        browse.clicked.connect(self.browse_source)
-        source_row.addWidget(self.source_input, 1)
-        source_row.addWidget(browse)
-        source_layout.addLayout(source_row)
+        self.source_input.setAccessibleName("YouTube video URL")
+        self.source_input.setPlaceholderText("Paste a YouTube video or Shorts URL…")
+        yt_layout.addWidget(self.source_input)
         self.youtube_preview = YouTubePreview()
         self.youtube_preview.metadata_changed.connect(self._update_project_name)
         self.youtube_preview.idle.connect(self._finish_close)
         self.source_input.textChanged.connect(self.youtube_preview.set_source)
-        source_layout.addWidget(self.youtube_preview)
+        yt_layout.addWidget(self.youtube_preview)
+        self.source_stack.addWidget(yt_pane)
+
+        # Tab 1: Local File
+        local_pane = QWidget()
+        local_layout = QVBoxLayout(local_pane)
+        local_layout.setContentsMargins(0, 4, 0, 0)
+        local_layout.setSpacing(8)
+        self.local_drop_zone = LocalVideoDropZone()
+        self.local_drop_zone.browse_requested.connect(self.browse_source)
+        self.local_drop_zone.file_dropped.connect(self._set_local_source)
+        local_layout.addWidget(self.local_drop_zone)
+        self.local_source_input = QLineEdit()
+        self.local_source_input.setAccessibleName("Local video file path")
+        self.local_source_input.setPlaceholderText("Choose or drop a local MP4, MKV, MOV, WEBM, or AVI file…")
+        self.local_source_input.textChanged.connect(self._on_local_text_changed)
+        local_layout.addWidget(self.local_source_input)
+        self.local_preview = LocalVideoPreview()
+        self.local_preview.metadata_changed.connect(self._update_local_project_name)
+        self.local_preview.replace_requested.connect(self.browse_source)
+        self.local_preview.remove_requested.connect(lambda: self._set_local_source(""))
+        self.local_preview.idle.connect(self._finish_close)
+        local_layout.addWidget(self.local_preview)
+        self.source_stack.addWidget(local_pane)
+        source_layout.addWidget(self.source_stack)
+
+        # Compact optional SRT import
+        self.import_srt_check = QCheckBox("Import existing subtitle (.srt)")
+        self.import_srt_check.toggled.connect(self._toggle_srt_panel)
+        source_layout.addWidget(self.import_srt_check)
+
+        self.srt_panel = QFrame(objectName="card")
+        srt_layout = QVBoxLayout(self.srt_panel)
+        srt_layout.setContentsMargins(12, 10, 12, 10)
+        srt_layout.setSpacing(8)
+        srt_row = QHBoxLayout()
+        srt_row.setSpacing(8)
+        self.srt_input = QLineEdit()
+        self.srt_input.setAccessibleName("Subtitle .srt file path")
+        self.srt_input.setPlaceholderText("Choose an .srt subtitle file (UTF-8 / Indonesian / English)…")
+        self.srt_input.textChanged.connect(self._validate_srt_inputs)
+        srt_browse = QPushButton("Browse .srt")
+        srt_browse.clicked.connect(self.browse_srt)
+        self.srt_offset = QDoubleSpinBox()
+        self.srt_offset.setRange(-60.0, 60.0)
+        self.srt_offset.setSingleStep(0.25)
+        self.srt_offset.setDecimals(2)
+        self.srt_offset.setSuffix(" s")
+        self.srt_offset.setToolTip("Optional subtitle timing offset in seconds")
+        self.srt_offset.valueChanged.connect(self._validate_srt_inputs)
+        srt_row.addWidget(self.srt_input, 1)
+        srt_row.addWidget(srt_browse)
+        srt_row.addWidget(QLabel("Offset:"))
+        srt_row.addWidget(self.srt_offset)
+        srt_layout.addLayout(srt_row)
+        self.srt_status = QLabel("Select an .srt file to validate cues and language.", objectName="muted")
+        self.srt_status.setWordWrap(True)
+        srt_layout.addWidget(self.srt_status)
+        self._srt_result: SrtValidationResult | None = None
+        self._srt_error: str = ""
+        self.srt_panel.hide()
+        source_layout.addWidget(self.srt_panel)
+
         name_row = QFormLayout()
         self.project_name = QLineEdit(placeholderText="Optional project name")
         self._auto_project_name = ""
@@ -478,9 +559,78 @@ class MainWindow(QMainWindow):
         if index in {0, 2, 3}:
             self.refresh_all()
 
+    def set_source_tab(self, index: int) -> None:
+        tab = 1 if index == 1 else 0
+        self.youtube_tab_btn.setChecked(tab == 0)
+        self.local_tab_btn.setChecked(tab == 1)
+        self.source_stack.setCurrentIndex(tab)
+
     def browse_source(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Choose source video", "", "Videos (*.mp4 *.mkv *.mov *.webm *.avi);;All files (*)")
-        if path: self.source_input.setText(path)
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose source video", "",
+            "Videos (*.mp4 *.mkv *.mov *.webm *.avi *.m4v);;All files (*)",
+        )
+        if path:
+            self.set_source_tab(1)
+            self._set_local_source(path)
+
+    def _set_local_source(self, path: str) -> None:
+        self.local_source_input.setText(path)
+        if not path:
+            self.local_preview.clear()
+
+    @Slot(str)
+    def _on_local_text_changed(self, text: str) -> None:
+        self.local_preview.set_file(text)
+
+    @Slot(object)
+    def _update_local_project_name(self, metadata: LocalVideoMetadata | None) -> None:
+        suggestion = metadata.path.stem if metadata else ""
+        if self.project_name.text() in ("", self._auto_project_name):
+            self.project_name.setText(suggestion)
+        self._auto_project_name = suggestion
+
+    def _toggle_srt_panel(self, checked: bool) -> None:
+        self.srt_panel.setVisible(checked)
+        if checked:
+            self._validate_srt_inputs()
+        else:
+            self._srt_result = None
+            self._srt_error = ""
+
+    def browse_srt(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose subtitle file", "", "SubRip Subtitles (*.srt);;All files (*)",
+        )
+        if path:
+            self.srt_input.setText(path)
+
+    def _validate_srt_inputs(self) -> None:
+        if not self.import_srt_check.isChecked():
+            self._srt_result = None
+            self._srt_error = ""
+            return
+        raw_path = self.srt_input.text().strip()
+        if not raw_path:
+            self._srt_result = None
+            self._srt_error = "Choose an .srt file or uncheck 'Import existing subtitle (.srt)'."
+            self.srt_status.setStyleSheet("color: #A3A8B5;")
+            self.srt_status.setText("Select an .srt file to validate cues and language.")
+            return
+        try:
+            result = parse_srt_file(Path(raw_path), offset_seconds=self.srt_offset.value())
+            self._srt_result = result
+            self._srt_error = ""
+            self.srt_status.setStyleSheet("color: #2ECC71;")
+            self.srt_status.setText(
+                f"✓ Valid SRT: {Path(raw_path).name}  •  {result.cue_count} cues  •  "
+                f"{result.language_label}  •  {result.encoding}"
+            )
+        except SrtValidationError as error:
+            self._srt_result = None
+            self._srt_error = str(error)
+            self.srt_status.setStyleSheet("color: #FF9AA2;")
+            self.srt_status.setText(f"Invalid SRT: {error}")
 
     def browse_output(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Choose output folder", self.output_input.text() or str(OUTPUT_DIR))
@@ -497,20 +647,39 @@ class MainWindow(QMainWindow):
         if self.worker_thread or self.speech_utility_active:
             QMessageBox.information(self, "Processing active", "Wait for or cancel the current project first.")
             return
-        source = self.source_input.text().strip()
+        using_local = self.source_stack.currentIndex() == 1
+        source = (self.local_source_input.text() if using_local else self.source_input.text()).strip()
         youtube = is_youtube_url(source)
-        error = youtube_source_error(source) if youtube else ""
-        if not youtube and (not source or not Path(source).is_file()):
-            error = "Choose an existing video file or enter a valid YouTube URL."
+        error = ""
+        if using_local:
+            if not source or not Path(source).is_file():
+                error = "Choose an existing local video file (MP4, MKV, MOV, WEBM, AVI)."
+        else:
+            error = youtube_source_error(source) if youtube else ""
+            if not youtube and (not source or not Path(source).is_file()):
+                error = "Enter a valid YouTube URL or switch to the Local File tab."
         if error:
             QMessageBox.warning(self, "Invalid source", error)
             return
         if self.min_duration.value() > self.max_duration.value():
             QMessageBox.warning(self, "Invalid duration", "Minimum duration cannot exceed maximum duration.")
             return
-        metadata = self.youtube_preview.result
+
+        srt_path = ""
+        srt_offset = 0.0
+        if self.import_srt_check.isChecked():
+            self._validate_srt_inputs()
+            if self._srt_error or self._srt_result is None:
+                QMessageBox.warning(self, "Invalid subtitle file", self._srt_error or "Choose a valid .srt file.")
+                return
+            srt_path = str(Path(self.srt_input.text().strip()).resolve())
+            srt_offset = float(self.srt_offset.value())
+
+        metadata = self.youtube_preview.result if not using_local else None
         if metadata and (not youtube or metadata.video_id != youtube_id(source)):
             metadata = None
+        local_meta = self.local_preview.result if using_local else None
+        default_name = (metadata.title if metadata else (local_meta.path.stem if local_meta else (Path(source).stem if not youtube else "")))
         options = ProjectOptions(
             source=source, clip_count=self.clip_count.value(), min_duration=self.min_duration.value(),
             max_duration=self.max_duration.value(), aspect_ratio=self.aspect.currentText(),
@@ -521,8 +690,10 @@ class MainWindow(QMainWindow):
             cache_enabled=self.cache.isChecked(), whisper_model=self.whisper_model.currentText(),
             whisper_device=self.whisper_device.currentText(), language=self.settings.speech().language or None,
             output_dir=self.settings.data.get("output_dir", ""),
-            project_name=self.project_name.text().strip() or (metadata.title if metadata else ""),
+            project_name=self.project_name.text().strip() or default_name,
             youtube_metadata=asdict(metadata) if metadata else None,
+            srt_path=srt_path,
+            srt_offset_seconds=srt_offset,
         )
         project_id = self.database.create_project(source, asdict(options))
         self.template_combo.setCurrentText(self.default_template())
@@ -1068,7 +1239,8 @@ class MainWindow(QMainWindow):
 
     def _finish_close(self) -> None:
         if (self.closing and not self.worker_thread and not self.utility_threads
-                and not self.caption_library.busy and not self.youtube_preview.busy):
+                and not self.caption_library.busy and not self.youtube_preview.busy
+                and not self.local_preview.busy):
             self.close()
 
     def save_local_settings(self) -> None:
@@ -1086,9 +1258,10 @@ class MainWindow(QMainWindow):
             if hasattr(self, "thumb_runner"):
                 self.thumb_runner.shutdown()
             self.youtube_preview.cancel()
+            self.local_preview.cancel()
             self.pipeline.manager.cancel()
             self.utility_cancel.set()
-        if self.worker_thread or self.utility_threads or self.caption_library.busy or self.youtube_preview.busy:
+        if self.worker_thread or self.utility_threads or self.caption_library.busy or self.youtube_preview.busy or self.local_preview.busy:
             self.setEnabled(False)
             self.setWindowTitle("AutoClip Studio — Shutting down…")
             event.ignore()

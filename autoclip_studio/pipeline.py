@@ -11,13 +11,14 @@ from .config import SettingsStore
 from .database import Database
 from .diagnostics import LOG, SUCCESS, log_error, redact
 from .highlights import select_highlights
-from .media import DownloadProgress, acquire_source
+from .media import DownloadProgress, acquire_source, is_youtube_url, probe
 from .models import ProjectOptions, RenderedClip, Transcript
 from .paths import CACHE_DIR, OUTPUT_DIR
 from .performance import HardwareMonitor, resolve_profile_limits
 from .process import CancelledError, ProcessManager
 from .providers import AIProvider, ProviderError
 from .rendering import render_clip, source_dimensions
+from .subtitles import parse_srt_file
 from .thumbnails import generate_clip_thumbnail
 from .transcription import SpeechProgress, export_transcript, transcribe
 
@@ -65,19 +66,40 @@ class Pipeline:
             if resume_analysis:
                 source, dimensions, transcript = _load_analysis(checkpoint)
             else:
-                self._update(project_id, 3, "Acquiring source video", progress)
+                youtube_source = is_youtube_url(options.source)
+                self._update(
+                    project_id, 3,
+                    "Downloading YouTube video" if youtube_source else "Importing local video (download skipped)",
+                    progress,
+                )
                 source = acquire_source(
                     options.source, options.cache_enabled, self.manager,
                     download_log or self._logger(progress, 4), job_dir=job_dir, progress=download_progress,
                 )
                 dimensions = source_dimensions(source, self.manager)
                 self.monitor.wait_if_constrained(perf, self.manager.cancel_event, self._logger(progress, 11))
-                self._update(project_id, 12, "Generating timestamped transcript", progress)
-                transcript = transcribe(
-                    source, options.whisper_model, options.whisper_device, options.language,
-                    options.cache_enabled, self.manager, speech_log or self._logger(progress, 13),
-                    settings=speech, progress=speech_progress, profile_limits=limits,
-                )
+                if options.srt_path:
+                    self._update(project_id, 12, "Importing external SRT subtitles (transcription skipped)", progress)
+                    info = probe(source, self.manager)
+                    vid_dur = float(info.get("format", {}).get("duration") or 0.0)
+                    srt_result = parse_srt_file(
+                        Path(options.srt_path),
+                        offset_seconds=options.srt_offset_seconds,
+                        fallback_duration=vid_dur,
+                    )
+                    transcript = srt_result.transcript
+                    LOG.info(
+                        "Imported SRT %s (%s cues, lang=%s, encoding=%s)",
+                        Path(options.srt_path).name, srt_result.cue_count,
+                        srt_result.detected_language, srt_result.encoding,
+                    )
+                else:
+                    self._update(project_id, 12, "Generating timestamped transcript", progress)
+                    transcript = transcribe(
+                        source, options.whisper_model, options.whisper_device, options.language,
+                        options.cache_enabled, self.manager, speech_log or self._logger(progress, 13),
+                        settings=speech, progress=speech_progress, profile_limits=limits,
+                    )
                 self._update(project_id, 40, "Selecting the strongest highlights", progress)
             self.manager.check_cancelled()
             self.monitor.wait_if_constrained(perf, self.manager.cancel_event, self._logger(progress, 40))
