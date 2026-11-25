@@ -1,0 +1,11 @@
+[project]
+name = "autoclip-studio"
+version = "1.0.0"
+description = "Windows-native AI-assisted video auto-clipping desktop application"
+requires-python = ">=3.11,<3.13"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
