@@ -30,7 +30,10 @@ from .paths import APP_ROOT, OUTPUT_DIR, ensure_directories
 from .pipeline import Pipeline
 from .process import CancelledError
 from .providers import AIProvider, ProviderError
+from .speech_engine import MODELS
+from .speech_view import SpeechProgressView, SpeechSettingsView
 from .style import STYLESHEET
+from .transcription import SpeechProgress
 from .worker import PipelineWorker
 
 
@@ -56,7 +59,8 @@ class FunctionThread(QThread):
 
 
 class MainWindow(QMainWindow):
-    NAV_ITEMS = ["Dashboard", "New Project", "Processing Queue", "Generated Clips", "Caption Templates", "AI Provider Settings"]
+    NAV_ITEMS = ["Dashboard", "New Project", "Processing Queue", "Generated Clips", "Caption Templates",
+                 "AI Provider Settings", "Speech-to-Text"]
 
     def __init__(self) -> None:
         super().__init__()
@@ -69,6 +73,7 @@ class MainWindow(QMainWindow):
         self.utility_threads: list[FunctionThread] = []
         self.utility_cancel = Event()
         self.utility_done: Callable[[object], None] | None = None
+        self.speech_utility_active = False
         self.project_rows: list[dict] | None = None
         self.clip_rows: list[dict] | None = None
         self.closing = False
@@ -107,6 +112,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self._clips_page())
         self.stack.addWidget(self._scroll_page(self._templates_page()))
         self.stack.addWidget(self._scroll_page(self._settings_page()))
+        self.stack.addWidget(self._scroll_page(self._speech_settings_page()))
         layout.addWidget(sidebar)
         layout.addWidget(self.stack, 1)
         self.setCentralWidget(root)
@@ -223,7 +229,7 @@ class MainWindow(QMainWindow):
         self.project_provider.setCurrentText(self.settings.data["active_provider"])
         self.project_model = QLineEdit(self.settings.provider().get("model", ""))
         self.multimodal_check = QCheckBox("Optional Gemini video analysis (uploads source)")
-        self.whisper_model = QComboBox(); self.whisper_model.addItems(["tiny", "base", "small", "medium", "large-v3"]); self.whisper_model.setCurrentText(self.settings.data["whisper_model"])
+        self.whisper_model = QComboBox(); self.whisper_model.addItems(MODELS); self.whisper_model.setCurrentText(self.settings.data["whisper_model"])
         self.whisper_device = QComboBox(); self.whisper_device.addItems(["auto", "cuda", "cpu"]); self.whisper_device.setCurrentText(self.settings.data["whisper_device"])
         self.project_provider.currentTextChanged.connect(self._project_provider_changed)
         ai_form.addRow("Provider", self.project_provider)
@@ -261,6 +267,9 @@ class MainWindow(QMainWindow):
         self.download_view = DownloadView()
         self.download_view.cancel_button.clicked.connect(self.cancel_processing)
         self.download_view.hide()
+        self.speech_progress = SpeechProgressView()
+        self.speech_progress.cancel_button.clicked.connect(self.cancel_processing)
+        self.speech_progress.hide()
         self.live_logs = LogView()
         log_actions = QHBoxLayout()
         copy_logs = QPushButton("Copy Logs")
@@ -280,6 +289,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.processing_status_row)
         layout.addWidget(self.processing_progress_row)
         layout.addWidget(self.download_view)
+        layout.addWidget(self.speech_progress)
         layout.addWidget(self.live_logs, 1)
         layout.addLayout(log_actions)
         page.addWidget(status_card, 2)
@@ -435,7 +445,7 @@ class MainWindow(QMainWindow):
         if path: self.output_input.setText(path)
 
     def generate(self) -> None:
-        if self.worker_thread:
+        if self.worker_thread or self.speech_utility_active:
             QMessageBox.information(self, "Processing active", "Wait for or cancel the current project first.")
             return
         source = self.source_input.text().strip()
@@ -453,7 +463,8 @@ class MainWindow(QMainWindow):
             provider=self.project_provider.currentText(), model=self.project_model.text().strip(),
             multimodal=self.multimodal_check.isChecked(),
             cache_enabled=self.cache.isChecked(), whisper_model=self.whisper_model.currentText(),
-            whisper_device=self.whisper_device.currentText(), output_dir=self.settings.data.get("output_dir", ""),
+            whisper_device=self.whisper_device.currentText(), language=self.settings.speech().language or None,
+            output_dir=self.settings.data.get("output_dir", ""),
         )
         project_id = self.database.create_project(source, asdict(options))
         self._start_worker(project_id, options)
@@ -467,6 +478,8 @@ class MainWindow(QMainWindow):
         self.worker.progress.connect(self.on_progress)
         self.worker.download_progress.connect(self.on_download_progress)
         self.worker.download_log.connect(self.on_download_log)
+        self.worker.speech_progress.connect(self.on_speech_progress)
+        self.worker.speech_log.connect(self.on_download_log)
         self.worker.warning.connect(self._provider_warning)
         self.worker.completed.connect(self.on_completed)
         self.worker.failed.connect(self.on_failed)
@@ -478,6 +491,7 @@ class MainWindow(QMainWindow):
         progress = 40 if resume_analysis else 0
         self.progress_bar.setValue(progress)
         self.progress_text.setText(f"{progress}%")
+        self.show_speech(False)
         self.show_download(not resume_analysis and is_youtube_url(options.source))
         self.worker_thread.start(); self.show_page(2)
 
@@ -488,12 +502,13 @@ class MainWindow(QMainWindow):
     def _update_retry_button(self) -> None:
         project = self._selected_project()
         self.retry_analysis_button.setEnabled(
-            bool(project and project["status"] == "analysis_failed" and not self.worker_thread and not self.closing)
+            bool(project and project["status"] == "analysis_failed" and not self.worker_thread
+                 and not self.speech_utility_active and not self.closing)
         )
 
     def retry_analysis(self) -> None:
         project = self._selected_project()
-        if not project or self.worker_thread or project["status"] != "analysis_failed":
+        if not project or self.worker_thread or self.speech_utility_active or project["status"] != "analysis_failed":
             return
         try:
             options = ProjectOptions(**json.loads(project["options"]))
@@ -507,11 +522,15 @@ class MainWindow(QMainWindow):
 
     def cancel_processing(self) -> None:
         downloading = not self.download_view.isHidden()
-        button = self.download_view.cancel_button if downloading else self.cancel_button
+        transcribing = not self.speech_progress.isHidden()
+        button = (self.download_view.cancel_button if downloading else
+                  self.speech_progress.cancel_button if transcribing else self.cancel_button)
         if self.worker and button.isEnabled():
             button.setEnabled(False)
             if downloading:
                 self.download_view.status.setText("Cancelling download…")
+            elif transcribing:
+                self.speech_progress.stage.setText("Cancelling transcription…")
             else:
                 self.queue_status.setText("Cancelling…")
             self.pipeline.manager.cancel()
@@ -521,9 +540,21 @@ class MainWindow(QMainWindow):
             self.download_view.reset()
         else:
             self.download_view.animation.stop()
-        self.processing_status_row.setVisible(not active)
-        self.processing_progress_row.setVisible(not active)
         self.download_view.setVisible(active)
+        self._update_processing_rows()
+
+    def show_speech(self, active: bool) -> None:
+        if active:
+            self.speech_progress.begin()
+        else:
+            self.speech_progress.timer.stop()
+        self.speech_progress.setVisible(active)
+        self._update_processing_rows()
+
+    def _update_processing_rows(self) -> None:
+        visible = self.download_view.isHidden() and self.speech_progress.isHidden()
+        self.processing_status_row.setVisible(visible)
+        self.processing_progress_row.setVisible(visible)
 
     @Slot(object)
     def on_download_progress(self, progress: DownloadProgress) -> None:
@@ -534,11 +565,20 @@ class MainWindow(QMainWindow):
     def on_download_log(self, message: str) -> None:
         self.live_logs.add_entry("INFO", message)
 
+    @Slot(object)
+    def on_speech_progress(self, progress: SpeechProgress) -> None:
+        if not self.speech_progress.isHidden() and not self.pipeline.manager.cancel_event.is_set():
+            self.speech_progress.update_transcription(progress)
+
     def on_progress(self, value: int, message: str) -> None:
         if self.pipeline.manager.cancel_event.is_set():
             return
         if value >= 12 and not self.download_view.isHidden():
             self.show_download(False)
+        if value == 12:
+            self.show_speech(True)
+        elif value >= 40 and not self.speech_progress.isHidden():
+            self.show_speech(False)
         if value:
             self.progress_bar.setValue(value)
             self.progress_text.setText(f"{value}%")
@@ -548,12 +588,14 @@ class MainWindow(QMainWindow):
 
     def on_completed(self, _project_id: str, count: int) -> None:
         self.show_download(False)
+        self.show_speech(False)
         self.queue_status.setText(f"Completed {count} clips")
         self.live_logs.add_entry("SUCCESS", "All outputs passed MP4 validation.")
         self.refresh_all()
 
     def on_failed(self, project_id: str, message: str) -> None:
         self.show_download(False)
+        self.show_speech(False)
         self.refresh_all()
         cancelled = message == "Processing cancelled"
         retryable = False
@@ -729,7 +771,36 @@ class MainWindow(QMainWindow):
             self.connection_status.setText(f"Loaded {len(values)} models.")
         self._run_utility(provider, provider.list_models, done)
 
-    def _run_utility(self, provider: AIProvider, function: Callable[[], object],
+    def _speech_settings_page(self) -> QWidget:
+        outer, layout = self._page("Speech-to-Text", "Configure local models, transcription quality and acceleration")
+        self.speech_settings = SpeechSettingsView(self.settings, self._sync_speech_defaults, self._start_speech_task)
+        layout.addWidget(self.speech_settings)
+        layout.addStretch()
+        return outer
+
+    def _sync_speech_defaults(self) -> None:
+        self.whisper_model.setCurrentText(self.settings.data["whisper_model"])
+        self.whisper_device.setCurrentText(self.settings.data["whisper_device"])
+
+    def _start_speech_task(self, function: Callable[[], object], done: Callable[[object], None]) -> bool:
+        if self.worker_thread or self.utility_threads:
+            self.speech_settings.status.setText("Wait for the current task to finish.")
+            return False
+
+        def action() -> object:
+            try:
+                return function()
+            except Exception as error:
+                raise ProviderError(redact(str(error))) from None
+
+        self.speech_utility_active = True
+        self.speech_settings.setEnabled(False)
+        self.generate_button.setEnabled(False)
+        self._update_retry_button()
+        self._run_utility(None, action, done)
+        return True
+
+    def _run_utility(self, provider: AIProvider | None, function: Callable[[], object],
                      done: Callable[[object], None]) -> None:
         if self.utility_threads:
             return
@@ -737,7 +808,8 @@ class MainWindow(QMainWindow):
         self.utility_done = done
         self.utility_cancel.clear()
         thread = FunctionThread(function, self); self.utility_threads.append(thread)
-        provider.notify = thread.warning.emit
+        if provider:
+            provider.notify = thread.warning.emit
         thread.succeeded.connect(self._utility_succeeded)
         thread.failed.connect(self._utility_failed)
         thread.warning.connect(self._utility_warning)
@@ -760,13 +832,18 @@ class MainWindow(QMainWindow):
     def _utility_succeeded(self, result: object) -> None:
         if self.utility_done and not self.closing:
             self.utility_done(result)
-            self.live_logs.add_entry("SUCCESS", "AI provider operation completed.")
-            LOG.log(SUCCESS, "AI provider operation completed")
+            operation = "Speech-to-Text operation" if self.speech_utility_active else "AI provider operation"
+            self.live_logs.add_entry("SUCCESS", f"{operation} completed.")
+            LOG.log(SUCCESS, "%s completed", operation)
 
     @Slot(str)
     def _utility_failed(self, message: str) -> None:
         self.live_logs.add_entry("ERROR", message)
-        LOG.error("AI provider operation failed\n%s", message)
+        operation = "Speech-to-Text operation" if self.speech_utility_active else "AI provider operation"
+        LOG.error("%s failed\n%s", operation, message)
+        if self.speech_utility_active:
+            self.speech_settings.status.setText(message)
+            return
         if not self.closing:
             summary = message.partition("\n")[0]
             self.connection_status.setText(f"{summary}\nSee Processing Queue for details.")
@@ -777,6 +854,11 @@ class MainWindow(QMainWindow):
         thread.deleteLater()
         self.utility_done = None
         self.provider_group.setEnabled(True)
+        if self.speech_utility_active:
+            self.speech_utility_active = False
+            self.speech_settings.setEnabled(True)
+            self.generate_button.setEnabled(self.worker_thread is None)
+            self._update_retry_button()
         self._finish_close()
 
     def _finish_close(self) -> None:

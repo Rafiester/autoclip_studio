@@ -9,6 +9,7 @@ from typing import Any
 import keyring
 
 from .paths import SETTINGS_PATH, ensure_directories
+from .speech_engine import SpeechSettings
 
 
 SERVICE_NAME = "AutoClip Studio"
@@ -34,6 +35,7 @@ DEFAULTS: dict[str, Any] = {
     "output_dir": "",
     "whisper_model": "small",
     "whisper_device": "auto",
+    "speech": asdict(SpeechSettings()),
     "hardware_encoding": True,
 }
 
@@ -66,6 +68,13 @@ class SettingsStore:
     def provider(self, name: str | None = None) -> dict[str, Any]:
         selected = name or self.data["active_provider"]
         return dict(self.data["providers"].get(selected, {}))
+
+    def speech(self) -> SpeechSettings:
+        values = self.data.get("speech", {})
+        defaults = asdict(SpeechSettings())
+        if isinstance(values, dict):
+            defaults.update({key: value for key, value in values.items() if key in defaults})
+        return SpeechSettings(**defaults)
 
     def api_key(self, provider: str) -> str:
         try:

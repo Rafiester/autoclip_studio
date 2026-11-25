@@ -17,7 +17,7 @@ from .paths import CACHE_DIR, OUTPUT_DIR
 from .process import CancelledError, ProcessManager
 from .providers import AIProvider, ProviderError
 from .rendering import render_clip, source_dimensions
-from .transcription import transcribe
+from .transcription import SpeechProgress, export_transcript, transcribe
 
 
 Progress = Callable[[int, str], None]
@@ -33,7 +33,9 @@ class Pipeline:
     def run(self, project_id: str, options: ProjectOptions, progress: Progress, *,
             resume_analysis: bool = False, warning: Callable[[str], None] | None = None,
             download_progress: Callable[[DownloadProgress], None] | None = None,
-            download_log: Callable[[str], None] | None = None) -> list[RenderedClip]:
+            download_log: Callable[[str], None] | None = None,
+            speech_progress: Callable[[SpeechProgress], None] | None = None,
+            speech_log: Callable[[str], None] | None = None) -> list[RenderedClip]:
         if resume_analysis:
             if not self.database.claim_analysis_retry(project_id, asdict(options)):
                 raise RuntimeError("This project is no longer waiting for an AI analysis retry.")
@@ -45,6 +47,7 @@ class Pipeline:
         keep_job = False
         analysis_pending = resume_analysis
         try:
+            speech = self.settings.speech()
             job_dir.mkdir(parents=True, exist_ok=True)
             if resume_analysis:
                 source, dimensions, transcript = _load_analysis(checkpoint)
@@ -58,7 +61,8 @@ class Pipeline:
                 self._update(project_id, 12, "Generating timestamped transcript", progress)
                 transcript = transcribe(
                     source, options.whisper_model, options.whisper_device, options.language,
-                    options.cache_enabled, self.manager, self._logger(progress, 13),
+                    options.cache_enabled, self.manager, speech_log or self._logger(progress, 13),
+                    settings=speech, progress=speech_progress,
                 )
                 self._update(project_id, 40, "Selecting the strongest highlights", progress)
             self.manager.check_cancelled()
@@ -91,6 +95,8 @@ class Pipeline:
                 raise RuntimeError("No usable highlights were found. Try shorter minimum duration or another video.")
             project_output = self._output_root(options) / project_id
             project_output.mkdir(parents=True, exist_ok=True)
+            if speech.export_srt:
+                export_transcript(transcript, project_output)
             rendered: list[RenderedClip] = []
             encoder_support: dict[str, bool] = {}
             hardware_encoding = bool(self.settings.data.get("hardware_encoding", True))

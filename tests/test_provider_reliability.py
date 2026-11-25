@@ -184,7 +184,7 @@ def test_ai_retry_resumes_from_disk_with_cache_disabled(monkeypatch, tmp_path):
         prepared.write_bytes(b"prepared media")
         return prepared
 
-    def transcribe(*_args):
+    def transcribe(*_args, **_kwargs):
         calls.append("transcript")
         return Transcript(60, "en", [Segment(0, 40, "A prepared transcript.")])
 

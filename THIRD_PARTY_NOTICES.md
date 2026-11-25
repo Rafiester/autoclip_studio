@@ -16,5 +16,7 @@ AutoClip Studio uses these separately installed open-source packages. Their lice
 
 The bundled FFmpeg build retains its license and build information. The [Windows build distributor](https://www.gyan.dev/ffmpeg/builds/) provides build details and source references.
 
+The Speech-to-Text integration runs a separately installed Purfview Faster-Whisper-XXL executable through its CLI and retains files supplied with standalone imports. Subtitle Edit and WhisperX were architectural references. Their application source and alignment runtime are absent from the distribution. [Purfview](https://github.com/Purfview/whisper-standalone-win) · [Subtitle Edit](https://github.com/SubtitleEdit/subtitleedit) · [WhisperX](https://github.com/m-bain/whisperX)
+
 Architecture patterns were reviewed from `Anil-matcha/AI-Youtube-Shorts-Generator` (MIT). No source files were copied into this project. The OpenShorts repository was temporarily unavailable and the Rayneth article could not be retrieved during the implementation audit on 2026-11-25.
 

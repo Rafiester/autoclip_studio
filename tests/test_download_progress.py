@@ -107,5 +107,6 @@ def test_download_card_metrics_activity_and_cancellation(app, monkeypatch, tmp_p
     window.show_download(True)
     window.on_progress(12, "Generating timestamped transcript")
     assert not view.isVisible()
+    assert window.speech_progress.isVisible()
     assert window.progress_text.text() == "12%"
     window.close()

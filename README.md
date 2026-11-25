@@ -27,7 +27,7 @@ Requirements: Windows 11, an internet connection for initial setup/model downloa
 The implemented workflow is:
 
 1. Validate/import a local file or download one YouTube video with yt-dlp.
-2. Transcribe locally with Faster-Whisper and word timestamps. CUDA is attempted when selected/available and automatically retried on CPU if runtime libraries are unavailable.
+2. Transcribe locally with Python Faster-Whisper or Purfview XXL, with configurable word timestamps, CUDA, and CPU fallback.
 3. Analyze timestamped transcript chunks with the configured provider, or use the no-key local scorer.
 4. Sanitize, rank, and remove overlapping highlights.
 5. Run OpenCV face detection only over selected highlight ranges and smooth the crop motion.
@@ -36,6 +36,10 @@ The implemented workflow is:
 8. Probe every result for a valid video stream and duration, persist clip metadata, write a project manifest, and remove successful job temporary files.
 
 Downloads and transcripts are cached when enabled. Heavy jobs are sequential and execute outside the GUI thread. Cancelling or closing the app terminates application-owned subprocess trees.
+
+## Speech-to-Text
+
+Auto can reuse an existing Subtitle Edit Purfview XXL installation and compatible models. Choose **Test Engine** to see engine compatibility, CUDA availability, and available models. The same page lets you select another executable or model folder, import an extracted standalone release, download models, and manage the transcript cache. **Auto** batching uses sequential inference. Choose **Export transcript JSON and SRT beside the clips** to keep a copy with the project. [Speech-to-text audit and benchmark](SPEECH_TO_TEXT_AUDIT.md)
 
 ## Providers
 
@@ -68,7 +72,7 @@ Set `AUTOCLIP_DATA_DIR` before launch to use another data root, or choose an out
 
 ## Development and validation
 
-Run `BUILD.bat` from a Windows x64 checkout to create the PyInstaller OneDir build. FFmpeg, ffprobe, yt-dlp, Deno, the Qt plugins and Python runtime travel with it. An NVIDIA driver is required for NVENC. CUDA transcription requires compatible NVIDIA CUDA and cuDNN libraries available to CTranslate2 on the host. CPU transcription and encoding remain available.
+Run `BUILD.bat` from a Windows x64 checkout to create the PyInstaller OneDir build. FFmpeg, ffprobe, yt-dlp, Deno, the Qt plugins and Python runtime travel with it. An NVIDIA driver is required for NVENC. Each CUDA speech engine uses its own compatible CUDA and cuDNN runtime. Purfview is detected from a separate installation. CPU transcription and encoding remain available.
 
 Fresh setups install the SHA-256-verified FFmpeg 9.1 Windows Essentials archive. Setup checks the executables in existing tool folders and reports their versions. The source launcher uses the Python yt-dlp version in `requirements.txt` when there is no project-local yt-dlp executable. OneDir uses the version pinned alongside Deno in `scripts/build.ps1`.
 

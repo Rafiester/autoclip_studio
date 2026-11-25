@@ -29,12 +29,19 @@ def write_ass(transcript: Transcript, highlight: Highlight, output: Path,
     width, height = resolution
     style = TEMPLATES.get(template_name, TEMPLATES["Impact"])
     words: list[Word] = []
+    events: list[str] = []
     for segment in transcript.segments:
         if segment.end < highlight.start or segment.start > highlight.end:
             continue
-        words.extend(segment.words or _synthetic_words(segment.start, segment.end, segment.text))
+        if segment.words:
+            words.extend(segment.words)
+        else:
+            start = max(0, segment.start - highlight.start)
+            end = min(highlight.end, segment.end) - highlight.start
+            if end > start:
+                events.append(f"Dialogue: 0,{ass_timestamp(start)},{ass_timestamp(end)},Default,,0,0,0,,"
+                              + _escape(segment.text.upper()))
     words = [word for word in words if word.end >= highlight.start and word.start <= highlight.end]
-    events: list[str] = []
     for index in range(0, len(words), 5):
         group = words[index:index + 5]
         start = max(0, group[0].start - highlight.start)
@@ -62,10 +69,4 @@ Style: Default,{style['font']},{style['size']},{style['primary']},{style['accent
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     output.write_text(header + "\n".join(events) + "\n", encoding="utf-8-sig")
-
-
-def _synthetic_words(start: float, end: float, text: str) -> list[Word]:
-    tokens = text.split()
-    step = (end - start) / max(1, len(tokens))
-    return [Word(start + index * step, start + (index + 1) * step, token) for index, token in enumerate(tokens)]
 
