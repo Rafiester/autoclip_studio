@@ -44,14 +44,14 @@ class _Thumbnail(QWidget):
         clip = QPainterPath()
         clip.addRoundedRect(bounds, 8, 8)
         painter.setClipPath(clip)
-        painter.fillRect(bounds, QColor("#272639" if self.loading else "#10131d"))
+        painter.fillRect(bounds, QColor("#22252E" if self.loading else "#101116"))
         if not self.image.isNull():
             size = self.image.size().scaled(QSize(self.width(), self.height()), Qt.AspectRatioMode.KeepAspectRatio)
             target = QRectF((self.width() - size.width()) / 2, (self.height() - size.height()) / 2,
                             size.width(), size.height())
             painter.drawImage(target, self.image)
         elif not self.loading:
-            painter.setPen(QColor("#aeb5c8"))
+            painter.setPen(QColor("#A3A8B5"))
             painter.drawText(bounds, Qt.AlignmentFlag.AlignCenter, "Thumbnail unavailable")
         if self.clock:
             font = QFont("Consolas")

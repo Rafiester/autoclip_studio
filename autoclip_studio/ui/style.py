@@ -1,75 +1,410 @@
-STYLESHEET = """
-* { font-family: "Segoe UI"; font-size: 13px; color: #e6e9ef; }
-QMainWindow, QWidget { background: #0c0f14; }
-QFrame#sidebar { background: #11151d; border-right: 1px solid #242a35; }
-QLabel#brand { font-size: 22px; font-weight: 700; color: #ffffff; padding: 12px 10px; }
-QLabel#pageTitle { font-size: 28px; font-weight: 700; color: #ffffff; }
-QLabel#muted { color: #8993a4; }
-QLabel#metricValue { font-size: 22px; font-weight: 700; color: #ffffff; }
-QFrame#videoPreview { background: #1a1a29; border: 1px solid #36314a; border-radius: 10px; }
-QFrame#videoPreview QLabel, QWidget#videoPreviewSkeleton { background: transparent; }
-QLabel#projectNameLabel { background: transparent; }
-QLabel#videoPreviewStatus { color: #c8b7ff; font-size: 12px; font-weight: 700; }
-QLabel#videoPreviewTitle { color: #faf8ff; font-size: 17px; font-weight: 700; }
-QLabel#videoPreviewChannel { color: #e3def2; font-weight: 600; }
-QLabel#videoPreviewDetail { color: #b2b5c9; }
-QFrame#videoPreviewBar { background: #302c43; border-radius: 5px; }
-QPushButton#videoPreviewRetry { padding: 5px 12px; }
-QFrame#card, QGroupBox { background: #151a23; border: 1px solid #262d39; border-radius: 12px; }
-QGroupBox { margin-top: 14px; padding: 18px 14px 14px; font-weight: 600; }
-QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 6px; color: #b8c0cc; }
-QPushButton { background: #202631; border: 1px solid #313947; border-radius: 8px; padding: 9px 14px; }
-QPushButton:hover { background: #29313e; border-color: #435066; }
-QPushButton:pressed { background: #171c24; }
-QPushButton:disabled { color: #626b79; background: #171b22; border-color: #222832; }
-QPushButton#primary { background: #6d5dfc; border-color: #796aff; color: white; font-weight: 700; padding: 11px 18px; }
-QPushButton#primary:hover { background: #5e4edb; }
-QPushButton#danger { color: #ff8d94; border-color: #62353b; }
-QPushButton#nav { text-align: left; border: none; background: transparent; color: #9aa4b4; padding: 10px 14px; }
-QPushButton#nav:hover { background: #1a202b; color: white; }
-QPushButton#nav:checked { background: #24233d; color: #a99fff; border-left: 3px solid #7868ff; }
+"""Centralized design tokens and Qt stylesheet for AutoClip Studio."""
+from __future__ import annotations
+
+TOKENS: dict[str, str] = {
+    # Core brand & surfaces
+    "bg_app": "#101116",          # Obsidian Black
+    "bg_sidebar": "#14151C",
+    "bg_surface": "#191B22",      # Cards & panels
+    "bg_elevated": "#22252E",     # Inputs & raised surfaces
+    "bg_hover": "#2B2F3A",
+    "bg_pressed": "#15171E",
+    "border_subtle": "#30343E",
+    "border_strong": "#434856",
+    # Brand red accents
+    "brand_primary": "#E53935",   # Modern Red
+    "brand_primary_hover": "#D32F2F",
+    "brand_primary_pressed": "#B71C1C",
+    "brand_accent": "#FF5A4F",    # Accent Red
+    "brand_tint": "#2A181B",
+    "brand_tint_hover": "#361E22",
+    "brand_border_soft": "#6B2A29",
+    # Typography
+    "text_primary": "#F5F5F7",    # Soft White
+    "text_secondary": "#A3A8B5",  # Muted text
+    "text_disabled": "#696E7B",
+    # Semantic (kept distinct from brand primary actions)
+    "semantic_success": "#2ECC71",
+    "semantic_warning": "#F5A623",
+    "semantic_danger_fg": "#FF9AA2",
+    "semantic_danger_border": "#7A3D47",
+    "semantic_danger_hover": "#2D1A1F",
+    "semantic_danger_pressed": "#3C2027",
+    "semantic_info": "#5BA4CF",
+}
+
+def pick_ui_font() -> str:
+    """Return the preferred installed UI font, falling back to Segoe UI."""
+    preferred = ("Inter", "Geist", "Manrope", "Segoe UI")
+    try:
+        from PySide6.QtGui import QFontDatabase
+        from PySide6.QtWidgets import QApplication
+
+        if QApplication.instance() is not None:
+            available = set(QFontDatabase.families())
+            for family in preferred:
+                if family in available:
+                    return family
+    except Exception:
+        pass
+    return "Segoe UI"
+
+
+def build_stylesheet(tokens: dict[str, str] = TOKENS, font_family: str | None = None) -> str:
+    t = tokens
+    ui_font = font_family or pick_ui_font()
+    return f"""
+* {{
+    font-family: "{ui_font}";
+    font-size: 13px;
+    color: {t["text_primary"]};
+}}
+QMainWindow, QWidget {{
+    background: {t["bg_app"]};
+}}
+QLabel, QCheckBox, QRadioButton {{
+    background: transparent;
+}}
+QScrollArea, QScrollArea > QWidget > QWidget {{
+    background: transparent;
+}}
+QFrame#sidebar {{
+    background: {t["bg_sidebar"]};
+    border-right: 1px solid {t["border_subtle"]};
+}}
+QLabel#brand {{
+    background: transparent;
+    font-size: 18px;
+    font-weight: 700;
+    color: {t["text_primary"]};
+    padding: 4px 4px;
+}}
+QLabel#pageTitle {{
+    font-size: 24px;
+    font-weight: 700;
+    color: {t["text_primary"]};
+}}
+QLabel#sectionTitle {{
+    font-size: 15px;
+    font-weight: 600;
+    color: {t["text_primary"]};
+}}
+QLabel#muted {{
+    color: {t["text_secondary"]};
+}}
+QLabel#metricValue {{
+    font-size: 22px;
+    font-weight: 700;
+    color: {t["text_primary"]};
+}}
+QFrame#videoPreview {{
+    background: {t["bg_surface"]};
+    border: 1px solid {t["border_subtle"]};
+    border-radius: 10px;
+}}
+QFrame#videoPreview QLabel, QWidget#videoPreviewSkeleton {{
+    background: transparent;
+}}
+QLabel#projectNameLabel {{
+    background: transparent;
+}}
+QLabel#videoPreviewStatus {{
+    color: {t["brand_accent"]};
+    font-size: 12px;
+    font-weight: 700;
+}}
+QLabel#videoPreviewTitle {{
+    color: {t["text_primary"]};
+    font-size: 16px;
+    font-weight: 700;
+}}
+QLabel#videoPreviewChannel {{
+    color: {t["text_primary"]};
+    font-weight: 600;
+}}
+QLabel#videoPreviewDetail {{
+    color: {t["text_secondary"]};
+}}
+QFrame#videoPreviewBar {{
+    background: {t["bg_elevated"]};
+    border-radius: 5px;
+}}
+QPushButton#videoPreviewRetry {{
+    padding: 6px 12px;
+}}
+QFrame#card, QGroupBox {{
+    background: {t["bg_surface"]};
+    border: 1px solid {t["border_subtle"]};
+    border-radius: 12px;
+}}
+QGroupBox {{
+    margin-top: 16px;
+    padding: 20px 16px 16px;
+    font-weight: 600;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    left: 14px;
+    padding: 0 6px;
+    color: {t["text_secondary"]};
+    background: {t["bg_app"]};
+}}
+QPushButton {{
+    background: {t["bg_elevated"]};
+    border: 1px solid {t["border_subtle"]};
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-weight: 500;
+}}
+QPushButton:hover {{
+    background: {t["bg_hover"]};
+    border-color: {t["border_strong"]};
+}}
+QPushButton:pressed {{
+    background: {t["bg_pressed"]};
+}}
+QPushButton:disabled {{
+    color: {t["text_disabled"]};
+    background: {t["bg_surface"]};
+    border-color: {t["border_subtle"]};
+}}
+QPushButton#primary {{
+    background: {t["brand_primary"]};
+    border-color: {t["brand_accent"]};
+    color: {t["text_primary"]};
+    font-weight: 700;
+    padding: 10px 18px;
+}}
+QPushButton#primary:hover {{
+    background: {t["brand_primary_hover"]};
+}}
+QPushButton#primary:pressed {{
+    background: {t["brand_primary_pressed"]};
+}}
+QPushButton#primary:disabled {{
+    background: #3A2224;
+    border-color: #4D2C2F;
+    color: #9A7A7D;
+}}
+QPushButton#danger {{
+    color: {t["semantic_danger_fg"]};
+    background: transparent;
+    border: 1px solid {t["semantic_danger_border"]};
+}}
+QPushButton#danger:hover {{
+    background: {t["semantic_danger_hover"]};
+    border-color: {t["semantic_danger_fg"]};
+}}
+QPushButton#danger:pressed {{
+    background: {t["semantic_danger_pressed"]};
+}}
+QPushButton#danger:disabled {{
+    color: {t["text_disabled"]};
+    border-color: {t["border_subtle"]};
+}}
+QPushButton#nav {{
+    text-align: left;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: {t["text_secondary"]};
+    padding: 10px 12px;
+    font-weight: 500;
+}}
+QPushButton#nav:hover {{
+    background: {t["bg_elevated"]};
+    color: {t["text_primary"]};
+}}
+QPushButton#nav:checked {{
+    background: {t["brand_tint"]};
+    color: {t["text_primary"]};
+    font-weight: 600;
+    border-left: 3px solid {t["brand_primary"]};
+}}
 QPushButton:focus, QPushButton#primary:focus, QPushButton#nav:focus, QPushButton#danger:focus,
-QCheckBox:focus, QTableWidget:focus { border: 2px solid #a99fff; }
-QLineEdit, QSpinBox, QComboBox, QPlainTextEdit { background: #0f131a; border: 1px solid #303846; border-radius: 8px; padding: 8px; selection-background-color: #6d5dfc; }
-QLineEdit:focus, QSpinBox:focus, QComboBox:focus { border-color: #7868ff; }
-QComboBox QAbstractItemView { background: #171c25; selection-background-color: #35305f; border: 1px solid #313947; }
-QTableWidget { background: #11161e; alternate-background-color: #151b24; border: 1px solid #242c38; border-radius: 9px; gridline-color: #242c38; }
-QHeaderView::section { background: #1b212b; color: #aeb7c5; border: none; border-bottom: 1px solid #303744; padding: 9px; }
-QProgressBar { background: #171c24; border: none; border-radius: 5px; height: 10px; text-align: center; color: transparent; }
-QProgressBar::chunk { background: #7566ff; border-radius: 5px; }
-QWidget#downloadView, QWidget#downloadView QLabel { background: transparent; }
-QFrame#transferIndicator { background: #9f90ff; border-radius: 3px; }
-QLabel#transferStatus { color: #e6e9ef; font-weight: 600; }
-QLabel#transferSummary, QLabel#transferMetric, QLabel#transferPercent { font-family: "Consolas", "Courier New"; }
-QLabel#transferSummary { color: #a9b2c5; }
-QLabel#transferMetricLabel { color: #a9b2c5; font-size: 12px; }
-QLabel#transferMetric { color: #e6e9ef; font-size: 14px; }
-QLabel#transferPercent { min-width: 88px; color: #c5baff; font-size: 23px; font-weight: 700; }
-QProgressBar#downloadTransfer { background: #25243a; border-radius: 4px; }
-QProgressBar#downloadTransfer::chunk { background: #8876ff; border-radius: 4px; }
-QPushButton#cancelDownload { color: #f4a1aa; background: transparent; border: 1px solid #774a55; padding: 6px 10px; }
-QPushButton#cancelDownload:hover { background: #35232d; border-color: #b26979; }
-QPushButton#cancelDownload:pressed { background: #452731; border-color: #d58a99; }
-QPushButton#cancelDownload:focus { border-color: #f4a1aa; }
-QPushButton#cancelDownload:disabled { border-color: #503940; color: #9b737d; }
-QFrame#captionCard { background: #161a25; border: 1px solid #2a3040; border-radius: 12px; }
-QFrame#captionCard:hover { border-color: #4a4261; }
-QFrame#captionCard[playing="true"] { border-color: #665798; }
-QFrame#captionCard[selected="true"] { background: #1d1a2c; border-color: #9b82ff; }
-QLabel#captionTitle { background: transparent; color: #f5f1ff; font-size: 15px; font-weight: 700; }
-QLabel#captionDescription { background: transparent; color: #aeb5c8; }
-QProgressBar#captionPreviewProgress { background: #2b2f42; border-radius: 1px; }
-QProgressBar#captionPreviewProgress::chunk { background: #a48dff; border-radius: 1px; }
-QPushButton#captionPreviewPlay, QPushButton#captionPreviewReplay, QPushButton#captionSelect { padding: 5px 5px; }
-QPushButton#captionPreviewReplay { font-size: 15px; }
-QPushButton#captionSelect[selected="true"] { background: #32284f; color: #dfd4ff; border-color: #6d56b4; }
-QPushButton#captionSelect[selected="true"]:hover { background: #3a2e5b; }
-QPushButton#captionSelect[selected="true"]:focus { border-color: #c5baff; }
-QCheckBox { spacing: 8px; }
-QCheckBox::indicator { width: 17px; height: 17px; }
-QScrollBar:vertical { width: 9px; background: transparent; }
-QScrollBar::handle:vertical { background: #333c4b; min-height: 28px; border-radius: 4px; }
-QSlider::groove:horizontal { height: 5px; background: #282e39; border-radius: 2px; }
-QSlider::handle:horizontal { width: 15px; margin: -5px 0; background: #7b6cff; border-radius: 7px; }
+QCheckBox:focus, QTableWidget:focus {{
+    border: 2px solid {t["brand_accent"]};
+}}
+QLineEdit, QSpinBox, QComboBox, QPlainTextEdit {{
+    background: {t["bg_elevated"]};
+    border: 1px solid {t["border_subtle"]};
+    border-radius: 8px;
+    padding: 8px 10px;
+    selection-background-color: {t["brand_primary"]};
+}}
+QLineEdit:focus, QSpinBox:focus, QComboBox:focus, QPlainTextEdit:focus {{
+    border-color: {t["brand_accent"]};
+}}
+QComboBox QAbstractItemView {{
+    background: {t["bg_elevated"]};
+    selection-background-color: {t["brand_tint"]};
+    border: 1px solid {t["border_strong"]};
+}}
+QTableWidget {{
+    background: {t["bg_surface"]};
+    alternate-background-color: #1D2028;
+    border: 1px solid {t["border_subtle"]};
+    border-radius: 10px;
+    gridline-color: {t["border_subtle"]};
+}}
+QHeaderView::section {{
+    background: {t["bg_elevated"]};
+    color: {t["text_secondary"]};
+    border: none;
+    border-bottom: 1px solid {t["border_subtle"]};
+    padding: 9px 10px;
+    font-weight: 600;
+}}
+QProgressBar {{
+    background: {t["bg_elevated"]};
+    border: none;
+    border-radius: 5px;
+    height: 10px;
+    text-align: center;
+    color: transparent;
+}}
+QProgressBar::chunk {{
+    background: {t["brand_primary"]};
+    border-radius: 5px;
+}}
+QWidget#downloadView, QWidget#downloadView QLabel {{
+    background: transparent;
+}}
+QFrame#transferIndicator {{
+    background: {t["brand_accent"]};
+    border-radius: 3px;
+}}
+QLabel#transferStatus {{
+    color: {t["text_primary"]};
+    font-weight: 600;
+}}
+QLabel#transferSummary, QLabel#transferMetric, QLabel#transferPercent {{
+    font-family: "Consolas", "Courier New";
+}}
+QLabel#transferSummary {{
+    color: {t["text_secondary"]};
+}}
+QLabel#transferMetricLabel {{
+    color: {t["text_secondary"]};
+    font-size: 12px;
+}}
+QLabel#transferMetric {{
+    color: {t["text_primary"]};
+    font-size: 14px;
+}}
+QLabel#transferPercent {{
+    min-width: 88px;
+    color: {t["brand_accent"]};
+    font-size: 23px;
+    font-weight: 700;
+}}
+QProgressBar#downloadTransfer {{
+    background: {t["bg_elevated"]};
+    border-radius: 4px;
+}}
+QProgressBar#downloadTransfer::chunk {{
+    background: {t["brand_primary"]};
+    border-radius: 4px;
+}}
+QPushButton#cancelDownload {{
+    color: {t["semantic_danger_fg"]};
+    background: transparent;
+    border: 1px solid {t["semantic_danger_border"]};
+    padding: 6px 10px;
+}}
+QPushButton#cancelDownload:hover {{
+    background: {t["semantic_danger_hover"]};
+    border-color: {t["semantic_danger_fg"]};
+}}
+QPushButton#cancelDownload:pressed {{
+    background: {t["semantic_danger_pressed"]};
+    border-color: {t["semantic_danger_fg"]};
+}}
+QPushButton#cancelDownload:focus {{
+    border-color: {t["semantic_danger_fg"]};
+}}
+QPushButton#cancelDownload:disabled {{
+    border-color: {t["border_subtle"]};
+    color: {t["text_disabled"]};
+}}
+QFrame#captionCard {{
+    background: {t["bg_surface"]};
+    border: 1px solid {t["border_subtle"]};
+    border-radius: 12px;
+}}
+QFrame#captionCard:hover {{
+    border-color: {t["border_strong"]};
+}}
+QFrame#captionCard[playing="true"] {{
+    border-color: {t["brand_border_soft"]};
+}}
+QFrame#captionCard[selected="true"] {{
+    background: {t["brand_tint"]};
+    border-color: {t["brand_primary"]};
+}}
+QLabel#captionTitle {{
+    background: transparent;
+    color: {t["text_primary"]};
+    font-size: 15px;
+    font-weight: 700;
+}}
+QLabel#captionDescription {{
+    background: transparent;
+    color: {t["text_secondary"]};
+}}
+QProgressBar#captionPreviewProgress {{
+    background: {t["bg_elevated"]};
+    border-radius: 1px;
+}}
+QProgressBar#captionPreviewProgress::chunk {{
+    background: {t["brand_accent"]};
+    border-radius: 1px;
+}}
+QPushButton#captionPreviewPlay, QPushButton#captionPreviewReplay, QPushButton#captionSelect {{
+    padding: 6px 8px;
+}}
+QPushButton#captionPreviewReplay {{
+    font-size: 15px;
+}}
+QPushButton#captionSelect[selected="true"] {{
+    background: {t["brand_tint_hover"]};
+    color: {t["text_primary"]};
+    border-color: {t["brand_primary"]};
+}}
+QPushButton#captionSelect[selected="true"]:hover {{
+    background: #422428;
+}}
+QPushButton#captionSelect[selected="true"]:focus {{
+    border-color: {t["brand_accent"]};
+}}
+QCheckBox {{
+    spacing: 8px;
+}}
+QCheckBox::indicator {{
+    width: 17px;
+    height: 17px;
+}}
+QScrollBar:vertical {{
+    width: 9px;
+    background: transparent;
+}}
+QScrollBar::handle:vertical {{
+    background: {t["border_strong"]};
+    min-height: 28px;
+    border-radius: 4px;
+}}
+QSlider::groove:horizontal {{
+    height: 5px;
+    background: {t["bg_elevated"]};
+    border-radius: 2px;
+}}
+QSlider::handle:horizontal {{
+    width: 15px;
+    margin: -5px 0;
+    background: {t["brand_primary"]};
+    border-radius: 7px;
+}}
 """
 
+
+STYLESHEET = build_stylesheet()

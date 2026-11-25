@@ -94,7 +94,7 @@ class _Canvas(QWidget):
             fill = QLinearGradient(x, 0, x + width, 0)
             fill.setColorAt(0, QColor(self.template.primary))
             fill.setColorAt(1, QColor(self.template.accent))
-        painter.strokePath(sample, QPen(QColor("#151020"), 2.5, Qt.PenStyle.SolidLine,
+        painter.strokePath(sample, QPen(QColor("#101116"), 2.5, Qt.PenStyle.SolidLine,
                                         Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
         painter.fillPath(sample, fill)
         if effect in {"emphasis", "viral"}:

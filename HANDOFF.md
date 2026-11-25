@@ -1,65 +1,61 @@
 # AutoClip Studio — Agent Handoff & Progress
 
 **Last Updated:** 2026-11-26  
-**Current Phase:** Phase 2 — SaaS UI/UX Optimization and Brand System (Starting)
+**Current Phase:** Phase 3 — Performance Optimization (Starting)
 
 ## Execution Status
 
 ### Completed Tasks
-- **Phase 1 — Logo and Application Identity (Complete):**
-  - Inspected `AutoClipTrans.png` (669x373, ARGB32 wordmark), `AutoClipJpg.jpg` (2048x2048 symbol), and `AutoClipSvg.svg` (2048x2048 vector symbol).
-  - Centralized brand assets in `autoclip_studio/assets/` (`AutoClipTrans.png`, `AutoClipJpg.jpg`, `AutoClipSvg.svg`) while preserving originals.
-  - Added `asset_path()` in `autoclip_studio/paths.py` for CWD-independent resource resolution.
-  - Updated `packaging/make_icon.py` to generate multi-resolution `autoclip.ico` (16, 24, 32, 48, 64, 128, 256 px) and transparent `symbol.png` (256x256) with rounded squircle alpha masking.
-  - Updated `packaging/AutoClipStudio.spec` and `packaging/build.py`; rebuilt `AutoClipStudio.exe` with the new embedded icon.
-  - Integrated wordmark in `MainWindow` sidebar (`gui.py`) with high-DPI scaling and set Qt application/window icons.
-  - Added `tests/test_branding.py` (3 tests) and verified `AutoClipStudio.exe --check` exits 0.
+- **Phase 1 — Logo and Application Identity (Complete, commit `cd597dc`):**
+  - Centralized brand assets in `autoclip_studio/assets/`, added `asset_path()` in `paths.py`, generated multi-res `autoclip.ico` and `symbol.png`, rebuilt `AutoClipStudio.exe` launcher, integrated sidebar wordmark and window icon.
+- **Phase 2 — SaaS UI/UX Optimization and Brand System (Complete):**
+  - Audited `style.py`, `gui.py`, `youtube_preview.py`, `caption_library.py`, `download_view.py`, `log_view.py`, `speech_view.py`.
+  - Centralized `TOKENS`, `pick_ui_font()`, `build_stylesheet()`, and `STYLESHEET` in `autoclip_studio/ui/style.py` using Obsidian Black `#101116`, Modern Red `#E53935`, Accent Red `#FF5A4F`, Soft White `#F5F5F7`, Surface `#191B22`, Elevated `#22252E`, Border `#30343E`, Muted `#A3A8B5`, and distinct semantic colors.
+  - Removed all obsolete purple branding from `style.py`, `youtube_preview.py`, and `caption_library.py` while preserving user-selected caption template colors in `captions.py`.
+  - Fixed global `QLabel`/`QCheckBox`/`QScrollArea` transparent backgrounds, refined spacing/alignment in `gui.py` (Dashboard, New Project, Provider Settings), and preserved `760x560` minimum layout compatibility.
+  - Added `tests/test_ui_theme.py` (2 tests) and verified native Windows screenshot rendering.
 
 ### In-Progress Tasks
-- Phase 2: Auditing `autoclip_studio/ui/style.py`, `gui.py`, and UI widgets (`caption_library.py`, `download_view.py`, `log_view.py`, `speech_view.py`, `youtube_preview.py`).
+- Phase 3: Auditing worker architecture, STT (`speech_engine.py`, `transcription.py`), face tracking (`tracking.py`), FFmpeg rendering (`rendering.py`), caching (`pipeline.py`, `database.py`), and `config.py`.
 
 ### Pending Tasks
-- Phase 2: SaaS UI/UX Optimization & Red Brand System.
 - Phase 3: Performance Optimization (Eco/Balanced/Turbo profiles, psutil/NVML monitoring, thermal protection, Gaming Mode, pipeline & cache optimizations, benchmarks).
 - Final Validation, Regression Testing & Handoff.
 
-## Modified Files
-- `autoclip_studio/assets/` (`AutoClipTrans.png`, `AutoClipJpg.jpg`, `AutoClipSvg.svg`, `autoclip.ico`, `symbol.png`)
-- `autoclip_studio/paths.py`
+## Modified Files (Phase 2)
+- `autoclip_studio/ui/style.py`
+- `autoclip_studio/ui/youtube_preview.py`
+- `autoclip_studio/ui/caption_library.py`
 - `autoclip_studio/gui.py`
-- `packaging/make_icon.py`
-- `packaging/AutoClipStudio.spec`
-- `packaging/build.py`
-- `AutoClipStudio.exe`
-- `tests/test_branding.py`
+- `tests/test_ui_theme.py`
 - `OPTIMIZATION_PLAN.md`
 - `HANDOFF.md`
 
 ## Architectural & Design Decisions
-- Used `AutoClipJpg.jpg` clipped with a `365/2048` rounded-rect alpha mask in `make_icon.py` so the 4 white corner triangles become transparent in `.ico` and `symbol.png` without altering the logo artwork.
-- Kept `AutoClipTrans.png` uncropped in `MainWindow._build_brand_header()` with `devicePixelRatioF()` scaling.
+- `pick_ui_font()` checks `QFontDatabase.families()` at runtime and picks the first installed font from `("Inter", "Geist", "Manrope", "Segoe UI")`, avoiding Qt QSS multi-family fallback issues in offscreen rendering.
+- Sidebar width kept at `192px` with `20px` page margins so `760x560` minimum window size satisfies `DownloadView` width constraints (`568 >= 560`).
 
 ## Relevant Installed Skills Used
-- None required for Phase 1 (routine asset/build integration). Phase 2 will use `ui-ux-pro-max` / `design-system` / `frontend-design` as applicable.
+- `ui-ux-pro-max`, `design-system` (Phase 2).
+- `python-performance-optimization` (upcoming Phase 3).
 
 ## Known Bugs & Limitations
-- Note: `tests/test_branding.py` sets `QT_QPA_PLATFORM=offscreen` before creating `QApplication` so headless clipboard tests in `tests/test_log_panel.py` share the offscreen QPA platform cleanly.
+- None recorded.
 
 ## Test Results
-- `.\.venv\Scripts\python.exe -m pytest -q`: **57 passed**.
-- `AutoClipStudio.exe --check`: exit code **0**.
+- `.\.venv\Scripts\python.exe -m pytest -q`: **59 passed**.
 
 ## Performance Benchmark Results
 - Not yet measured (Phase 3).
 
 ## Latest Validated Git Checkpoint
-- Pending commit for Phase 1 (`feat: integrate AutoClip Studio brand assets`).
+- `cd597dc` — `feat: integrate AutoClip Studio brand assets` (Phase 2 commit pending).
 
 ## Recommended Next Steps
-1. Read `autoclip_studio/ui/style.py` and UI subviews to audit purple branding and layout issues.
-2. Centralize red brand tokens (`#101116`, `#E53935`, `#FF5A4F`, `#F5F5F7`, `#191B22`, `#22252E`, `#30343E`, `#A3A8B5`) and refine all pages.
+1. Commit Phase 2 (`refactor: unify red SaaS design system`).
+2. Read `config.py`, `pipeline.py`, `worker.py`, `rendering.py`, `transcription.py`, `tracking.py` to design Phase 3 performance profiles, hardware monitoring, thermal protection, Gaming Mode, and pipeline/cache optimizations.
 
 ## Resume Instructions for Another Agent
-1. Read `HANDOFF.md` and `OPTIMIZATION_PLAN.md` to see the latest checked items and current phase.
-2. Run `git status` and `.\.venv\Scripts\python.exe -m pytest -q` to verify environment health.
-3. Continue from the first unchecked task in `OPTIMIZATION_PLAN.md`.
+1. Read `HANDOFF.md` and `OPTIMIZATION_PLAN.md`.
+2. Run `.\.venv\Scripts\python.exe -m pytest -q`.
+3. Continue from the first unchecked task in Phase 3 of `OPTIMIZATION_PLAN.md`.

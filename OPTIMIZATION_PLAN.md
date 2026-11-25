@@ -12,7 +12,7 @@ Execute phases 1–3 in order in the existing Windows-native repository. Work au
 - [x] Validate launcher, taskbar, sidebar, setup wizard (if present), high-DPI behavior and resource paths from a different working directory. Do not overwrite a working executable until replacement is validated.
 
 ## Phase 2 — SaaS UI/UX optimization and brand system
-- [ ] Audit current Qt/PySide6 UI, shared styles, widgets and navigation. Use relevant installed UI/UX and motion skills selectively. Keep native desktop architecture; do not replace it with a web stack.
+- [x] Audit current Qt/PySide6 UI, shared styles, widgets and navigation. Use relevant installed UI/UX and motion skills selectively. Keep native desktop architecture; do not replace it with a web stack.
 
 ### Brand guidelines
 | Token | Value | Usage |
@@ -28,11 +28,11 @@ Execute phases 1–3 in order in the existing Windows-native repository. Work au
 
 Use Inter, Geist or Manrope if available/licensed, with Segoe UI fallback. Medium/semibold headings, compact spacing, readable body text. Adopt an 8px spacing rhythm, consistent 8–12px radii, restrained shadows and red accents. Avoid excessive gradients, glow and red backgrounds. Keep semantic success green, warning amber and error visually distinct from brand actions; verify contrast and keyboard focus. Do not recolor user-selected caption templates as part of branding.
 
-- [ ] Centralize design tokens, typography, reusable cards, buttons, inputs, dialogs, status indicators and progress components. Remove obsolete purple branding without changing semantic or user-customized colors.
-- [ ] Refine sidebar, Dashboard, New Project, Processing Queue, Generated Clips, Caption Templates, AI Provider Settings, Speech-to-Text and existing setup/component screens. Preserve navigation and functionality. Fix unintended rectangular label backgrounds, clipping, inconsistent padding and alignment.
-- [ ] Preserve YouTube metadata preview, IDM-style downloader progress, selectable/copyable logs, caption selection and animated previews, local/cloud STT, provider settings and setup progress wherever already implemented. If any are absent, record them as outside this optimization scope rather than silently implementing unrelated features.
-- [ ] Use responsive Qt layouts, sensible minimum window sizes, high-DPI scaling, clear loading/empty/error states, keyboard navigation and restrained animations. No perpetual animations or expensive effects when idle. Keep destructive actions distinct from primary actions.
-- [ ] Verify representative screens at common window sizes and 100/125/150% scaling where available. Capture screenshots locally if supported. Test existing workflows with fixtures, without paid API calls.
+- [x] Centralize design tokens, typography, reusable cards, buttons, inputs, dialogs, status indicators and progress components. Remove obsolete purple branding without changing semantic or user-customized colors.
+- [x] Refine sidebar, Dashboard, New Project, Processing Queue, Generated Clips, Caption Templates, AI Provider Settings, Speech-to-Text and existing setup/component screens. Preserve navigation and functionality. Fix unintended rectangular label backgrounds, clipping, inconsistent padding and alignment.
+- [x] Preserve YouTube metadata preview, IDM-style downloader progress, selectable/copyable logs, caption selection and animated previews, local/cloud STT, provider settings and setup progress wherever already implemented. If any are absent, record them as outside this optimization scope rather than silently implementing unrelated features.
+- [x] Use responsive Qt layouts, sensible minimum window sizes, high-DPI scaling, clear loading/empty/error states, keyboard navigation and restrained animations. No perpetual animations or expensive effects when idle. Keep destructive actions distinct from primary actions.
+- [x] Verify representative screens at common window sizes and 100/125/150% scaling where available. Capture screenshots locally if supported. Test existing workflows with fixtures, without paid API calls.
 
 ## Phase 3 — Performance optimization
 Target: Windows 11, Ryzen 5 6600-series CPU, RTX 3050 laptop GPU, 16 GB dual-channel RAM. Detect actual hardware and VRAM instead of assuming capacity. Audit current worker architecture, STT, face tracking, FFmpeg, downloads, caching and analysis before changes.
