@@ -129,32 +129,72 @@ def test_database_thumbnail_persistence_and_clip_deletion(tmp_path: Path, monkey
 
 
 def test_generated_clips_ui_displays_thumbnail_and_actions(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("AUTOCLIP_DATA_DIR", str(tmp_path / "data"))
     app = _app()
     from autoclip_studio.gui import MainWindow
 
+    monkeypatch.setattr("autoclip_studio.gui.Database", lambda: Database(tmp_path / "clips_ui.db"))
     clip_path = tmp_path / "01-ui.mp4"
     _make_test_clip(clip_path, dark=False)
     thumb = generate_clip_thumbnail(clip_path, tmp_path / "thumbnails", title="UI Clip")
 
+    clip2_path = tmp_path / "02-other.mp4"
+    _make_test_clip(clip2_path, dark=False)
+    thumb2 = generate_clip_thumbnail(clip2_path, tmp_path / "thumbnails", title="Second Clip")
+
     window = MainWindow()
     try:
         pid = window.database.create_project("source.mp4", {})
-        window.database.add_clip(
-            pid, str(clip_path), "UI Clip", "Hook", "Desc", 88, 3.0,
+        cid1 = window.database.add_clip(
+            pid, str(clip_path), "UI Clip", "Hook", "First description", 88, 3.0,
             thumbnail_path=str(thumb.preview_path),
             thumbnail_raw_path=str(thumb.raw_path),
             thumbnail_timestamp=thumb.timestamp,
             thumbnail_cache_key=thumb.cache_key,
         )
+        window.database.add_clip(
+            pid, str(clip2_path), "Second Clip", "Hook2", "Second description", 72, 5.0,
+            thumbnail_path=str(thumb2.preview_path),
+            thumbnail_raw_path=str(thumb2.raw_path),
+            thumbnail_timestamp=thumb2.timestamp,
+            thumbnail_cache_key=thumb2.cache_key,
+        )
         window.show_page(3)
-        window.clips_table.selectRow(0)
         app.processEvents()
 
-        assert window.regen_thumb_button.isEnabled()
-        assert window.pick_frame_button.isEnabled()
-        assert window.export_thumb_button.isEnabled()
-        assert window.delete_clip_button.isEnabled()
-        assert "Thumbnail ready" in window.clip_meta.text()
+        # Summary metrics reflect actual clip data
+        assert window.clips_library.card_count() == 2
+        assert window.clips_library.summary_count.findChild(type(window.clip_detail.title_label), "summaryValue").text() == "2"
+        assert "80/100" in window.clips_library.summary_score.findChild(type(window.clip_detail.title_label), "summaryValue").text()
+
+        # Select clip & inspect detail player/actions
+        window.clips_library.select_clip_by_id(cid1)
+        app.processEvents()
+        assert window.clip_detail.primary_btn.isEnabled()
+        assert window.clip_detail.more_btn.isEnabled()
+        assert window.clip_detail.action_regen_thumb.isEnabled()
+        assert window.clip_detail.action_pick_frame.isEnabled()
+        assert window.clip_detail.action_export_thumb.isEnabled()
+        assert window.clip_detail.action_rename_clip.isEnabled()
+        assert window.clip_detail.action_delete_clip.isEnabled()
+        assert "Thumbnail ready" in window.clip_detail.specs_label.text()
+        assert "360×640" in window.clip_detail.specs_label.text()
+        assert "9:16" in window.clip_detail.specs_label.text()
+
+        # Grid / List toggle, sort, and search
+        window.clips_library.set_view_mode("grid")
+        app.processEvents()
+        assert window.clips_library.card_count() == 2
+        window.clips_library.search_input.setText("Second")
+        app.processEvents()
+        assert window.clips_library.card_count() == 1
+        window.clips_library.search_input.clear()
+
+        # Rename clip persists in SQLite
+        assert window.database.rename_clip(cid1, "Renamed Viral Clip")
+        window.clip_rows = None
+        window.refresh_all()
+        app.processEvents()
+        window.clips_library.select_clip_by_id(cid1)
+        assert window.clip_detail.title_label.text() == "Renamed Viral Clip"
     finally:
         window.close()

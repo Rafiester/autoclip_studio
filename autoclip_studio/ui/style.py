@@ -5,12 +5,12 @@ TOKENS: dict[str, str] = {
     # Core brand & surfaces
     "bg_app": "#101116",          # Obsidian Black
     "bg_sidebar": "#14151C",
-    "bg_surface": "#191B22",      # Cards & panels
+    "bg_surface": "#1A1C23",      # Cards & panels
     "bg_elevated": "#22252E",     # Inputs & raised surfaces
     "bg_hover": "#2B2F3A",
     "bg_pressed": "#15171E",
-    "border_subtle": "#30343E",
-    "border_strong": "#434856",
+    "border_subtle": "#2B2E38",
+    "border_strong": "#3F4452",
     # Brand red accents
     "brand_primary": "#E53935",   # Modern Red
     "brand_primary_hover": "#D32F2F",
@@ -403,6 +403,94 @@ QSlider::handle:horizontal {{
     margin: -5px 0;
     background: {t["brand_primary"]};
     border-radius: 7px;
+}}
+QFrame#summaryPill {{
+    background: {t["bg_surface"]};
+    border: 1px solid {t["border_subtle"]};
+    border-radius: 10px;
+}}
+QLabel#summaryValue {{
+    font-size: 16px;
+    font-weight: 700;
+    color: {t["text_primary"]};
+}}
+QFrame#clipLibraryCard {{
+    background: {t["bg_surface"]};
+    border: 1px solid {t["border_subtle"]};
+    border-radius: 10px;
+}}
+QFrame#clipLibraryCard:hover {{
+    background: #1F222B;
+    border-color: {t["border_strong"]};
+}}
+QFrame#clipLibraryCard[selected="true"] {{
+    background: #23181B;
+    border: 1px solid #8A3331;
+}}
+QLabel#scorePill {{
+    background: {t["bg_elevated"]};
+    border: 1px solid {t["border_subtle"]};
+    border-radius: 6px;
+    padding: 2px 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: {t["text_primary"]};
+}}
+QLabel#statusChip {{
+    background: {t["bg_elevated"]};
+    border-radius: 6px;
+    padding: 2px 7px;
+    font-size: 11px;
+    color: {t["text_secondary"]};
+}}
+QPushButton#viewToggle {{
+    background: {t["bg_elevated"]};
+    border: 1px solid {t["border_subtle"]};
+    padding: 6px 10px;
+    color: {t["text_secondary"]};
+}}
+QPushButton#viewToggle:checked {{
+    background: {t["brand_tint"]};
+    border-color: {t["brand_primary"]};
+    color: {t["text_primary"]};
+}}
+QFrame#playerStage {{
+    background: #0B0C10;
+    border: 1px solid {t["border_subtle"]};
+    border-radius: 10px;
+}}
+QPushButton#iconButton {{
+    background: {t["bg_elevated"]};
+    border: 1px solid {t["border_subtle"]};
+    border-radius: 8px;
+    padding: 6px 10px;
+}}
+QPushButton#iconButton:hover {{
+    background: {t["bg_hover"]};
+    border-color: {t["border_strong"]};
+}}
+QPushButton#iconButton::menu-indicator {{
+    subcontrol-origin: padding;
+    subcontrol-position: right center;
+    right: 6px;
+}}
+QMenu {{
+    background: {t["bg_surface"]};
+    border: 1px solid {t["border_strong"]};
+    border-radius: 8px;
+    padding: 6px;
+}}
+QMenu::item {{
+    padding: 7px 14px;
+    border-radius: 6px;
+}}
+QMenu::item:selected {{
+    background: {t["bg_hover"]};
+}}
+QMenu::separator {{
+    height: 1px;
+    background: {t["border_subtle"]};
+    margin: 4px 8px;
 }}
 """
 

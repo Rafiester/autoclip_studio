@@ -112,6 +112,13 @@ class Database:
                 (thumbnail_path, thumbnail_raw_path, thumbnail_timestamp, thumbnail_cache_key, clip_id),
             )
 
+    def rename_clip(self, clip_id: str, title: str) -> bool:
+        cleaned = title.strip()
+        if not cleaned:
+            return False
+        with self._lock, closing(self._connect()) as db, db:
+            return db.execute("UPDATE clips SET title = ? WHERE id = ?", (cleaned, clip_id)).rowcount == 1
+
     def delete_clip(self, clip_id: str) -> dict[str, Any] | None:
         with self._lock, closing(self._connect()) as db, db:
             row = db.execute("SELECT * FROM clips WHERE id = ?", (clip_id,)).fetchone()

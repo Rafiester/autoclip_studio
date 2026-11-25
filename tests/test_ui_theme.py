@@ -23,9 +23,9 @@ def test_brand_tokens_and_no_legacy_purple() -> None:
     assert TOKENS["brand_primary"] == "#E53935"
     assert TOKENS["brand_accent"] == "#FF5A4F"
     assert TOKENS["text_primary"] == "#F5F5F7"
-    assert TOKENS["bg_surface"] == "#191B22"
+    assert TOKENS["bg_surface"] == "#1A1C23"
     assert TOKENS["bg_elevated"] == "#22252E"
-    assert TOKENS["border_subtle"] == "#30343E"
+    assert TOKENS["border_subtle"] == "#2B2E38"
     assert TOKENS["text_secondary"] == "#A3A8B5"
 
     lowered = STYLESHEET.lower()
