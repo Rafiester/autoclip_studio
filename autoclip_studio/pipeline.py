@@ -14,6 +14,7 @@ from .highlights import select_highlights
 from .media import DownloadProgress, acquire_source
 from .models import ProjectOptions, RenderedClip, Transcript
 from .paths import CACHE_DIR, OUTPUT_DIR
+from .performance import HardwareMonitor, resolve_profile_limits
 from .process import CancelledError, ProcessManager
 from .providers import AIProvider, ProviderError
 from .rendering import render_clip, source_dimensions
@@ -25,10 +26,12 @@ Progress = Callable[[int, str], None]
 
 class Pipeline:
     def __init__(self, database: Database, settings: SettingsStore,
-                 manager: ProcessManager | None = None) -> None:
+                 manager: ProcessManager | None = None,
+                 monitor: HardwareMonitor | None = None) -> None:
         self.database = database
         self.settings = settings
         self.manager = manager or ProcessManager()
+        self.monitor = monitor or HardwareMonitor()
 
     def run(self, project_id: str, options: ProjectOptions, progress: Progress, *,
             resume_analysis: bool = False, warning: Callable[[str], None] | None = None,
@@ -48,6 +51,15 @@ class Pipeline:
         analysis_pending = resume_analysis
         try:
             speech = self.settings.speech()
+            perf = self.settings.performance()
+            snap = self.monitor.snapshot(perf.gaming_process if perf.gaming_mode else "")
+            limits = resolve_profile_limits(perf.profile, snap)
+            self.manager.default_creationflags = limits.subprocess_priority_flags
+            LOG.info(
+                "Performance profile=%s (cpu_threads=%s, ffmpeg_threads=%s, batch=%s, track_interval=%.2fs)",
+                limits.profile, limits.cpu_threads, limits.ffmpeg_threads,
+                limits.whisper_batch_size, limits.tracking_sample_interval,
+            )
             job_dir.mkdir(parents=True, exist_ok=True)
             if resume_analysis:
                 source, dimensions, transcript = _load_analysis(checkpoint)
@@ -58,14 +70,16 @@ class Pipeline:
                     download_log or self._logger(progress, 4), job_dir=job_dir, progress=download_progress,
                 )
                 dimensions = source_dimensions(source, self.manager)
+                self.monitor.wait_if_constrained(perf, self.manager.cancel_event, self._logger(progress, 11))
                 self._update(project_id, 12, "Generating timestamped transcript", progress)
                 transcript = transcribe(
                     source, options.whisper_model, options.whisper_device, options.language,
                     options.cache_enabled, self.manager, speech_log or self._logger(progress, 13),
-                    settings=speech, progress=speech_progress,
+                    settings=speech, progress=speech_progress, profile_limits=limits,
                 )
                 self._update(project_id, 40, "Selecting the strongest highlights", progress)
             self.manager.check_cancelled()
+            self.monitor.wait_if_constrained(perf, self.manager.cancel_event, self._logger(progress, 40))
             try:
                 provider = self._provider(options.provider, options.model, warning)
                 if resume_analysis:
@@ -78,7 +92,8 @@ class Pipeline:
                     ))
                 highlights = select_highlights(
                     transcript, options.clip_count, options.min_duration, options.max_duration,
-                    provider, self._logger(progress, 40), source, options.multimodal, manager=self.manager,
+                    provider, self._logger(progress, 40), source, options.multimodal,
+                    manager=self.manager, cache_enabled=options.cache_enabled,
                 )
             except ProviderError as error:
                 self.manager.check_cancelled()
@@ -102,6 +117,7 @@ class Pipeline:
             hardware_encoding = bool(self.settings.data.get("hardware_encoding", True))
             for index, highlight in enumerate(highlights, 1):
                 self.manager.check_cancelled()
+                self.monitor.wait_if_constrained(perf, self.manager.cancel_event, self._logger(progress, 48))
                 start_progress = 48 + round((index - 1) / len(highlights) * 47)
                 self._update(project_id, start_progress, f"Rendering clip {index}/{len(highlights)}", progress)
                 slug = _slug(highlight.title) or f"clip-{index}"
@@ -112,6 +128,7 @@ class Pipeline:
                     options.captions, options.caption_template,
                     hardware_encoding, self.manager, self._logger(progress, start_progress),
                     dimensions=dimensions, encoder_support=encoder_support,
+                    profile_limits=limits, cache_enabled=options.cache_enabled,
                 )
                 rendered_clip = RenderedClip(output, highlight, duration)
                 rendered.append(rendered_clip)

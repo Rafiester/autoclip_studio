@@ -10,6 +10,7 @@ import keyring
 
 from .captions import TEMPLATE_DEFAULT
 from .paths import SETTINGS_PATH, ensure_directories
+from .performance import PerformanceSettings
 from .speech_engine import SpeechSettings
 
 
@@ -38,6 +39,7 @@ DEFAULTS: dict[str, Any] = {
     "whisper_model": "small",
     "whisper_device": "auto",
     "speech": asdict(SpeechSettings()),
+    "performance": asdict(PerformanceSettings()),
     "hardware_encoding": True,
 }
 
@@ -77,6 +79,13 @@ class SettingsStore:
         if isinstance(values, dict):
             defaults.update({key: value for key, value in values.items() if key in defaults})
         return SpeechSettings(**defaults)
+
+    def performance(self) -> PerformanceSettings:
+        values = self.data.get("performance", {})
+        defaults = asdict(PerformanceSettings())
+        if isinstance(values, dict):
+            defaults.update({key: value for key, value in values.items() if key in defaults})
+        return PerformanceSettings(**defaults)
 
     def api_key(self, provider: str) -> str:
         try:

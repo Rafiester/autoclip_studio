@@ -30,6 +30,7 @@ class ProcessManager:
         self.cancel_event = threading.Event()
         self._processes: dict[subprocess.Popen[str], object] = {}
         self._lock = threading.Lock()
+        self.default_creationflags = 0
 
     def reset(self) -> None:
         self.cancel_event.clear()
@@ -45,8 +46,10 @@ class ProcessManager:
     def run(self, command: Sequence[str | Path], *, cwd: Path | None = None,
             on_output: Callable[[str], None] | None = None,
             env: dict[str, str] | None = None,
-            output_tail: int | None = None) -> subprocess.CompletedProcess[str]:
-        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            output_tail: int | None = None,
+            creationflags_extra: int | None = None) -> subprocess.CompletedProcess[str]:
+        extra = self.default_creationflags if creationflags_extra is None else creationflags_extra
+        flags = (subprocess.CREATE_NO_WINDOW | extra) if os.name == "nt" else 0
         with self._lock:
             self.check_cancelled()
             job = win32job.CreateJobObject(None, "") if os.name == "nt" else None

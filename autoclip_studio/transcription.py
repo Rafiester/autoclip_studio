@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import math
@@ -16,6 +17,7 @@ from typing import Callable
 from .media import probe
 from .models import Segment, Transcript, Word
 from .paths import CACHE_DIR
+from .performance import ProfileLimits
 from .process import CancelledError, ProcessManager
 from .speech_engine import (
     GpuInfo, Purfview, SpeechSettings, choose_compute, download_speech_model, find_executable,
@@ -139,7 +141,8 @@ def _batch_size(requested: int, device: str, gpu: GpuInfo | None, model: str) ->
 def transcribe(media_path: Path, model_name: str, device_preference: str,
                language: str | None, cache: bool, manager: ProcessManager,
                log: Callable[[str], None], *, settings: SpeechSettings | None = None,
-               progress: Callable[[SpeechProgress], None] | None = None) -> Transcript:
+               progress: Callable[[SpeechProgress], None] | None = None,
+               profile_limits: ProfileLimits | None = None) -> Transcript:
     settings = settings or SpeechSettings()
     language = language or settings.language or None
     reporter = _Reporter(model_name, progress)
@@ -181,12 +184,19 @@ def transcribe(media_path: Path, model_name: str, device_preference: str,
         model_stat = (model_path / "model.bin").stat()
         engine_id += f":{model_path}:{model_stat.st_size}:{model_stat.st_mtime_ns}"
     relevant_settings = (settings.vad, settings.word_timestamps)
-    attempts = [(device, choose_compute(device, settings.compute_type, gpu),
-                 _batch_size(settings.batch_size, device, gpu, model_name))]
+    requested_batch = settings.batch_size if settings.batch_size > 0 else (
+        profile_limits.whisper_batch_size if profile_limits is not None else 0
+    )
+    cpu_threads = profile_limits.cpu_threads if profile_limits is not None else 0
+    primary_compute = choose_compute(device, settings.compute_type, gpu)
+    primary_batch = _batch_size(requested_batch, device, gpu, model_name)
+    attempts = [(device, primary_compute, primary_batch)]
     if xxl and not {"--batched", "--batch_size"} <= xxl.flags and attempts[0][2] > 1:
         log("This Purfview build does not support batch mode; using sequential inference")
         attempts[0] = (device, attempts[0][1], 1)
     if device == "cuda":
+        if attempts[0][2] > 2:
+            attempts.append(("cuda", primary_compute, max(1, attempts[0][2] // 2)))
         if attempts[0][1:] != ("int8_float16", 1):
             attempts.append(("cuda", "int8_float16", 1))
         if settings.cpu_fallback:
@@ -214,10 +224,16 @@ def transcribe(media_path: Path, model_name: str, device_preference: str,
                     settings, manager, log, reporter, audio_duration,
                 )
             else:
-                entries, detected, duration = _run_python(
-                    model_path or model_name, media_path, device, compute, batch, language,
-                    settings, manager, reporter,
-                )
+                if cpu_threads > 0:
+                    entries, detected, duration = _run_python(
+                        model_path or model_name, media_path, device, compute, batch, language,
+                        settings, manager, reporter, cpu_threads=cpu_threads,
+                    )
+                else:
+                    entries, detected, duration = _run_python(
+                        model_path or model_name, media_path, device, compute, batch, language,
+                        settings, manager, reporter,
+                    )
         except CancelledError:
             raise
         except Exception as error:
@@ -246,9 +262,12 @@ def transcribe(media_path: Path, model_name: str, device_preference: str,
 
 def _run_python(model_name: str | Path, media_path: Path, device: str, compute: str, batch: int,
                 language: str | None, settings: SpeechSettings, manager: ProcessManager,
-                reporter: _Reporter) -> tuple[list[dict], str, float]:
+                reporter: _Reporter, *, cpu_threads: int = 0) -> tuple[list[dict], str, float]:
     from faster_whisper import BatchedInferencePipeline, WhisperModel
-    model = WhisperModel(str(model_name), device=device, compute_type=compute, download_root=str(model_cache_root()))
+    model = WhisperModel(
+        str(model_name), device=device, compute_type=compute,
+        cpu_threads=max(0, cpu_threads), download_root=str(model_cache_root()),
+    )
     iterator = None
     try:
         manager.check_cancelled()
@@ -277,6 +296,8 @@ def _run_python(model_name: str | Path, media_path: Path, device: str, compute: 
         if iterator is not None:
             iterator.close()
         model.model.unload_model()
+        del model
+        gc.collect()
 
 
 def _run_purfview(engine: Purfview, model: Path, model_name: str, media: Path, device: str, compute: str,

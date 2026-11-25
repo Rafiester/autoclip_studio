@@ -32,6 +32,7 @@ from .transcription import SpeechProgress
 from .ui.caption_library import CaptionLibrary
 from .ui.download_view import DownloadView
 from .ui.log_view import LogView
+from .ui.performance_view import PerformanceView
 from .ui.speech_view import SpeechProgressView, SpeechSettingsView
 from .ui.style import STYLESHEET
 from .ui.youtube_preview import YouTubePreview
@@ -41,7 +42,7 @@ from .youtube_metadata import YouTubeMetadata
 
 class MainWindow(QMainWindow):
     NAV_ITEMS = ["Dashboard", "New Project", "Processing Queue", "Generated Clips", "Caption Templates",
-                 "AI Provider Settings", "Speech-to-Text"]
+                 "AI Provider Settings", "Speech-to-Text", "Performance"]
 
     def __init__(self) -> None:
         super().__init__()
@@ -98,6 +99,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self._templates_page())
         self.stack.addWidget(self._scroll_page(self._settings_page()))
         self.stack.addWidget(self._scroll_page(self._speech_settings_page()))
+        self.stack.addWidget(self._scroll_page(self._performance_page()))
         layout.addWidget(sidebar)
         layout.addWidget(self.stack, 1)
         self.setCentralWidget(root)
@@ -442,9 +444,25 @@ class MainWindow(QMainWindow):
         table.setAlternatingRowColors(True); table.verticalHeader().setVisible(False)
         return table
 
+    def _performance_page(self) -> QWidget:
+        outer, page = self._page("Performance", "Adaptive resource profiles, thermal protection, and live hardware telemetry")
+        self.performance_view = PerformanceView(
+            self.pipeline.monitor,
+            self.settings.performance(),
+            self._save_performance_settings,
+        )
+        page.addWidget(self.performance_view, 1)
+        return outer
+
+    def _save_performance_settings(self, perf) -> None:
+        self.settings.data["performance"] = asdict(perf)
+        self.settings.save()
+
     def show_page(self, index: int) -> None:
         if self.stack.currentIndex() == 4 and index != 4:
             self.caption_library.stop()
+        if hasattr(self, "performance_view"):
+            self.performance_view.set_polling(index == 7)
         self.stack.setCurrentIndex(index)
         for button_index, button in enumerate(self.nav_buttons):
             button.setChecked(button_index == index)
@@ -931,6 +949,8 @@ class MainWindow(QMainWindow):
             self.closing = True
             self.player.stop()
             self.caption_library.stop()
+            if hasattr(self, "performance_view"):
+                self.performance_view.set_polling(False)
             self.youtube_preview.cancel()
             self.pipeline.manager.cancel()
             self.utility_cancel.set()
@@ -939,6 +959,7 @@ class MainWindow(QMainWindow):
             self.setWindowTitle("AutoClip Studio — Shutting down…")
             event.ignore()
             return
+        self.pipeline.monitor.shutdown()
         event.accept()
 
 

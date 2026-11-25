@@ -9,6 +9,7 @@ from typing import Callable
 from .captions import write_ass
 from .media import probe, validate_mp4
 from .models import Highlight, Transcript
+from .performance import ProfileLimits
 from .process import ProcessManager, find_media_tool
 from .tracking import crop_x_expression, track_faces
 
@@ -32,7 +33,9 @@ def render_clip(source: Path, highlight: Highlight, transcript: Transcript,
                 caption_template: str, hardware: bool, manager: ProcessManager,
                 log: Callable[[str], None], *,
                 dimensions: tuple[int, int] | None = None,
-                encoder_support: dict[str, bool] | None = None) -> float:
+                encoder_support: dict[str, bool] | None = None,
+                profile_limits: ProfileLimits | None = None,
+                cache_enabled: bool = False) -> float:
     work_dir.mkdir(parents=True, exist_ok=True)
     output.parent.mkdir(parents=True, exist_ok=True)
     src_width, src_height = dimensions or source_dimensions(source, manager)
@@ -48,7 +51,11 @@ def render_clip(source: Path, highlight: Highlight, transcript: Transcript,
     y = max(0, (src_height - crop_height) // 2)
     points = []
     if face_tracking and crop_width < src_width:
-        points = track_faces(source, highlight.start, highlight.end, crop_width, manager, log)
+        interval = profile_limits.tracking_sample_interval if profile_limits else 0.75
+        points = track_faces(
+            source, highlight.start, highlight.end, crop_width, manager, log,
+            sample_interval=interval, cache_enabled=cache_enabled,
+        )
     x_expression = crop_x_expression(points, x_fallback).replace(",", "\\,")
     filters = [
         f"crop={crop_width}:{crop_height}:'{x_expression}':{y}",
@@ -59,9 +66,10 @@ def render_clip(source: Path, highlight: Highlight, transcript: Transcript,
         write_ass(transcript, highlight, ass_path, output_size, caption_template)
         filters.append("subtitles=captions.ass")
     duration = highlight.end - highlight.start
+    thread_args = ["-threads", str(profile_limits.ffmpeg_threads)] if profile_limits else []
     base = [
         find_media_tool("ffmpeg"), "-hide_banner", "-nostats", "-progress", "pipe:1",
-        "-stats_period", "0.5", "-y", "-ss", f"{highlight.start:.3f}",
+        "-stats_period", "0.5", "-y", *thread_args, "-ss", f"{highlight.start:.3f}",
         "-i", str(source), "-t", f"{duration:.3f}", "-vf", ",".join(filters),
         "-map", "0:v:0", "-map", "0:a?", "-c:a", "aac", "-b:a", "160k",
         "-movflags", "+faststart", "-pix_fmt", "yuv420p",
@@ -78,17 +86,19 @@ def render_clip(source: Path, highlight: Highlight, transcript: Transcript,
                 if base[0] not in encoder_support:
                     encoder_support[base[0]] = nvenc_available(manager)
                 can_use_nvenc = encoder_support[base[0]]
+        nvenc_preset = profile_limits.nvenc_preset if profile_limits else "p5"
+        cpu_preset = profile_limits.cpu_preset if profile_limits else "medium"
         if can_use_nvenc:
-            command = base + ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", "21", str(staging)]
+            command = base + ["-c:v", "h264_nvenc", "-preset", nvenc_preset, "-cq", "21", str(staging)]
             try:
-                log("Rendering with NVIDIA NVENC")
+                log(f"Rendering with NVIDIA NVENC ({nvenc_preset})")
                 manager.run(command, cwd=work_dir, on_output=_ffmpeg_logger(log), output_tail=50)
             except subprocess.CalledProcessError as error:
                 log(f"NVENC failed; retrying with CPU encoder ({_last_line(error.output)})")
-                _render_cpu(base, staging, work_dir, manager, log)
+                _render_cpu(base, staging, work_dir, manager, log, preset=cpu_preset)
         else:
-            log("Rendering with CPU encoder")
-            _render_cpu(base, staging, work_dir, manager, log)
+            log(f"Rendering with CPU encoder ({cpu_preset})")
+            _render_cpu(base, staging, work_dir, manager, log, preset=cpu_preset)
         rendered_duration = validate_mp4(staging, manager)
         manager.check_cancelled()
         staging.replace(output)
@@ -98,9 +108,9 @@ def render_clip(source: Path, highlight: Highlight, transcript: Transcript,
 
 
 def _render_cpu(base: list[str], output: Path, work_dir: Path,
-                manager: ProcessManager, log: Callable[[str], None]) -> None:
+                manager: ProcessManager, log: Callable[[str], None], *, preset: str = "medium") -> None:
     manager.run(
-        base + ["-c:v", "libx264", "-preset", "medium", "-crf", "20", str(output)],
+        base + ["-c:v", "libx264", "-preset", preset, "-crf", "20", str(output)],
         cwd=work_dir, on_output=_ffmpeg_logger(log), output_tail=50,
     )
 

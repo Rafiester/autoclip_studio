@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
+from dataclasses import asdict
 from pathlib import Path
 from typing import Callable
 
 from .models import Highlight, Segment, Transcript
+from .paths import CACHE_DIR
 from .process import CancelledError, ProcessManager
 from .providers import AIProvider, ProviderError
 
@@ -39,10 +42,44 @@ def chunk_transcript(transcript: Transcript, chunk_seconds: int = 1200,
     return chunks
 
 
+def _highlights_cache_path(
+    transcript: Transcript, count: int, min_duration: int, max_duration: int,
+    provider: AIProvider, multimodal: bool,
+) -> Path:
+    transcript_digest = hashlib.sha256(
+        json.dumps(transcript.to_dict(), sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    key = json.dumps({
+        "schema": "v1",
+        "transcript": transcript_digest,
+        "count": count,
+        "min_duration": min_duration,
+        "max_duration": max_duration,
+        "provider": provider.kind,
+        "model": provider.model,
+        "multimodal": multimodal,
+    }, sort_keys=True)
+    return CACHE_DIR / "highlights" / f"{hashlib.sha256(key.encode('utf-8')).hexdigest()[:32]}.json"
+
+
 def select_highlights(transcript: Transcript, count: int, min_duration: int,
                       max_duration: int, provider: AIProvider | None,
                       log: Callable[[str], None], video_path: Path | None = None,
-                      multimodal: bool = False, *, manager: ProcessManager | None = None) -> list[Highlight]:
+                      multimodal: bool = False, *, manager: ProcessManager | None = None,
+                      cache_enabled: bool = False) -> list[Highlight]:
+    cache_path = (
+        _highlights_cache_path(transcript, count, min_duration, max_duration, provider, multimodal)
+        if (cache_enabled and provider is not None) else None
+    )
+    if cache_path is not None and cache_path.is_file():
+        try:
+            cached = [Highlight.from_dict(item) for item in json.loads(cache_path.read_text(encoding="utf-8"))]
+            if cached:
+                log(f"Using cached AI highlight selection ({len(cached)} clips)")
+                return cached
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+
     candidates: list[Highlight] = []
     if multimodal and provider and provider.kind == "gemini" and video_path:
         log("Uploading source to Gemini for optional multimodal analysis")
@@ -81,7 +118,14 @@ def select_highlights(transcript: Transcript, count: int, min_duration: int,
         log("Using local transcript scoring (configure an API key for semantic AI ranking)")
         candidates = local_highlights(transcript, max(count * 3, count), min_duration, max_duration, manager=manager)
     valid = [item for item in candidates if min_duration * 0.6 <= item.end - item.start <= max_duration * 1.25]
-    return dedupe(valid or candidates, limit=count)
+    selected = dedupe(valid or candidates, limit=count)
+    if cache_path is not None and provider is not None and selected:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps([asdict(item) for item in selected], ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+    return selected
 
 
 def parse_highlights(raw: str, duration: float) -> list[Highlight]:
