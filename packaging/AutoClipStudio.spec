@@ -2,7 +2,8 @@ from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
-root = Path(SPECPATH)
+packaging_dir = Path(SPECPATH)
+root = packaging_dir.parent
 icon = root / "build" / "assets" / "autoclip.ico"
 ffmpeg = root / "tools" / "ffmpeg"
 helpers = root / "tools" / "package"
@@ -19,7 +20,7 @@ media_files += [
 ]
 data = media_files + [
     (str(icon), "assets"),
-    (str(root / "THIRD_PARTY_NOTICES.md"), "."),
+    (str(root / "docs" / "THIRD_PARTY_NOTICES.md"), "."),
 ]
 for package in ("faster_whisper", "cv2"):
     data += collect_data_files(package)
@@ -41,6 +42,6 @@ exe = EXE(
     console=False,
     upx=False,
     icon=str(icon),
-    version=str(root / "packaging" / "version_info.txt"),
+    version=str(packaging_dir / "version_info.txt"),
 )
 coll = COLLECT(exe, a.binaries, a.datas, upx=False, name="AutoClipStudio")

@@ -39,7 +39,7 @@ Downloads and transcripts are cached when enabled. Heavy jobs are sequential and
 
 ## Speech-to-Text
 
-Auto can reuse an existing Subtitle Edit Purfview XXL installation and compatible models. Choose **Test Engine** to see engine compatibility, CUDA availability, and available models. The same page lets you select another executable or model folder, import an extracted standalone release, download models, and manage the transcript cache. **Auto** batching uses sequential inference. Choose **Export transcript JSON and SRT beside the clips** to keep a copy with the project. [Speech-to-text audit and benchmark](SPEECH_TO_TEXT_AUDIT.md)
+Auto can reuse an existing Subtitle Edit Purfview XXL installation and compatible models. Choose **Test Engine** to see engine compatibility, CUDA availability, and available models. The same page lets you select another executable or model folder, import an extracted standalone release, download models, and manage the transcript cache. **Auto** batching uses sequential inference. Choose **Export transcript JSON and SRT beside the clips** to keep a copy with the project. [Speech-to-text audit and benchmark](docs/speech-to-text-audit.md)
 
 ## Providers
 
@@ -70,11 +70,24 @@ By default, application data is stored below `%LOCALAPPDATA%\AutoClip\AutoClip S
 
 Set `AUTOCLIP_DATA_DIR` before launch to use another data root, or choose an output folder in Settings.
 
+## Repository layout
+
+| Location | Contents |
+| --- | --- |
+| [autoclip_studio/](autoclip_studio/) | Application logic, media pipeline, providers, and Windows process management |
+| [autoclip_studio/ui/](autoclip_studio/ui/) | PySide6 views, progress panels, and shared stylesheet |
+| [scripts/](scripts/) | Source checkout setup |
+| [packaging/](packaging/) | Windows build script, PyInstaller spec, installer, icon generator, and build dependencies |
+| [tests/](tests/) | Unit tests and media smoke tests |
+| [docs/](docs/) | Audits, benchmarks, and third-party notices |
+
+The Windows launchers are in the repository root. Local tools and generated builds go in `tools/`, `build/`, `dist/`, and `release/`. Git ignores these directories.
+
 ## Development and validation
 
 Run `BUILD.bat` from a Windows x64 checkout to create the PyInstaller OneDir build. FFmpeg, ffprobe, yt-dlp, Deno, the Qt plugins and Python runtime travel with it. An NVIDIA driver is required for NVENC. Each CUDA speech engine uses its own compatible CUDA and cuDNN runtime. Purfview is detected from a separate installation. CPU transcription and encoding remain available.
 
-Fresh setups install the SHA-256-verified FFmpeg 9.1 Windows Essentials archive. Setup checks the executables in existing tool folders and reports their versions. The source launcher uses the Python yt-dlp version in `requirements.txt` when there is no project-local yt-dlp executable. OneDir uses the version pinned alongside Deno in `scripts/build.ps1`.
+Fresh setups install the SHA-256-verified FFmpeg 9.1 Windows Essentials archive. Setup checks the executables in existing tool folders and reports their versions. The source launcher uses the Python yt-dlp version in `requirements.txt` when there is no project-local yt-dlp executable. OneDir uses the version pinned alongside Deno in `packaging/build.ps1`.
 
 Run `BUILD.bat -Installer` with Inno Setup 6 or 7 installed, or supply `BUILD.bat -Installer -IsccPath "C:\path\to\ISCC.exe"`. The executable and installer are unsigned unless you sign them using your own Authenticode certificate.
 
@@ -83,12 +96,7 @@ Run `BUILD.bat -Installer` with Inno Setup 6 or 7 installed, or supply `BUILD.ba
 .\.venv\Scripts\python.exe -m tests.integration_smoke
 ```
 
-The build was validated on the target machine with:
-
-- 7 unit tests covering URL handling, highlight parsing/deduplication, local selection, caption generation, and crop expressions.
-- A headless construction test of all six GUI pages and provider-dependent controls.
-- A synthetic audio/video render using ASS/libass, AAC, vertical scaling, MP4 validation, and NVIDIA NVENC.
-- A no-key speech-video pipeline using Faster-Whisper on CPU, local highlight selection, animated captions, NVENC rendering, SQLite persistence, manifest generation, and final ffprobe validation.
+The render smoke test creates a synthetic audio/video fixture, burns in captions, and validates the resulting MP4. The full pipeline smoke test also accepts a local speech video. See the [optimization audit and validation results](docs/optimization-plan.md).
 
 ## Known limitations
 
@@ -100,4 +108,4 @@ The build was validated on the target machine with:
 
 ## Reference audit and licensing
 
-The accessible `Anil-matcha/AI-Youtube-Shorts-Generator` repository is MIT-licensed. Its high-level patterns—transcript caching, chunk overlap, score-based deduplication, and local face-aware crop—were reviewed and independently implemented here. The OpenShorts repository was temporarily unavailable, and the Rayneth article endpoint could not be retrieved during the 2026-11-25 audit. See `THIRD_PARTY_NOTICES.md` for dependency licenses.
+The accessible `Anil-matcha/AI-Youtube-Shorts-Generator` repository is MIT-licensed. Its patterns for transcript caching, chunk overlap, score-based deduplication, and local face-aware crop were reviewed and independently implemented here. The OpenShorts repository and Rayneth article endpoint were unavailable during the November 25, 2026 audit. [Third-party notices and dependency licenses](docs/THIRD_PARTY_NOTICES.md)

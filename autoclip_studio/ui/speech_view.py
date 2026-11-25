@@ -12,14 +12,14 @@ from PySide6.QtWidgets import (
     QLineEdit, QMessageBox, QProgressBar, QPushButton, QSpinBox, QVBoxLayout, QWidget,
 )
 
-from .config import SettingsStore
-from .download_view import cancel_icon
-from .paths import CACHE_DIR
-from .speech_engine import (
+from ..config import SettingsStore
+from ..paths import CACHE_DIR
+from ..speech_engine import (
     MODELS, XXL_RELEASES, SpeechSettings, download_speech_model, find_executable, inspect_speech,
     install_standalone, model_cache_root,
 )
-from .transcription import SpeechProgress
+from ..transcription import SpeechProgress
+from .download_view import cancel_icon
 
 
 def _clock(seconds: float | None) -> str:

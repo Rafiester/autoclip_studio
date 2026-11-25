@@ -1,37 +1,45 @@
-.venv/
-.runtime/
-.uv-cache/
-tools/uv.exe
-tools/ffmpeg/
+# Local runtimes, tools, and build output
+/.venv/
+/.runtime/
+/.uv-cache/
+/tools/
+/build/
+/dist/
+/release/
+/.autoclip.pid
+
+# Python test and bytecode output
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .coverage
-data/
+htmlcov/
+
+# Local app data and temporary files
+/data/
 output/
 cache/
 logs/
-*.log
-*.tmp
-*.part
-.idea/
-.vscode/
-Thumbs.db
-desktop.ini
-.autoclip.pid
-build/
-dist/
-release/
-tools/package/
 models/
 .cache/
-.env
-.env.*
-!.env.example
 settings.json
 *.db
 *.db-wal
 *.db-shm
+*.log
+*.tmp
+*.part
+
+# Credentials and signing keys
+.env
+.env.*
+!.env.example
 *.pfx
 *.pem
+
+# Editor and Windows metadata
+.idea/
+.vscode/
+Thumbs.db
+desktop.ini
 

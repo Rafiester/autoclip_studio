@@ -41,7 +41,7 @@ All 42 tests passed. A native PySide6 session at 150% scaling opened Speech-to-T
 
 ## Files and compatibility
 
-- [Engine discovery, capability checks, weights and CUDA policy](autoclip_studio/speech_engine.py) · [Decoding orchestration, timestamp checks and persistence](autoclip_studio/transcription.py)
-- [Settings and progress widgets](autoclip_studio/speech_view.py) · [Main window](autoclip_studio/gui.py) · [Settings storage](autoclip_studio/config.py) · [Pipeline](autoclip_studio/pipeline.py) · [Worker](autoclip_studio/worker.py)
-- [Media timing](autoclip_studio/media.py) · [Captions](autoclip_studio/captions.py) · [Regression tests](tests/test_transcription_engines.py)
+- [Engine discovery, capability checks, weights and CUDA policy](../autoclip_studio/speech_engine.py) · [Decoding orchestration, timestamp checks and persistence](../autoclip_studio/transcription.py)
+- [Settings and progress widgets](../autoclip_studio/ui/speech_view.py) · [Main window](../autoclip_studio/gui.py) · [Settings storage](../autoclip_studio/config.py) · [Pipeline](../autoclip_studio/pipeline.py) · [Worker](../autoclip_studio/worker.py)
+- [Media timing](../autoclip_studio/media.py) · [Captions](../autoclip_studio/captions.py) · [Regression tests](../tests/test_transcription_engines.py)
 - Python cancellation is cooperative between model and decoding calls. The Windows process manager can terminate active Purfview inference and its child processes. Sharing a model across volumes requires a filesystem link the current Windows account can create. Python can read the selected model directly when such a link is unavailable.

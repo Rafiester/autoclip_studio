@@ -6,9 +6,9 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from autoclip_studio.database import Database
-from autoclip_studio.download_view import format_bytes, format_time
 from autoclip_studio.gui import MainWindow
 from autoclip_studio.media import DownloadProgress, _log_transfer
+from autoclip_studio.ui.download_view import format_bytes, format_time
 
 
 @pytest.fixture(scope="module")

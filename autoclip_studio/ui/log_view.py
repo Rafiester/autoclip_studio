@@ -6,7 +6,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QApplication, QPlainTextEdit
 
-from .diagnostics import redact
+from ..diagnostics import redact
 
 
 LEVEL_COLORS = {

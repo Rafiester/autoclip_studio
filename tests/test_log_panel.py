@@ -13,9 +13,9 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QPushButton
 from autoclip_studio.database import Database
 from autoclip_studio.config import SettingsStore
 from autoclip_studio.gui import MainWindow
-from autoclip_studio.log_view import LEVEL_COLORS, LogView
 from autoclip_studio.models import ProjectOptions
 from autoclip_studio.providers import AIProvider
+from autoclip_studio.ui.log_view import LEVEL_COLORS, LogView
 from tests.test_provider_reliability import response
 
 

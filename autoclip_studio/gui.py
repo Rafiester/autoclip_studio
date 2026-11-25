@@ -22,8 +22,6 @@ from .captions import TEMPLATES
 from .config import SettingsStore
 from .database import Database
 from .diagnostics import LOG, SUCCESS, log_error, redact
-from .download_view import DownloadView
-from .log_view import LogView
 from .media import DownloadProgress, is_youtube_url
 from .models import ProjectOptions
 from .paths import APP_ROOT, OUTPUT_DIR, ensure_directories
@@ -31,9 +29,11 @@ from .pipeline import Pipeline
 from .process import CancelledError
 from .providers import AIProvider, ProviderError
 from .speech_engine import MODELS
-from .speech_view import SpeechProgressView, SpeechSettingsView
-from .style import STYLESHEET
 from .transcription import SpeechProgress
+from .ui.download_view import DownloadView
+from .ui.log_view import LogView
+from .ui.speech_view import SpeechProgressView, SpeechSettingsView
+from .ui.style import STYLESHEET
 from .worker import PipelineWorker
 
 

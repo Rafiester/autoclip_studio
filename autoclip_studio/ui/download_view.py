@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from .media import DownloadProgress
+from ..media import DownloadProgress
 
 
 def format_bytes(value: int | float | None, *, rate: bool = False) -> str:
