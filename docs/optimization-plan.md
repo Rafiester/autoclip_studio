@@ -44,7 +44,7 @@ Use a short local speech fixture and representative long 1080p sources with dens
 
 ## P3 · Harden the native build and maintain the code incrementally
 
-- Make source setup and packaging reproducible by recording and verifying the supported FFmpeg build and aligning or documenting the scope of the distinct yt-dlp versions used by source and packaged launchers. Exercise both paths with the same fixtures. Before touching forced exit in the packaged application, reproduce the documented Windows DLL shutdown issue and measure startup, clean exit, and installer footprint. [Setup script](../scripts/setup.ps1) · [Build script](../packaging/build.ps1) · [Application entry point](../main.py)
+- Make source setup and packaging reproducible by recording and verifying the supported FFmpeg build and aligning or documenting the scope of the distinct yt-dlp versions used by source and packaged launchers. Exercise both paths with the same fixtures. Before touching forced exit in the packaged application, reproduce the documented Windows DLL shutdown issue and measure startup, clean exit, and installer footprint. [Setup script](../scripts/setup.py) · [Build script](../packaging/build.py) · [Application entry point](../main.py)
 - Keep behavior changes small and give new regression coverage to the failure cases above. Separate GUI construction from job or provider state only as needed to make the affected behavior testable. Verify the completed changes from a source checkout and a native Windows OneDir build, including on a system without a working NVIDIA encoder. Use controlled provider substitutes for automated tests and record which live-provider paths were exercised.
 
 ## Implementation and verification

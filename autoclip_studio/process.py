@@ -136,6 +136,6 @@ def find_media_tool(name: str) -> str:
     if getattr(sys, "frozen", False):
         raise FileNotFoundError(f"Bundled {name} is missing. Restore the complete application folder.")
     raise FileNotFoundError(
-        f"{name} was not found. Run SETUP.bat to install the project-local FFmpeg tools."
+        f"{name} was not found. Run AutoClipStudio.exe --setup to install the project-local FFmpeg tools."
     )
 

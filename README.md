@@ -14,13 +14,12 @@ Open `dist\AutoClipStudio\AutoClipStudio.exe` directly. Keep its `_internal` fol
 
 Requirements: Windows 11, an internet connection for initial setup/model downloads, and approximately 2 GB of free disk space. An NVIDIA GPU is optional.
 
-1. Double-click `SETUP.bat` once. It downloads an isolated Python 3.12 runtime to `.runtime`, creates `.venv`, installs pinned packages, downloads FFmpeg into `tools`, and runs the unit tests. It does not alter the system Python or PATH.
-2. Double-click `START.bat`.
-3. Optionally open **AI Provider Settings**, enter a key, choose/load a model, test the connection, and save. Keys are stored in Windows Credential Manager; they are never written to the settings JSON.
-4. Open **New Project**, paste a YouTube URL or choose a local video, configure the clip settings, then click **Generate Shorts**.
-5. Follow progress in **Processing Queue** and preview results in **Generated Clips**.
+1. Double-click `AutoClipStudio.exe` in the checkout. If dependencies need setup, accept the dialog. Setup installs a project-local Python environment and FFmpeg and runs the unit tests.
+2. Optionally open **AI Provider Settings**, enter a key, choose or load a model, test the connection, and save. Keys are stored in Windows Credential Manager.
+3. Open **New Project**, paste a YouTube URL or choose a local video, configure the clip settings, then click **Generate Shorts**.
+4. Follow progress in **Processing Queue** and preview results in **Generated Clips**.
 
-`STOP.bat` reads the application-owned PID file, verifies that it belongs to this workspace, and terminates that process tree. Normal window closure already cancels and terminates owned subprocesses.
+The source launcher uses the checkout's `.venv` and loads the latest Python source on every launch. Close the app normally or run `AutoClipStudio.exe --stop` to request shutdown for that checkout. The launcher owns its process tree and cleans up remaining children when it exits. Use `--check` to validate dependencies or `--setup` to reopen setup. Launcher diagnostics are in `logs\launcher.log` under the app data directory.
 
 ## Workflow
 
@@ -76,22 +75,25 @@ Set `AUTOCLIP_DATA_DIR` before launch to use another data root, or choose an out
 | --- | --- |
 | [autoclip_studio/](autoclip_studio/) | Application logic, media pipeline, providers, and Windows process management |
 | [autoclip_studio/ui/](autoclip_studio/ui/) | PySide6 views, progress panels, and shared stylesheet |
-| [scripts/](scripts/) | Source checkout setup |
-| [packaging/](packaging/) | Windows build script, PyInstaller spec, installer, icon generator, and build dependencies |
+| [scripts/](scripts/) | Python dependency checks, setup, and bootstrap pins |
+| [packaging/](packaging/) | Native launcher source, Python build script, installer, PyInstaller spec, and icon generator |
 | [tests/](tests/) | Unit tests and media smoke tests |
 | [docs/](docs/) | Audits, benchmarks, and third-party notices |
 
-The Windows launchers are in the repository root. Local tools and generated builds go in `tools/`, `build/`, `dist/`, and `release/`. Git ignores these directories.
+The source launcher is in the repository root. Local tools and generated builds go in `tools/`, `build/`, `dist/`, and `release/`. Git ignores these directories.
 
 ## Development and validation
 
-Run `BUILD.bat` from a Windows x64 checkout to create the PyInstaller OneDir build. FFmpeg, ffprobe, yt-dlp, Deno, the Qt plugins and Python runtime travel with it. An NVIDIA driver is required for NVENC. Each CUDA speech engine uses its own compatible CUDA and cuDNN runtime. Purfview is detected from a separate installation. CPU transcription and encoding remain available.
+Run the Python build script from a Windows x64 checkout. Its default output is the small source launcher. Rebuild it when changing the C# launcher or its icon. The optional OneDir build includes its own runtime, Qt plugins, FFmpeg, ffprobe, yt-dlp, and Deno.
 
-Fresh setups install the SHA-256-verified FFmpeg 9.1 Windows Essentials archive. Setup checks the executables in existing tool folders and reports their versions. The source launcher uses the Python yt-dlp version in `requirements.txt` when there is no project-local yt-dlp executable. OneDir uses the version pinned alongside Deno in `packaging/build.ps1`.
+Fresh setups install the SHA-256-verified FFmpeg 9.1 Windows Essentials archive. The source checkout uses the Python yt-dlp version in `requirements.txt` when there is no project-local yt-dlp executable. OneDir uses the version pinned alongside Deno in `packaging/build.py`.
 
-Run `BUILD.bat -Installer` with Inno Setup 6 or 7 installed, or supply `BUILD.bat -Installer -IsccPath "C:\path\to\ISCC.exe"`. The executable and installer are unsigned unless you sign them using your own Authenticode certificate.
+Installer compilation requires Inno Setup 6 or 7. Use `--iscc "C:\path\to\ISCC.exe"` to specify its compiler. The executable and installer are unsigned.
 
 ```powershell
+.\.venv\Scripts\python.exe packaging/build.py
+.\.venv\Scripts\python.exe packaging/build.py --standalone
+.\.venv\Scripts\python.exe packaging/build.py --installer
 .\.venv\Scripts\python.exe -m pytest
 .\.venv\Scripts\python.exe -m tests.integration_smoke
 ```

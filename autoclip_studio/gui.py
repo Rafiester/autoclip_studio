@@ -7,12 +7,12 @@ from pathlib import Path
 from threading import Event
 from typing import Callable
 
-from PySide6.QtCore import QSignalBlocker, QThread, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QFileInfo, QSignalBlocker, QThread, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QDesktopServices, QIcon
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QGridLayout,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFileIconProvider, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
     QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
     QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
@@ -888,6 +888,11 @@ def run() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("AutoClip Studio")
     app.setOrganizationName("AutoClip")
-    app.setWindowIcon(QIcon(str(APP_ROOT / "assets" / "autoclip.ico")))
+    icon_path = APP_ROOT / "assets" / "autoclip.ico"
+    launcher = APP_ROOT / "AutoClipStudio.exe"
+    if icon_path.is_file():
+        app.setWindowIcon(QIcon(str(icon_path)))
+    elif launcher.is_file():
+        app.setWindowIcon(QFileIconProvider().icon(QFileInfo(str(launcher))))
     window = MainWindow(); window.show()
     return app.exec()
