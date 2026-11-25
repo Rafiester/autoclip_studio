@@ -7,7 +7,7 @@ from pathlib import Path
 from threading import Event
 from typing import Callable
 
-from PySide6.QtCore import QFileInfo, QSignalBlocker, QThread, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QFileInfo, QSignalBlocker, QThread, Qt, QUrl, Slot
 from PySide6.QtGui import QCloseEvent, QDesktopServices, QIcon
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -22,11 +22,10 @@ from .captions import TEMPLATE_DEFAULT, TEMPLATES
 from .config import SettingsStore
 from .database import Database
 from .diagnostics import LOG, SUCCESS, log_error, redact
-from .media import DownloadProgress, is_youtube_url
+from .media import DownloadProgress, is_youtube_url, youtube_id, youtube_source_error
 from .models import ProjectOptions
 from .paths import APP_ROOT, OUTPUT_DIR, ensure_directories
 from .pipeline import Pipeline
-from .process import CancelledError
 from .providers import AIProvider, ProviderError
 from .speech_engine import MODELS
 from .transcription import SpeechProgress
@@ -35,28 +34,9 @@ from .ui.download_view import DownloadView
 from .ui.log_view import LogView
 from .ui.speech_view import SpeechProgressView, SpeechSettingsView
 from .ui.style import STYLESHEET
-from .worker import PipelineWorker
-
-
-class FunctionThread(QThread):
-    succeeded = Signal(object)
-    failed = Signal(str)
-    warning = Signal(str)
-
-    def __init__(self, function: Callable[[], object], parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.function = function
-
-    def run(self) -> None:
-        try:
-            self.succeeded.emit(self.function())
-        except CancelledError:
-            return
-        except ProviderError as error:
-            self.failed.emit(redact(str(error)))
-        except Exception as error:
-            log_error("Provider settings operation failed", error)
-            self.failed.emit(f"Provider operation failed ({type(error).__name__}).")
+from .ui.youtube_preview import YouTubePreview
+from .worker import FunctionThread, PipelineWorker
+from .youtube_metadata import YouTubeMetadata
 
 
 class MainWindow(QMainWindow):
@@ -166,7 +146,7 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(new_button, alignment=Qt.AlignmentFlag.AlignLeft)
         page.addWidget(action_card)
         page.addWidget(QLabel("Recent projects"))
-        self.recent_table = self._table(["Source", "Status", "Progress", "Created"])
+        self.recent_table = self._table(["Project", "Status", "Progress", "Created"])
         page.addWidget(self.recent_table, 1)
         return outer
 
@@ -186,6 +166,7 @@ class MainWindow(QMainWindow):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         content = QWidget()
         form = QVBoxLayout(content)
+        form.setContentsMargins(4, 6, 4, 6)
         source_group = QGroupBox("Source video")
         source_layout = QVBoxLayout(source_group)
         source_row = QHBoxLayout()
@@ -197,9 +178,21 @@ class MainWindow(QMainWindow):
         source_row.addWidget(self.source_input, 1)
         source_row.addWidget(browse)
         source_layout.addLayout(source_row)
+        self.youtube_preview = YouTubePreview()
+        self.youtube_preview.metadata_changed.connect(self._update_project_name)
+        self.youtube_preview.idle.connect(self._finish_close)
+        self.source_input.textChanged.connect(self.youtube_preview.set_source)
+        source_layout.addWidget(self.youtube_preview)
+        name_row = QFormLayout()
+        self.project_name = QLineEdit(placeholderText="Optional project name")
+        self._auto_project_name = ""
+        name_row.addRow("&Project name", self.project_name)
+        name_row.labelForField(self.project_name).setObjectName("projectNameLabel")
+        source_layout.addLayout(name_row)
         form.addWidget(source_group)
         settings_group = QGroupBox("Clip settings")
         grid = QGridLayout(settings_group)
+        grid.setHorizontalSpacing(5)
         self.clip_count = self._spin(1, 10, 3)
         self.min_duration = self._spin(10, 120, 25, " sec")
         self.max_duration = self._spin(15, 180, 60, " sec")
@@ -222,9 +215,9 @@ class MainWindow(QMainWindow):
         self.template_combo.setCurrentText(self.default_template())
         auto_layout.addWidget(self.face_tracking, 0, 0)
         auto_layout.addWidget(self.captions, 0, 1)
-        auto_layout.addWidget(self.cache, 1, 0)
-        auto_layout.addWidget(QLabel("Caption template"), 1, 1)
-        auto_layout.addWidget(self.template_combo, 1, 2)
+        auto_layout.addWidget(self.cache, 1, 0, 1, 2)
+        auto_layout.addWidget(QLabel("Caption template"), 2, 0)
+        auto_layout.addWidget(self.template_combo, 2, 1)
         form.addWidget(automation)
         ai_group = QGroupBox("AI and transcription")
         ai_form = QFormLayout(ai_group)
@@ -303,7 +296,7 @@ class MainWindow(QMainWindow):
         self.retry_analysis_button.clicked.connect(self.retry_analysis)
         history.addWidget(self.retry_analysis_button)
         page.addLayout(history)
-        self.queue_table = self._table(["Source", "Status", "Progress", "Error"])
+        self.queue_table = self._table(["Project", "Status", "Progress", "Error"])
         self.queue_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.queue_table.itemSelectionChanged.connect(self._update_retry_button)
         page.addWidget(self.queue_table, 1)
@@ -436,17 +429,31 @@ class MainWindow(QMainWindow):
         path = QFileDialog.getExistingDirectory(self, "Choose output folder", self.output_input.text() or str(OUTPUT_DIR))
         if path: self.output_input.setText(path)
 
+    @Slot(object)
+    def _update_project_name(self, metadata: YouTubeMetadata | None) -> None:
+        suggestion = metadata.title if metadata else ""
+        if self.project_name.text() in ("", self._auto_project_name):
+            self.project_name.setText(suggestion)
+        self._auto_project_name = suggestion
+
     def generate(self) -> None:
         if self.worker_thread or self.speech_utility_active:
             QMessageBox.information(self, "Processing active", "Wait for or cancel the current project first.")
             return
         source = self.source_input.text().strip()
-        if not source or (not Path(source).is_file() and not is_youtube_url(source)):
-            QMessageBox.warning(self, "Invalid source", "Choose an existing video file or enter a valid YouTube URL.")
+        youtube = is_youtube_url(source)
+        error = youtube_source_error(source) if youtube else ""
+        if not youtube and (not source or not Path(source).is_file()):
+            error = "Choose an existing video file or enter a valid YouTube URL."
+        if error:
+            QMessageBox.warning(self, "Invalid source", error)
             return
         if self.min_duration.value() > self.max_duration.value():
             QMessageBox.warning(self, "Invalid duration", "Minimum duration cannot exceed maximum duration.")
             return
+        metadata = self.youtube_preview.result
+        if metadata and (not youtube or metadata.video_id != youtube_id(source)):
+            metadata = None
         options = ProjectOptions(
             source=source, clip_count=self.clip_count.value(), min_duration=self.min_duration.value(),
             max_duration=self.max_duration.value(), aspect_ratio=self.aspect.currentText(),
@@ -457,6 +464,8 @@ class MainWindow(QMainWindow):
             cache_enabled=self.cache.isChecked(), whisper_model=self.whisper_model.currentText(),
             whisper_device=self.whisper_device.currentText(), language=self.settings.speech().language or None,
             output_dir=self.settings.data.get("output_dir", ""),
+            project_name=self.project_name.text().strip() or (metadata.title if metadata else ""),
+            youtube_metadata=asdict(metadata) if metadata else None,
         )
         project_id = self.database.create_project(source, asdict(options))
         self.template_combo.setCurrentText(self.default_template())
@@ -653,11 +662,18 @@ class MainWindow(QMainWindow):
         table.setRowCount(len(projects))
         for row, project in enumerate(projects):
             source = Path(project["source"]).name if not is_youtube_url(project["source"]) else project["source"]
+            try:
+                options = json.loads(project["options"])
+            except (TypeError, ValueError):
+                options = {}
+            name = (options.get("project_name") if isinstance(options, dict) else None) or source
             status = "AI analysis failed" if project["status"] == "analysis_failed" else project["status"]
             detail = (project["created_at"][:16].replace("T", " ") if compact else redact(project["error"]))
-            values = [redact(source), status, f"{project['progress']}%", detail.partition("\n")[0]]
+            values = [redact(str(name)), status, f"{project['progress']}%", detail.partition("\n")[0]]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
+                if column == 0:
+                    item.setToolTip(redact(source))
                 if column == 0 and not compact:
                     item.setData(Qt.ItemDataRole.UserRole, project)
                 table.setItem(row, column, item)
@@ -871,7 +887,8 @@ class MainWindow(QMainWindow):
         self._finish_close()
 
     def _finish_close(self) -> None:
-        if self.closing and not self.worker_thread and not self.utility_threads and not self.caption_library.busy:
+        if (self.closing and not self.worker_thread and not self.utility_threads
+                and not self.caption_library.busy and not self.youtube_preview.busy):
             self.close()
 
     def save_local_settings(self) -> None:
@@ -884,9 +901,10 @@ class MainWindow(QMainWindow):
             self.closing = True
             self.player.stop()
             self.caption_library.stop()
+            self.youtube_preview.cancel()
             self.pipeline.manager.cancel()
             self.utility_cancel.set()
-        if self.worker_thread or self.utility_threads or self.caption_library.busy:
+        if self.worker_thread or self.utility_threads or self.caption_library.busy or self.youtube_preview.busy:
             self.setEnabled(False)
             self.setWindowTitle("AutoClip Studio — Shutting down…")
             event.ignore()

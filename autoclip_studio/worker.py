@@ -1,11 +1,38 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QObject, Signal, Slot
+from collections.abc import Callable
 
-from .diagnostics import redact
+from PySide6.QtCore import QObject, QThread, Signal, Slot
+
+from .diagnostics import log_error, redact
 from .models import ProjectOptions
 from .pipeline import Pipeline
 from .process import CancelledError
+from .providers import ProviderError
+from .youtube_metadata import YouTubeMetadataError
+
+
+class FunctionThread(QThread):
+    succeeded = Signal(object)
+    failed = Signal(str)
+    warning = Signal(str)
+
+    def __init__(self, function: Callable[[], object], parent: QObject, *,
+                 operation: str = "Provider operation") -> None:
+        super().__init__(parent)
+        self.function = function
+        self.operation = operation
+
+    def run(self) -> None:
+        try:
+            self.succeeded.emit(self.function())
+        except CancelledError:
+            return
+        except (ProviderError, YouTubeMetadataError) as error:
+            self.failed.emit(redact(str(error)))
+        except Exception as error:
+            log_error(f"{self.operation} failed", error)
+            self.failed.emit(f"{self.operation} failed ({type(error).__name__}).")
 
 
 class PipelineWorker(QObject):

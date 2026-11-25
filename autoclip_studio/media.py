@@ -92,7 +92,37 @@ def youtube_id(url: str) -> str | None:
         candidate = parsed.path.split("/")[2]
     else:
         candidate = ""
-    return candidate if re.fullmatch(r"[\w-]{6,20}", candidate) else None
+    return candidate if re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate) else None
+
+
+def youtube_source_error(url: str) -> str:
+    """Validate a known YouTube URL without resolving it over the network."""
+    if youtube_id(url):
+        return ""
+    parsed = urlparse(url)
+    if parsed.path.rstrip("/") == "/playlist" or parse_qs(parsed.query).get("list"):
+        return "Playlist links need a specific video. Open a video from the playlist and paste its link."
+    if re.fullmatch(r"/(?:@[^/]+|(?:channel|user|c)/[^/]+)/live/?", parsed.path):
+        return ""
+    return "Enter a complete link to a YouTube video or Short."
+
+
+def youtube_watch_url(video_id: str) -> str:
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
+def yt_dlp_command() -> list[str]:
+    downloader = bundled_binary("yt-dlp")
+    python = Path(sys.executable)
+    if python.name.lower() == "pythonw.exe":
+        python = python.with_name("python.exe")
+    if getattr(sys, "frozen", False) and downloader is None:
+        raise FileNotFoundError("The bundled yt-dlp executable is missing. Restore the complete application folder.")
+    command = [str(downloader)] if downloader else [str(python), "-m", "yt_dlp"]
+    deno = bundled_binary("deno")
+    if deno:
+        command += ["--js-runtimes", f"deno:{deno}"]
+    return command + ["--cache-dir", str(CACHE_DIR / "yt-dlp")]
 
 
 def acquire_source(source: str, cache: bool, manager: ProcessManager,
@@ -103,6 +133,8 @@ def acquire_source(source: str, cache: bool, manager: ProcessManager,
         return local.resolve()
     if not is_youtube_url(source):
         raise ValueError("Choose an existing local video or enter a valid YouTube URL.")
+    if error := youtube_source_error(source):
+        raise ValueError(error)
     manager.check_cancelled()
     key = youtube_id(source) or "url-" + hashlib.sha256(source.encode()).hexdigest()[:24]
     if not cache:
@@ -127,23 +159,13 @@ def _download_youtube(source: str, target: Path, key: str, manager: ProcessManag
                       log: Callable[[str], None], *, progress: Callable[[DownloadProgress], None] | None = None) -> Path:
     template = str(target / f"{key}.%(ext)s")
     receipt = target / "downloaded-path.txt"
-    downloader = bundled_binary("yt-dlp")
-    python = Path(sys.executable)
-    if python.name.lower() == "pythonw.exe":
-        python = python.with_name("python.exe")
-    if getattr(sys, "frozen", False) and downloader is None:
-        raise FileNotFoundError("The bundled yt-dlp executable is missing. Restore the complete application folder.")
-    command = [str(downloader)] if downloader else [str(python), "-m", "yt_dlp"]
-    deno = bundled_binary("deno")
-    if deno:
-        command += ["--js-runtimes", f"deno:{deno}"]
+    command = yt_dlp_command()
     on_output = log
     if progress is not None:
         command += ["--progress", "--progress-delta", "0.2", "--progress-template", _TRANSFER_TEMPLATE]
         on_output = lambda line: _log_transfer(line, log, progress)
     command += [
         "--no-playlist", "--no-simulate", "--newline", "--restrict-filenames",
-        "--cache-dir", str(CACHE_DIR / "yt-dlp"),
         "--ffmpeg-location", str(Path(find_media_tool("ffmpeg")).parent),
         "--merge-output-format", "mp4", "-f",
         "bv*[height<=1080]+ba/b[height<=1080]/best", "-o", template,

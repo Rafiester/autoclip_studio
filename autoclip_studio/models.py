@@ -90,6 +90,8 @@ class ProjectOptions:
     whisper_device: str = "auto"
     language: str | None = None
     output_dir: str = "output"
+    project_name: str = ""
+    youtube_metadata: dict[str, str | int | None] | None = None
 
     @property
     def output_size(self) -> tuple[int, int]:

@@ -6,6 +6,15 @@ QLabel#brand { font-size: 22px; font-weight: 700; color: #ffffff; padding: 12px 
 QLabel#pageTitle { font-size: 28px; font-weight: 700; color: #ffffff; }
 QLabel#muted { color: #8993a4; }
 QLabel#metricValue { font-size: 22px; font-weight: 700; color: #ffffff; }
+QFrame#videoPreview { background: #1a1a29; border: 1px solid #36314a; border-radius: 10px; }
+QFrame#videoPreview QLabel, QWidget#videoPreviewSkeleton { background: transparent; }
+QLabel#projectNameLabel { background: transparent; }
+QLabel#videoPreviewStatus { color: #c8b7ff; font-size: 12px; font-weight: 700; }
+QLabel#videoPreviewTitle { color: #faf8ff; font-size: 17px; font-weight: 700; }
+QLabel#videoPreviewChannel { color: #e3def2; font-weight: 600; }
+QLabel#videoPreviewDetail { color: #b2b5c9; }
+QFrame#videoPreviewBar { background: #302c43; border-radius: 5px; }
+QPushButton#videoPreviewRetry { padding: 5px 12px; }
 QFrame#card, QGroupBox { background: #151a23; border: 1px solid #262d39; border-radius: 12px; }
 QGroupBox { margin-top: 14px; padding: 18px 14px 14px; font-weight: 600; }
 QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 6px; color: #b8c0cc; }
