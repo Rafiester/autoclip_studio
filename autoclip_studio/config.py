@@ -8,6 +8,7 @@ from typing import Any
 
 import keyring
 
+from .captions import TEMPLATE_DEFAULT
 from .paths import SETTINGS_PATH, ensure_directories
 from .speech_engine import SpeechSettings
 
@@ -32,6 +33,7 @@ DEFAULTS: dict[str, Any] = {
         "custom": asdict(ProviderSettings("custom", "", "")),
     },
     "cache_enabled": True,
+    "caption_template": TEMPLATE_DEFAULT,
     "output_dir": "",
     "whisper_model": "small",
     "whisper_device": "auto",

@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from .captions import TEMPLATES
+from .captions import TEMPLATE_DEFAULT, TEMPLATES
 from .config import SettingsStore
 from .database import Database
 from .diagnostics import LOG, SUCCESS, log_error, redact
@@ -30,6 +30,7 @@ from .process import CancelledError
 from .providers import AIProvider, ProviderError
 from .speech_engine import MODELS
 from .transcription import SpeechProgress
+from .ui.caption_library import CaptionLibrary
 from .ui.download_view import DownloadView
 from .ui.log_view import LogView
 from .ui.speech_view import SpeechProgressView, SpeechSettingsView
@@ -110,7 +111,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self._new_project_page())
         self.stack.addWidget(self._queue_page())
         self.stack.addWidget(self._clips_page())
-        self.stack.addWidget(self._scroll_page(self._templates_page()))
+        self.stack.addWidget(self._templates_page())
         self.stack.addWidget(self._scroll_page(self._settings_page()))
         self.stack.addWidget(self._scroll_page(self._speech_settings_page()))
         layout.addWidget(sidebar)
@@ -216,7 +217,9 @@ class MainWindow(QMainWindow):
         self.face_tracking = QCheckBox("Auto face tracking"); self.face_tracking.setChecked(True)
         self.captions = QCheckBox("Animated word captions"); self.captions.setChecked(True)
         self.cache = QCheckBox("Cache downloads and transcripts"); self.cache.setChecked(True)
-        self.template_combo = QComboBox(); self.template_combo.addItems(TEMPLATES.keys())
+        self.template_combo = QComboBox()
+        self.template_combo.addItems(TEMPLATES.keys())
+        self.template_combo.setCurrentText(self.default_template())
         auto_layout.addWidget(self.face_tracking, 0, 0)
         auto_layout.addWidget(self.captions, 0, 1)
         auto_layout.addWidget(self.cache, 1, 0)
@@ -347,23 +350,10 @@ class MainWindow(QMainWindow):
         return outer
 
     def _templates_page(self) -> QWidget:
-        outer, page = self._page("Caption Templates", "Choose the animated subtitle style used for new projects")
-        grid = QGridLayout()
-        self.template_buttons: list[QPushButton] = []
-        for index, (name, values) in enumerate(TEMPLATES.items()):
-            card = QFrame(objectName="card")
-            layout = QVBoxLayout(card)
-            sample = self._wrapping_label("WORDS THAT POP")
-            sample.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            sample.setMinimumHeight(110)
-            sample.setStyleSheet(f"font-family: '{values['font']}'; font-size: 24px; font-weight: 800; color: white; background: #090b10; border-radius: 8px;")
-            button = QPushButton(f"Use {name}")
-            button.clicked.connect(lambda checked=False, selected=name: self.choose_template(selected))
-            layout.addWidget(QLabel(name)); layout.addWidget(sample); layout.addWidget(button)
-            grid.addWidget(card, index // 2, index % 2)
-            self.template_buttons.append(button)
-        page.addLayout(grid)
-        page.addStretch()
+        outer, page = self._page("Caption Templates", "Preview animated captions and choose a default for new projects.")
+        self.caption_library = CaptionLibrary(self.default_template(), self.choose_template, lambda: self.show_page(1))
+        self.caption_library.idle.connect(self._finish_close)
+        page.addWidget(self.caption_library, 1)
         return outer
 
     def _settings_page(self) -> QWidget:
@@ -430,6 +420,8 @@ class MainWindow(QMainWindow):
         return table
 
     def show_page(self, index: int) -> None:
+        if self.stack.currentIndex() == 4 and index != 4:
+            self.caption_library.stop()
         self.stack.setCurrentIndex(index)
         for button_index, button in enumerate(self.nav_buttons):
             button.setChecked(button_index == index)
@@ -467,6 +459,7 @@ class MainWindow(QMainWindow):
             output_dir=self.settings.data.get("output_dir", ""),
         )
         project_id = self.database.create_project(source, asdict(options))
+        self.template_combo.setCurrentText(self.default_template())
         self._start_worker(project_id, options)
 
     def _start_worker(self, project_id: str, options: ProjectOptions, *, resume_analysis: bool = False) -> None:
@@ -708,8 +701,24 @@ class MainWindow(QMainWindow):
         path.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
+    def default_template(self) -> str:
+        name = self.settings.data.get("caption_template")
+        return name if isinstance(name, str) and name in TEMPLATES else TEMPLATE_DEFAULT
+
     def choose_template(self, name: str) -> None:
-        self.template_combo.setCurrentText(name); self.show_page(1)
+        previous = self.default_template()
+        self.settings.data["caption_template"] = name
+        try:
+            self.settings.save()
+        except OSError as error:
+            self.settings.data["caption_template"] = previous
+            log_error("Could not save caption template", error)
+            self.caption_library.show_notice("Could not save the default caption template. Try again.")
+            return
+        self.caption_library.set_selected(name)
+        self.caption_library.show_notice("")
+        if self.template_combo.currentText() == previous:
+            self.template_combo.setCurrentText(name)
 
     def _project_provider_changed(self, name: str) -> None:
         self.project_model.setText(self.settings.provider(name).get("model", ""))
@@ -862,7 +871,7 @@ class MainWindow(QMainWindow):
         self._finish_close()
 
     def _finish_close(self) -> None:
-        if self.closing and not self.worker_thread and not self.utility_threads:
+        if self.closing and not self.worker_thread and not self.utility_threads and not self.caption_library.busy:
             self.close()
 
     def save_local_settings(self) -> None:
@@ -874,9 +883,10 @@ class MainWindow(QMainWindow):
         if not self.closing:
             self.closing = True
             self.player.stop()
+            self.caption_library.stop()
             self.pipeline.manager.cancel()
             self.utility_cancel.set()
-        if self.worker_thread or self.utility_threads:
+        if self.worker_thread or self.utility_threads or self.caption_library.busy:
             self.setEnabled(False)
             self.setWindowTitle("AutoClip Studio — Shutting down…")
             event.ignore()

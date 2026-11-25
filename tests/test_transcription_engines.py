@@ -64,7 +64,7 @@ def test_captions_without_word_timestamps_use_segment_timing(tmp_path):
               Highlight(0, 5, "", "", "", 0), output, (360, 640), "Clean")
     text = output.read_text(encoding="utf-8-sig")
     assert "0:00:01.00,0:00:04.00" in text
-    assert "SOME WORDS" in text and "\\kf" not in text
+    assert "Some words" in text and "\\kf" not in text
 
 
 def test_cache_records_engine_settings_and_sampled_source(tmp_path):

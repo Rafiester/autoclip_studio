@@ -43,6 +43,19 @@ QPushButton#cancelDownload:hover { background: #35232d; border-color: #b26979; }
 QPushButton#cancelDownload:pressed { background: #452731; border-color: #d58a99; }
 QPushButton#cancelDownload:focus { border-color: #f4a1aa; }
 QPushButton#cancelDownload:disabled { border-color: #503940; color: #9b737d; }
+QFrame#captionCard { background: #161a25; border: 1px solid #2a3040; border-radius: 12px; }
+QFrame#captionCard:hover { border-color: #4a4261; }
+QFrame#captionCard[playing="true"] { border-color: #665798; }
+QFrame#captionCard[selected="true"] { background: #1d1a2c; border-color: #9b82ff; }
+QLabel#captionTitle { background: transparent; color: #f5f1ff; font-size: 15px; font-weight: 700; }
+QLabel#captionDescription { background: transparent; color: #aeb5c8; }
+QProgressBar#captionPreviewProgress { background: #2b2f42; border-radius: 1px; }
+QProgressBar#captionPreviewProgress::chunk { background: #a48dff; border-radius: 1px; }
+QPushButton#captionPreviewPlay, QPushButton#captionPreviewReplay, QPushButton#captionSelect { padding: 5px 5px; }
+QPushButton#captionPreviewReplay { font-size: 15px; }
+QPushButton#captionSelect[selected="true"] { background: #32284f; color: #dfd4ff; border-color: #6d56b4; }
+QPushButton#captionSelect[selected="true"]:hover { background: #3a2e5b; }
+QPushButton#captionSelect[selected="true"]:focus { border-color: #c5baff; }
 QCheckBox { spacing: 8px; }
 QCheckBox::indicator { width: 17px; height: 17px; }
 QScrollBar:vertical { width: 9px; background: transparent; }
