@@ -6,7 +6,8 @@ from PySide6.QtGui import QColor, QLinearGradient, QMouseEvent, QPainter, QPaint
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from ..heatmap import HeatmapPoint, HighlightRegion, format_clock, parse_heatmap, summarize_heatmap
-from .theme import theme_manager
+from .components import StatusBadge
+from .theme import SPACING, theme_manager
 
 
 class _HeatmapGraph(QWidget):
@@ -123,16 +124,17 @@ class AudienceHeatmapWidget(QFrame):
     """Compact Audience Heatmap summary card shown beneath YouTubePreview."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent, objectName="card")
+        super().__init__(parent, objectName="summaryPill")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(SPACING["md"], SPACING["ms"], SPACING["md"], SPACING["ms"])
+        layout.setSpacing(SPACING["sm"])
 
         header = QHBoxLayout()
-        header.setSpacing(8)
-        self.title_label = QLabel("Audience Replay Heatmap", objectName="sectionTitle")
-        self.availability_chip = QLabel("Unavailable", objectName="statusChip")
-        self.mode_chip = QLabel("Mode: AI Analysis", objectName="statusChip")
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(SPACING["sm"])
+        self.title_label = QLabel("Audience Replay Heatmap", objectName="cardTitle")
+        self.availability_chip = StatusBadge("Unavailable", status="neutral", parent=self)
+        self.mode_chip = StatusBadge("Mode: AI Analysis", status="neutral", parent=self)
         header.addWidget(self.title_label)
         header.addWidget(self.availability_chip)
         header.addStretch()
@@ -185,20 +187,14 @@ class AudienceHeatmapWidget(QFrame):
         )
         self.set_mode_label(mode_text)
         if not summary.available:
-            self.availability_chip.setText("Heatmap Unavailable")
-            self.availability_chip.setProperty("tone", "")
-            self.availability_chip.style().unpolish(self.availability_chip)
-            self.availability_chip.style().polish(self.availability_chip)
+            self.availability_chip.set_status("Heatmap Unavailable", "neutral")
             self.graph.set_data([], [], float(duration or 0.0))
             self.peaks_label.setText("YouTube did not provide replay heatmap data for this video. Falling back to AI Analysis.")
             self.regions_label.setText("")
             self.show()
             return False
 
-        self.availability_chip.setText(f"Heatmap Available ({len(summary.points)} pts)")
-        self.availability_chip.setProperty("tone", "success")
-        self.availability_chip.style().unpolish(self.availability_chip)
-        self.availability_chip.style().polish(self.availability_chip)
+        self.availability_chip.set_status(f"Heatmap Available ({len(summary.points)} pts)", "ready")
         self.graph.set_data(list(summary.points), list(summary.regions), float(duration or 0.0))
         if summary.peak_timestamps:
             peaks_str = ", ".join(format_clock(ts) for ts in summary.peak_timestamps[:5])

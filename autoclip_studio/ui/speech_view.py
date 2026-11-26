@@ -20,8 +20,10 @@ from ..speech_engine import (
     install_standalone, model_cache_root,
 )
 from ..transcription import SpeechProgress
+from .components import MetricGrid, StageProgressHeader, make_button, sync_button_icon
 from .download_view import cancel_icon
 from .style import configure_form_layout, configure_input
+from .theme import SPACING
 
 
 def _clock(seconds: float | None) -> str:
@@ -33,72 +35,71 @@ def _clock(seconds: float | None) -> str:
 
 
 class SpeechProgressView(QWidget):
-    def __init__(self) -> None:
+    def __init__(self, *, embedded: bool = False) -> None:
         super().__init__(objectName="downloadView")
+        self._embedded = embedded
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(5)
-        header = QHBoxLayout()
-        self.stage = QLabel("Preparing transcription…", objectName="transferStatus")
-        self.stage.setWordWrap(True)
-        self.cancel_button = QPushButton(cancel_icon(), "Cancel Transcription", objectName="cancelDownload")
-        header.addWidget(self.stage, 1)
-        header.addWidget(self.cancel_button)
-        layout.addLayout(header)
-        self.engine = QLabel(objectName="transferSummary")
-        self.engine.setWordWrap(True)
-        self.engine.setTextFormat(Qt.TextFormat.PlainText)
-        layout.addWidget(self.engine)
-        bar_layout = QHBoxLayout()
-        self.bar = QProgressBar(objectName="downloadTransfer")
-        self.bar.setFixedHeight(9)
-        self.bar.setAccessibleName("Transcription progress")
-        self.bar.setTextVisible(False)
-        self.percent = QLabel("—", objectName="transferMetric")
-        bar_layout.addWidget(self.bar, 1)
-        bar_layout.addWidget(self.percent)
-        layout.addLayout(bar_layout)
-        grid = QGridLayout()
-        grid.setContentsMargins(0, 2, 0, 0)
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(4)
-        self.labels: dict[str, QLabel] = {}
-        self.values: dict[str, QLabel] = {}
-        for i, name in enumerate(("Audio through", "Elapsed", "Time left", "Speed / RTF")):
-            row, col = divmod(i, 2)
-            label_text = "Audio processed" if name == "Audio through" else name
-            label = QLabel(label_text, objectName="transferMetricLabel")
-            value = QLabel("—", objectName="transferMetric")
-            value.setMinimumWidth(0)
-            grid.addWidget(label, row, col * 2)
-            grid.addWidget(value, row, col * 2 + 1)
-            self.labels[name] = label
-            self.values[name] = value
-        # Full-width telemetry row for Apple Silicon Unified Memory / Windows GPU & VRAM
+        layout.setSpacing(SPACING["sm"])
+
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(SPACING["sm"])
+
+        self.progress_header = StageProgressHeader(
+            "Preparing transcription…",
+            accessible_bar_name="Transcription progress",
+            parent=self,
+        )
+        self.stage = self.progress_header.title_label
+        self.engine = self.progress_header.subtitle_label
+        self.bar = self.progress_header.bar
+        self.percent = self.progress_header.percent_label
+
+        self.cancel_button = make_button(
+            "Cancel Transcription",
+            variant="destructive",
+            icon_name="x",
+            icon_size=14,
+            parent=self,
+        )
+        self.cancel_button.setObjectName("cancelDownload")
+        top_row.addWidget(self.progress_header, 1)
+        top_row.addWidget(self.cancel_button, 0, Qt.AlignmentFlag.AlignTop)
+        if self._embedded:
+            self.cancel_button.hide()
+        layout.addLayout(top_row)
+
         res_label_text = "Apple Silicon Memory" if os.name != "nt" else "GPU / VRAM"
-        res_label = QLabel(res_label_text, objectName="transferMetricLabel")
-        res_value = QLabel("—", objectName="transferMetric")
-        res_value.setWordWrap(True)
-        res_value.setMinimumWidth(0)
-        grid.addWidget(res_label, 2, 0)
-        grid.addWidget(res_value, 2, 1, 1, 3)
-        self.labels["GPU / VRAM"] = res_label
-        self.values["GPU / VRAM"] = res_value
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(3, 1)
-        layout.addLayout(grid)
+        self.metrics_grid = MetricGrid(
+            (
+                ("Audio through", "Audio processed"),
+                ("Elapsed", "Elapsed"),
+                ("Time left", "Time left"),
+                ("Speed / RTF", "Speed / RTF"),
+                ("GPU / VRAM", res_label_text),
+            ),
+            full_width_keys=("GPU / VRAM",),
+            parent=self,
+        )
+        self.labels = self.metrics_grid.labels
+        self.values = self.metrics_grid.values
+        layout.addWidget(self.metrics_grid)
+
         self.clock = QElapsedTimer()
         self.elapsed = 0.0
         self.timer = QTimer(self, interval=500)
         self.timer.timeout.connect(self._tick)
 
+    def apply_theme(self, _resolved: str = "") -> None:
+        sync_button_icon(self.cancel_button, "x", "destructive", 14)
+
     def begin(self) -> None:
         self.stage.setText("Preparing audio…")
-        self.engine.clear()
-        self.bar.setRange(0, 0)  # Indeterminate until measurable progress arrives
+        self.progress_header.set_subtitle("")
+        self.progress_header.set_indeterminate(True)
         self.percent.setText("—")
-        for value in self.values.values():
-            value.setText("—")
+        self.metrics_grid.reset()
         self.cancel_button.setEnabled(True)
         self.elapsed = 0.0
         self.clock.start()
@@ -111,44 +112,42 @@ class SpeechProgressView(QWidget):
             self.stage.setText(
                 f"{progress.stage} — Transcribed {int(round(progress.processed or 0))}s / {int(round(progress.duration))}s"
             )
-            if self.bar.maximum() != 1000:
-                self.bar.setRange(0, 1000)
+            self.progress_header.set_indeterminate(False)
             self.percent.setText(f"{percent:.1f}%")
             self.bar.setValue(round(percent * 10))
         else:
             self.stage.setText(progress.stage)
-            if progress.indeterminate:
-                self.bar.setRange(0, 0)
-            else:
-                self.bar.setRange(0, 1000)
+            self.progress_header.set_indeterminate(bool(progress.indeterminate))
+            if not progress.indeterminate:
                 self.bar.setValue(0)
             self.percent.setText("—")
 
-        self.engine.setText(" · ".join(value for value in
-                             (progress.engine, progress.model, progress.device.upper(), progress.compute) if value))
+        self.progress_header.set_subtitle(" · ".join(
+            value for value in (progress.engine, progress.model, progress.device.upper(), progress.compute) if value
+        ))
         self.bar.setAccessibleDescription("Percentage unavailable" if self.percent.text() == "—" else self.percent.text())
         self.elapsed = progress.elapsed
         self.clock.restart()
         self._tick()
 
-        self.values["Audio through"].setText(f"{_clock(progress.processed)} / {_clock(progress.duration)}")
+        self.metrics_grid.set_value("Audio through", f"{_clock(progress.processed)} / {_clock(progress.duration)}")
         if progress.eta is not None:
-            self.values["Time left"].setText(_clock(progress.eta))
+            self.metrics_grid.set_value("Time left", _clock(progress.eta))
         elif has_measurable and (progress.processed or 0.0) > 0:
-            self.values["Time left"].setText("Estimating…")
+            self.metrics_grid.set_value("Time left", "Estimating…")
         else:
-            self.values["Time left"].setText("—")
+            self.metrics_grid.set_value("Time left", "—")
 
         if progress.speed and progress.speed > 0:
             rtf = progress.rtf if progress.rtf is not None else (1.0 / progress.speed)
-            self.values["Speed / RTF"].setText(f"{progress.speed:.1f}× / {rtf:.2f}")
+            self.metrics_grid.set_value("Speed / RTF", f"{progress.speed:.1f}× / {rtf:.2f}")
         else:
-            self.values["Speed / RTF"].setText("—")
+            self.metrics_grid.set_value("Speed / RTF", "—")
 
         apple = progress.apple_telemetry
         gpu = progress.gpu
         if apple is not None or progress.device == "mlx":
-            self.labels["GPU / VRAM"].setText("Apple Silicon Memory")
+            self.metrics_grid.set_label("GPU / VRAM", "Apple Silicon Memory")
             if apple:
                 parts: list[str] = []
                 if "mlx_active_mib" in apple:
@@ -164,16 +163,16 @@ class SpeechProgressView(QWidget):
                     parts.append(f"Pressure: {apple['memory_pressure']}")
                 if apple.get("thermal_state"):
                     parts.append(f"Thermal: {apple['thermal_state']}")
-                self.values["GPU / VRAM"].setText(" · ".join(parts) if parts else "N/A")
+                self.metrics_grid.set_value("GPU / VRAM", " · ".join(parts) if parts else "N/A")
             else:
-                self.values["GPU / VRAM"].setText("N/A")
+                self.metrics_grid.set_value("GPU / VRAM", "N/A")
         else:
-            self.labels["GPU / VRAM"].setText("GPU / VRAM")
+            self.metrics_grid.set_label("GPU / VRAM", "GPU / VRAM")
             utilization = f"{gpu.utilization}% · " if gpu and gpu.utilization is not None else ""
-            self.values["GPU / VRAM"].setText(f"{utilization}{gpu.used_mib:,}/{gpu.total_mib:,} MiB" if gpu else "—")
+            self.metrics_grid.set_value("GPU / VRAM", f"{utilization}{gpu.used_mib:,}/{gpu.total_mib:,} MiB" if gpu else "—")
 
     def _tick(self) -> None:
-        self.values["Elapsed"].setText(_clock(self.elapsed + self.clock.elapsed() / 1000))
+        self.metrics_grid.set_value("Elapsed", _clock(self.elapsed + self.clock.elapsed() / 1000))
 
 
 class SpeechSettingsView(QWidget):

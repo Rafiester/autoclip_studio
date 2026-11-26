@@ -120,7 +120,7 @@ LIGHT_TOKENS: dict[str, str] = {
     "brand_disabled_fg": "#A87C7C",
     # Typography
     "text_primary": "#17181C",
-    "text_secondary": "#667085",
+    "text_secondary": "#525B6B",
     "text_disabled": "#98A2B3",
     "text_on_brand": "#FFFFFF",
     # Semantic colors & tinted chip surfaces
@@ -328,13 +328,13 @@ QGroupBox::title {{
     background: {t["bg_app"]};
 }}
 
-/* Buttons */
+/* Buttons — unified 36px height across primary, secondary, ghost, destructive, and subtle variants */
 QPushButton {{
     background: {t["bg_elevated"]};
     border: 1px solid {t["border_subtle"]};
     border-radius: 8px;
-    padding: 7px 16px;
-    min-height: 20px;
+    padding: 0 16px;
+    min-height: 34px;
     font-size: 13px;
     font-weight: 500;
     color: {t["text_primary"]};
@@ -356,7 +356,8 @@ QPushButton#primary {{
     border: 1px solid {t["brand_primary"]};
     color: {t["text_on_brand"]};
     font-weight: 600;
-    padding: 8px 18px;
+    padding: 0 18px;
+    min-height: 34px;
 }}
 QPushButton#primary:hover {{
     background: {t["brand_primary_hover"]};
@@ -375,16 +376,31 @@ QPushButton#ghost {{
     background: transparent;
     border: 1px solid transparent;
     color: {t["text_secondary"]};
-    padding: 6px 12px;
+    padding: 0 12px;
+    min-height: 32px;
 }}
 QPushButton#ghost:hover {{
     background: {t["bg_elevated"]};
+    color: {t["text_primary"]};
+}}
+QPushButton#subtle {{
+    background: {t["bg_surface"]};
+    border: 1px solid {t["border_subtle"]};
+    color: {t["text_secondary"]};
+    padding: 0 12px;
+    min-height: 32px;
+}}
+QPushButton#subtle:hover {{
+    background: {t["bg_elevated"]};
+    border-color: {t["border_strong"]};
     color: {t["text_primary"]};
 }}
 QPushButton#danger {{
     color: {t["semantic_danger_fg"]};
     background: transparent;
     border: 1px solid {t["semantic_danger_border"]};
+    padding: 0 14px;
+    min-height: 34px;
 }}
 QPushButton#danger:hover {{
     background: {t["semantic_danger_hover"]};
@@ -404,7 +420,8 @@ QPushButton#nav {{
     border-radius: 8px;
     background: transparent;
     color: {t["text_secondary"]};
-    padding: 9px 12px;
+    padding: 0 12px;
+    min-height: 36px;
     font-size: 13px;
     font-weight: 500;
 }}
@@ -422,8 +439,8 @@ QPushButton#appearanceBtn {{
     background: transparent;
     border: 1px solid transparent;
     border-radius: 6px;
-    padding: 5px 6px;
-    min-height: 18px;
+    padding: 0 6px;
+    min-height: 28px;
     font-size: 11px;
     font-weight: 500;
     color: {t["text_secondary"]};
@@ -444,25 +461,40 @@ QFrame#appearanceBar {{
     border-radius: 8px;
 }}
 QPushButton#videoPreviewRetry {{
-    padding: 6px 12px;
+    padding: 0 12px;
+    min-height: 30px;
 }}
 
-/* Focus indicators */
-QPushButton:focus, QPushButton#primary:focus, QPushButton#nav:focus, QPushButton#danger:focus,
+/* Focus indicators (never show fake active left bar on unfocused/unchecked sidebar nav items) */
+QPushButton:focus, QPushButton#primary:focus, QPushButton#danger:focus,
 QTableWidget:focus {{
     border: 1px solid {t["brand_accent"]};
 }}
+QPushButton#nav:focus {{
+    border: none;
+    border-left: 3px solid transparent;
+    outline: none;
+}}
+QPushButton#nav:checked:focus {{
+    border-left: 3px solid {t["brand_primary"]};
+}}
 
-/* Text inputs, SpinBoxes, ComboBoxes */
+/* Text inputs, SpinBoxes, ComboBoxes — unified 36px control height across macOS & Windows */
 QLineEdit, QPlainTextEdit {{
     background: {t["bg_elevated"]};
     border: 1px solid {t["border_subtle"]};
     border-radius: 8px;
-    padding: 7px 12px;
-    min-height: 20px;
+    padding: 0 12px;
+    min-height: 34px;
     color: {t["text_primary"]};
     selection-background-color: {t["brand_primary"]};
     selection-color: {t["text_on_brand"]};
+}}
+QPlainTextEdit {{
+    padding: 8px 12px;
+}}
+QLineEdit:hover, QPlainTextEdit:hover {{
+    border-color: {t["border_strong"]};
 }}
 QLineEdit:focus, QPlainTextEdit:focus {{
     border-color: {t["brand_accent"]};
@@ -480,11 +512,15 @@ QSpinBox, QDoubleSpinBox {{
     background: {t["bg_elevated"]};
     border: 1px solid {t["border_subtle"]};
     border-radius: 8px;
-    padding: 7px 32px 7px 12px;
-    min-height: 20px;
+    padding: 0 30px 0 12px;
+    min-height: 34px;
+    max-height: 36px;
     color: {t["text_primary"]};
     selection-background-color: {t["brand_primary"]};
     selection-color: {t["text_on_brand"]};
+}}
+QSpinBox:hover, QDoubleSpinBox:hover {{
+    border-color: {t["border_strong"]};
 }}
 QSpinBox:focus, QDoubleSpinBox:focus {{
     border-color: {t["brand_accent"]};
@@ -497,6 +533,7 @@ QSpinBox::up-button, QDoubleSpinBox::up-button {{
     subcontrol-origin: border;
     subcontrol-position: top right;
     width: 26px;
+    height: 17px;
     border-left: 1px solid {t["border_subtle"]};
     border-bottom: 1px solid {t["border_subtle"]};
     border-top-right-radius: 7px;
@@ -506,6 +543,7 @@ QSpinBox::down-button, QDoubleSpinBox::down-button {{
     subcontrol-origin: border;
     subcontrol-position: bottom right;
     width: 26px;
+    height: 17px;
     border-left: 1px solid {t["border_subtle"]};
     border-bottom-right-radius: 7px;
     background: transparent;
@@ -520,21 +558,22 @@ QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {{
 }}
 QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
     image: url("{chev_up}");
-    width: 11px;
-    height: 11px;
+    width: 10px;
+    height: 10px;
 }}
 QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
     image: url("{chev_down}");
-    width: 11px;
-    height: 11px;
+    width: 10px;
+    height: 10px;
 }}
 
 QComboBox {{
     background: {t["bg_elevated"]};
     border: 1px solid {t["border_subtle"]};
     border-radius: 8px;
-    padding: 7px 32px 7px 12px;
-    min-height: 20px;
+    padding: 0 32px 0 12px;
+    min-height: 34px;
+    max-height: 36px;
     color: {t["text_primary"]};
     selection-background-color: {t["brand_primary"]};
     selection-color: {t["text_on_brand"]};
@@ -552,12 +591,14 @@ QComboBox:disabled {{
 QComboBox::drop-down {{
     subcontrol-origin: border;
     subcontrol-position: top right;
-    width: 28px;
+    width: 30px;
     border: none;
-    border-left: 1px solid {t["border_subtle"]};
     border-top-right-radius: 7px;
     border-bottom-right-radius: 7px;
     background: transparent;
+}}
+QComboBox::drop-down:hover {{
+    background: {t["bg_hover"]};
 }}
 QComboBox::down-arrow {{
     image: url("{chev_down}");
@@ -577,12 +618,14 @@ QComboBox QAbstractItemView {{
 QComboBox QAbstractItemView::item {{
     padding: 6px 10px;
     border-radius: 6px;
-    min-height: 22px;
+    min-height: 24px;
 }}
 
-/* Checkboxes & Radio buttons */
+/* Checkboxes & Radio buttons — baseline-aligned 16px indicator with high Light/Dark contrast */
 QCheckBox, QRadioButton {{
     spacing: 8px;
+    padding: 2px 0;
+    min-height: 24px;
     color: {t["text_primary"]};
 }}
 QCheckBox:disabled, QRadioButton:disabled {{
@@ -591,16 +634,19 @@ QCheckBox:disabled, QRadioButton:disabled {{
 QCheckBox::indicator {{
     width: 16px;
     height: 16px;
-    border: 1px solid {t["border_strong"]};
+    border: 1.5px solid {t["border_strong"]};
     border-radius: 4px;
     background: {t["bg_elevated"]};
 }}
 QCheckBox::indicator:hover {{
     border-color: {t["brand_accent"]};
 }}
+QCheckBox:focus::indicator {{
+    border-color: {t["brand_accent"]};
+}}
 QCheckBox::indicator:checked {{
     background: {t["brand_primary"]};
-    border-color: {t["brand_primary"]};
+    border: 1.5px solid {t["brand_primary"]};
     image: url("{check_svg}");
 }}
 QCheckBox::indicator:disabled {{
@@ -667,7 +713,8 @@ QSplitter::handle:hover {{
 }}
 
 /* Transfer & Speech progress */
-QWidget#downloadView, QWidget#downloadView QLabel {{
+QWidget#downloadView, QWidget#downloadView QLabel, QWidget#metricCell,
+QFrame#summaryPill QLabel {{
     background: transparent;
 }}
 QFrame#transferIndicator {{
@@ -694,9 +741,16 @@ QLabel#transferMetric {{
     font-size: 13px;
 }}
 QLabel#transferPercent {{
-    min-width: 84px;
+    min-width: 64px;
     color: {t["brand_accent"]};
-    font-size: 22px;
+    font-size: 16px;
+    font-weight: 600;
+}}
+QLabel#transferPercentCompact {{
+    font-family: {mono_font};
+    min-width: 52px;
+    color: {t["brand_accent"]};
+    font-size: 14px;
     font-weight: 600;
 }}
 QProgressBar#downloadTransfer {{
@@ -711,7 +765,8 @@ QPushButton#cancelDownload {{
     color: {t["semantic_danger_fg"]};
     background: transparent;
     border: 1px solid {t["semantic_danger_border"]};
-    padding: 6px 12px;
+    padding: 0 12px;
+    min-height: 30px;
 }}
 QPushButton#cancelDownload:hover {{
     background: {t["semantic_danger_hover"]};
@@ -856,7 +911,8 @@ QLabel#statusChip[tone="info"] {{
 QPushButton#viewToggle {{
     background: {t["bg_elevated"]};
     border: 1px solid {t["border_subtle"]};
-    padding: 6px 10px;
+    padding: 0 10px;
+    min-height: 30px;
     color: {t["text_secondary"]};
 }}
 QPushButton#viewToggle:checked {{
@@ -868,7 +924,8 @@ QPushButton#sourceTab {{
     background: {t["bg_elevated"]};
     border: 1px solid {t["border_subtle"]};
     border-radius: 8px;
-    padding: 7px 14px;
+    padding: 0 16px;
+    min-height: 34px;
     color: {t["text_secondary"]};
     font-weight: 500;
 }}
@@ -882,7 +939,8 @@ QPushButton#filterTab {{
     background: transparent;
     border: 1px solid transparent;
     border-radius: 8px;
-    padding: 4px 8px;
+    padding: 0 10px;
+    min-height: 30px;
     color: {t["text_secondary"]};
     font-weight: 500;
 }}
@@ -905,7 +963,8 @@ QPushButton#iconButton {{
     background: {t["bg_elevated"]};
     border: 1px solid {t["border_subtle"]};
     border-radius: 8px;
-    padding: 6px 10px;
+    padding: 0 8px;
+    min-height: 30px;
 }}
 QPushButton#iconButton:hover {{
     background: {t["bg_hover"]};

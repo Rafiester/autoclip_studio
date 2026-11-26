@@ -1,12 +1,31 @@
 # AutoClip Studio — Agent Handoff & Progress
 
 **Last Updated:** 2026-11-26  
-**Current Phase:** Intelligent Auto Director & Cinematic Smart Reframing Complete
+**Current Phase:** Global UI Regression Stabilization Complete
 
 ## Execution Status
 
 ### Completed Tasks
-- **Intelligent Auto Director & Cinematic Smart Reframing:**
+- **Global UI Regression Stabilization** (Pre-modification checkpoint: `77dc1b6`):
+  - **Confirmed Root Causes:**
+    1. **Divergent control heights & macOS native metrics (`theme.py`):** `QSpinBox` rendered at `42px` vs `QLineEdit`/`QComboBox` (`37px`), `QPushButton#primary` (`38px`), and `QCheckBox` (`20px`) with faint Light-mode checkbox borders and a split `QComboBox::drop-down` border.
+    2. **Spurious sidebar focus ring (`theme.py`):** `QPushButton#nav:focus` drew an active red border/bar on `Dashboard` when opening other pages.
+    3. **New Project layout mismatch (`gui.py`, `heatmap_view.py`):** `Automation` used a 50/50 stretched `QGridLayout` that left a ~400px blank gap between labels and dropdowns; `Project name` had a mnemonic underline; `srt_status` used hardcoded dark hex colors; `AudienceHeatmapWidget` and `srt_panel` used heavy nested `card` frames.
+    4. **Active Job Card collisions & stepper mismatch (`queue_workspace.py`, `download_view.py`, `speech_view.py`, `gui.py`):** Duplicate Cancel buttons (`Cancel Job` + inner `Cancel Download` / `Cancel Transcription`) with hardcoded light-pink `cancel_icon()`; oversized `22px` transfer percentage colliding with cancel buttons; `DownloadView._arrange_metrics` re-added widgets without clearing; `compute_pipeline_stages` marked `Download` as `Done` at `progress=12` during downloads; non-scrollable `_queue_page` crushed `ActiveJobCard` metrics at `920×680`.
+    5. **Generated Clips narrow-window collisions (`clips_workspace.py`):** Score/duration/status badges were split across rows instead of grouped in the upper-right; fixed-width `74px` volume slider collided with `fullscreen_btn` at `920×680`; `ClipLibraryCard` `Maximum` vertical policy clipped long multi-line Indonesian titles on narrow windows.
+  - **Shared Components & Layout System Stabilized (`autoclip_studio/ui/components.py`, `autoclip_studio/ui/theme.py`):**
+    - Added centralized `components.py` with `make_button` / `sync_button_icon` (`primary`, `secondary`, `ghost`, `destructive`, `subtle`), compact semantic `StatusBadge`, responsive `MetricGrid` (cleanly clears/rearranges between 2 and 4 columns with transparent `#metricCell` styling), and reusable `StageProgressHeader`.
+    - Unified all single-line controls (`QLineEdit`, `QComboBox`, `QSpinBox`, `QDoubleSpinBox`, `QPushButton` variants, `sourceTab`) to `36px` (`36–38px` across macOS native metrics, explicit `17px` centered spinbox up/down buttons, seamless `QComboBox` chevron, high-contrast Light/Dark `16px` checkboxes, strengthened Light `text_secondary` `#525B6B`, clean sidebar focus rules).
+    - Migrated both `DownloadView` and `SpeechProgressView` onto shared `StageProgressHeader` + `MetricGrid` with embedded mode (`embedded=True`) and theme-aware danger icons.
+  - **Pages Repaired:**
+    - **New Project (`gui.py`, `heatmap_view.py`):** Converted `Automation` to `configure_form_layout(QFormLayout())` matching `AI and transcription` with aligned `Options` checkbox row; switched `AudienceHeatmapWidget` & `srt_panel` to inset `summaryPill` containers; replaced hardcoded `srt_status` hex colors with semantic tokens; removed `&Project name` underline.
+    - **Processing Queue (`queue_workspace.py`, `download_view.py`, `speech_view.py`, `gui.py`):** Fixed `compute_pipeline_stages` message-first stage detection; replaced duplicate cancel buttons with ONE contextual header Cancel button (`Cancel Download`, `Cancel Transcription`, `Cancel Job`); grouped stage progress + metrics inside a clean inset `stage_box`; wrapped `_queue_page` in `_scroll_page(outer)` with `JobQueuePanel` `stretch=1` + `minHeight=240` so it expands to fill tall viewports (`1280×860`, `1560×980`) with zero outer scrollbar while scrolling cleanly without text crushing on compact windows (`920×680`).
+    - **Generated Clips (`clips_workspace.py`):** Grouped compact `★ score`, `duration`, and semantic `Ready`/`Pending` status in a right-aligned upper-right cluster on every `ClipLibraryCard`; preserved full multi-line Indonesian title/description wrapping and vertical-only library scrolling; made player transport buttons (`28×28`) and volume slider (`44–74px`) responsive with zero overlap at `920×680`.
+  - **Before & After Visual QA (`Apple M1`, `macOS 27.2.1`):**
+    - Inspected before-and-after captures across Light, Dark, and System themes at `920×680` (small), `1280×860` (laptop), and `1560×980` (maximized) covering New Project (top + bottom), Processing Queue (active download, active MLX transcription, failed/completed history), and Generated Clips (long Indonesian titles & descriptions).
+    - Confirmed zero overlapping text, zero duplicate cancel buttons, zero horizontal scrollbars in clip library, exact `Download: Active` stepper during downloads, and clean control alignment (`line_edit=36px`, `reframe_combo=36px`, `style_combo=36px`, `primary_btn=36px`, `source_tab=36px`, `spin_box=38px`/`combo_box=38px`).
+    - **Remaining Limitations:** On macOS `QMacStyle`, `QSpinBox` and `QComboBox` inside `QGridLayout` still add `2px` of native Aqua frame chrome (`38px` vs `36px` in `QFormLayout`), which stays visually aligned per row and within 2px across sections without forcing `Fusion` style overrides that could alter native macOS dialogs/menus.
+- **Intelligent Auto Director & Cinematic Smart Reframing** (`77dc1b6`):
   - **Root Cause Audit (`02-asal-usul-nama-gia-pratama-dan-tirta.mp4`, `1864.50s–1898.80s`, `34.30s`, `1920×1080 @ 25 FPS` VP9 → `1080×1920 @ 25 FPS` H.264):**
     - Confirmed the original 3-person podcast footage (`Pertemuan Bersejarah dr. Tirta dan dr. Gia`, Raditya Dika) contains **17 real studio camera cuts**, and FFmpeg rendering itself had `0` dropped/duplicated frames (`exact 40ms` PTS intervals).
     - Identified 5 AutoClip Studio root causes behind the perceived abruptness:
@@ -150,8 +169,8 @@
 
 ## Test Results
 - **macOS 27.2.1 (`arm64`, Apple Silicon):**
-  - `.venv/bin/python3 -m pytest -q`: **142 passed, 3 skipped, 0 failed** (includes `tests/test_auto_director.py`, `tests/test_ui_refinement_and_telemetry.py`, `tests/test_persistent_settings.py`, `tests/test_startup_and_downloader.py`, `tests/test_smart_reframe.py`, `tests/test_apple_silicon_perf.py`, `tests/test_theme_system.py`, `tests/test_heatmap_and_hybrid.py`; 3 Windows-only/environment skips).
-  - `.venv/bin/python3 -m tests.integration_smoke`: **Passed** (`Auto Director (auto/natural, opencv-haar-multi)`, `h264_videotoolbox`, `6.30s`).
+  - `.venv/bin/python3 -m pytest -q`: **145 passed, 3 skipped, 0 failed** (includes `tests/test_ui_stabilization.py`, `tests/test_auto_director.py`, `tests/test_ui_refinement_and_telemetry.py`, `tests/test_persistent_settings.py`, `tests/test_startup_and_downloader.py`, `tests/test_smart_reframe.py`, `tests/test_apple_silicon_perf.py`, `tests/test_theme_system.py`, `tests/test_heatmap_and_hybrid.py`; 3 Windows-only/environment skips).
+  - `.venv/bin/python3 -m tests.integration_smoke`: **Passed** (`Auto Director (auto/natural, opencv-haar-multi)`, `h264_videotoolbox`, `1,235,100 bytes`, `6.30s`).
   - `.venv/bin/python3 scripts/setup.py --check`: **Passed** (exit code 0).
 - **Windows 11 x64 Host (previous session):**
   - `.\.venv\Scripts\python.exe -m pytest -q`: **93 passed**.

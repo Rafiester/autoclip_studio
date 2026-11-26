@@ -3,12 +3,13 @@ from __future__ import annotations
 from math import ceil
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QResizeEvent
-from PySide6.QtWidgets import (
-    QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
-)
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
 from ..media import DownloadProgress
+from .components import MetricGrid, StageProgressHeader, make_button, sync_button_icon
+from .icons import lucide_icon
+from .theme import SPACING, theme_manager
 
 
 def format_bytes(value: int | float | None, *, rate: bool = False) -> str:
@@ -41,64 +42,61 @@ def format_time(seconds: float | None) -> str:
 
 
 def cancel_icon() -> QIcon:
-    image = QPixmap(16, 16)
-    image.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(image)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    pen = QPen(QColor("#f4a1aa"), 1.6)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    painter.setPen(pen)
-    painter.drawLine(4, 4, 12, 12)
-    painter.drawLine(12, 4, 4, 12)
-    painter.end()
-    return QIcon(image)
+    return lucide_icon("x", theme_manager().tokens["semantic_danger_fg"], 14)
 
 
 class DownloadView(QWidget):
-    def __init__(self) -> None:
+    """Shared transfer progress and metrics panel built on StageProgressHeader + MetricGrid."""
+
+    def __init__(self, *, embedded: bool = False) -> None:
         super().__init__(objectName="downloadView")
+        self._embedded = embedded
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 3)
-        layout.setSpacing(6)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(SPACING["sm"])
 
-        header = QHBoxLayout()
-        self.indicator = QFrame(objectName="transferIndicator")
-        self.indicator.setFixedSize(7, 7)
-        self.status = QLabel(objectName="transferStatus")
-        self.status.setWordWrap(True)
-        self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.percent = QLabel("—", objectName="transferPercent")
-        self.percent.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.cancel_button = QPushButton(cancel_icon(), "Cancel Download", objectName="cancelDownload")
-        header.addWidget(self.indicator)
-        header.addWidget(self.status, 1)
-        header.addWidget(self.percent)
-        header.addWidget(self.cancel_button)
-        layout.addLayout(header)
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(SPACING["sm"])
 
-        self.bar = QProgressBar(objectName="downloadTransfer")
-        self.bar.setRange(0, 1000)
-        self.bar.setTextVisible(False)
-        self.bar.setFixedHeight(9)
-        self.bar.setAccessibleName("Download progress")
-        layout.addWidget(self.bar)
-        self.summary = QLabel(objectName="transferSummary")
-        layout.addWidget(self.summary)
+        self.progress_header = StageProgressHeader(
+            "Preparing download…",
+            accessible_bar_name="Download progress",
+            parent=self,
+        )
+        self.indicator = self.progress_header.indicator
+        self.status = self.progress_header.title_label
+        self.percent = self.progress_header.percent_label
+        self.summary = self.progress_header.subtitle_label
+        self.bar = self.progress_header.bar
 
-        self.metrics = QGridLayout()
-        self.metrics.setHorizontalSpacing(14)
-        self.metrics.setVerticalSpacing(1)
-        self.metric_labels = []
-        self.metric_values = []
-        for name in ("Transfer Rate", "Downloaded Size", "Total File Size", "Time Left"):
-            label = QLabel(name, objectName="transferMetricLabel")
-            value = QLabel(objectName="transferMetric")
-            value.setAccessibleName(name)
-            self.metric_labels.append(label)
-            self.metric_values.append(value)
-        layout.addLayout(self.metrics)
-        self._columns = 0
-        self._arrange_metrics(2)
+        self.cancel_button = make_button(
+            "Cancel Download",
+            variant="destructive",
+            icon_name="x",
+            icon_size=14,
+            parent=self,
+        )
+        self.cancel_button.setObjectName("cancelDownload")
+        top_row.addWidget(self.progress_header, 1)
+        top_row.addWidget(self.cancel_button, 0, Qt.AlignmentFlag.AlignTop)
+        if self._embedded:
+            self.cancel_button.hide()
+        layout.addLayout(top_row)
+
+        self.metrics_grid = MetricGrid(
+            (
+                ("rate", "Transfer Rate"),
+                ("downloaded", "Downloaded Size"),
+                ("total", "Total File Size"),
+                ("eta", "Time Left"),
+            ),
+            parent=self,
+        )
+        self.metrics = self.metrics_grid.grid
+        self.metric_labels = [self.metrics_grid.labels[k] for k in ("rate", "downloaded", "total", "eta")]
+        self.metric_values = [self.metrics_grid.values[k] for k in ("rate", "downloaded", "total", "eta")]
+        layout.addWidget(self.metrics_grid)
 
         self.animation = QPropertyAnimation(self.bar, b"value", self)
         self.animation.setDuration(175)
@@ -106,42 +104,20 @@ class DownloadView(QWidget):
         self._stream = ""
         self.reset()
 
-    def resizeEvent(self, event: QResizeEvent) -> None:
-        super().resizeEvent(event)
-        self.percent.setMinimumWidth(self.percent.fontMetrics().horizontalAdvance("100.0%") + 2)
-        samples = ("1000.00 MB/s", "999.99 GB", "≈ 999.99 GB", "59 min 59 sec")
-        widths = [
-            max(label.sizeHint().width(), value.fontMetrics().horizontalAdvance(sample))
-            for label, value, sample in zip(self.metric_labels, self.metric_values, samples)
-        ]
-        wide_width = sum(widths) + 3 * self.metrics.horizontalSpacing()
-        columns = 4 if event.size().width() >= wide_width else 2
-        self._arrange_metrics(columns)
-        for index in range(4):
-            self.metrics.setColumnMinimumWidth(index, max(widths[index::columns]) if index < columns else 0)
-
-    def _arrange_metrics(self, columns: int) -> None:
-        if self._columns == columns:
-            return
-        self._columns = columns
-        for index, (label, value) in enumerate(zip(self.metric_labels, self.metric_values)):
-            row, column = divmod(index, columns)
-            self.metrics.addWidget(label, row * 2, column)
-            self.metrics.addWidget(value, row * 2 + 1, column)
-        for index in range(4):
-            self.metrics.setColumnStretch(index, int(index < columns))
+    def apply_theme(self, _resolved: str = "") -> None:
+        sync_button_icon(self.cancel_button, "x", "destructive", 14)
 
     def reset(self) -> None:
         self._stream = ""
         self.status.setText("Preparing download…")
         self.cancel_button.setEnabled(True)
         self.percent.setText("—")
-        self.summary.clear()
+        self.progress_header.set_subtitle("")
+        self.progress_header.set_indeterminate(False)
         self.bar.setAccessibleDescription("Waiting for download progress")
         self.animation.stop()
         self.bar.setValue(0)
-        for value in self.metric_values:
-            value.setText("—")
+        self.metrics_grid.reset()
 
     def update_transfer(self, progress: DownloadProgress) -> None:
         stream_changed = progress.stream != self._stream
@@ -150,14 +126,17 @@ class DownloadView(QWidget):
             self.status.setText(f"{progress.stream.title() or 'File'} downloaded")
         else:
             self.status.setText(f"Downloading {progress.stream or 'file'}")
+
         downloaded = format_bytes(progress.downloaded)
         total = format_bytes(progress.total)
-        if progress.estimated:
+        if progress.estimated and progress.total is not None:
             total = f"≈ {total}"
         if progress.downloaded is None:
-            self.summary.clear()
+            self.progress_header.set_subtitle("")
         else:
-            self.summary.setText(f"{downloaded} of {total}" if progress.total else f"{downloaded} downloaded")
+            self.progress_header.set_subtitle(
+                f"{downloaded} of {total}" if progress.total else f"{downloaded} downloaded"
+            )
 
         percent = None
         if progress.finished:
@@ -170,6 +149,8 @@ class DownloadView(QWidget):
         if progress.estimated:
             description += " (estimated)"
         self.bar.setAccessibleDescription(description)
+
+        self.progress_header.set_indeterminate(False)
         target = round(percent * 10) if percent is not None else 0
         self.animation.stop()
         if stream_changed or target <= self.bar.value() or not self.isVisible():
@@ -179,7 +160,7 @@ class DownloadView(QWidget):
             self.animation.setEndValue(target)
             self.animation.start()
 
-        metrics = (format_bytes(progress.bytes_per_second, rate=True), downloaded, total,
-                   format_time(0 if progress.finished else progress.eta_seconds))
-        for label, value in zip(self.metric_values, metrics):
-            label.setText(value)
+        self.metrics_grid.set_value("rate", format_bytes(progress.bytes_per_second, rate=True))
+        self.metrics_grid.set_value("downloaded", downloaded)
+        self.metrics_grid.set_value("total", total)
+        self.metrics_grid.set_value("eta", format_time(0 if progress.finished else progress.eta_seconds))

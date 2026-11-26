@@ -386,11 +386,12 @@ class MainWindow(QMainWindow):
         self.import_srt_check.toggled.connect(self._toggle_srt_panel)
         source_layout.addWidget(self.import_srt_check)
 
-        self.srt_panel = QFrame(objectName="card")
+        self.srt_panel = QFrame(objectName="summaryPill")
         srt_layout = QVBoxLayout(self.srt_panel)
-        srt_layout.setContentsMargins(12, 10, 12, 10)
+        srt_layout.setContentsMargins(16, 12, 16, 12)
         srt_layout.setSpacing(8)
         srt_row = QHBoxLayout()
+        srt_row.setContentsMargins(0, 0, 0, 0)
         srt_row.setSpacing(8)
         self.srt_input = QLineEdit()
         self.srt_input.setAccessibleName("Subtitle .srt file path")
@@ -421,7 +422,7 @@ class MainWindow(QMainWindow):
         name_row = configure_form_layout(QFormLayout())
         self.project_name = configure_input(QLineEdit(placeholderText="Optional project name"))
         self._auto_project_name = ""
-        name_row.addRow("&Project name", self.project_name)
+        name_row.addRow("Project name", self.project_name)
         name_row.labelForField(self.project_name).setObjectName("projectNameLabel")
         source_layout.addLayout(name_row)
         form.addWidget(source_group)
@@ -452,10 +453,8 @@ class MainWindow(QMainWindow):
         grid.setColumnStretch(3, 1)
         form.addWidget(settings_group)
         automation = SectionCard("Automation")
-        auto_layout = QGridLayout()
-        automation.body_layout().addLayout(auto_layout)
-        auto_layout.setHorizontalSpacing(16)
-        auto_layout.setVerticalSpacing(10)
+        auto_form = configure_form_layout(QFormLayout())
+        automation.body_layout().addLayout(auto_form)
         self.reframe_combo = configure_input(QComboBox())
         for code, label in REFRAME_MODES:
             self.reframe_combo.addItem(label, code)
@@ -485,16 +484,16 @@ class MainWindow(QMainWindow):
         self.template_combo.addItems(TEMPLATES.keys())
         self.template_combo.setCurrentText(self.default_template())
         self.template_combo.currentTextChanged.connect(self._on_project_template_changed)
-        auto_layout.addWidget(QLabel("Smart reframing"), 0, 0)
-        auto_layout.addWidget(self.reframe_combo, 0, 1)
-        auto_layout.addWidget(QLabel("Reframing style"), 1, 0)
-        auto_layout.addWidget(self.reframe_style_combo, 1, 1)
-        auto_layout.addWidget(self.captions, 2, 0)
-        auto_layout.addWidget(self.cache, 2, 1)
-        auto_layout.addWidget(QLabel("Caption template"), 3, 0)
-        auto_layout.addWidget(self.template_combo, 3, 1)
-        auto_layout.setColumnStretch(0, 1)
-        auto_layout.setColumnStretch(1, 1)
+        options_row = QHBoxLayout()
+        options_row.setContentsMargins(0, 0, 0, 0)
+        options_row.setSpacing(20)
+        options_row.addWidget(self.captions)
+        options_row.addWidget(self.cache)
+        options_row.addStretch()
+        auto_form.addRow("Smart reframing", self.reframe_combo)
+        auto_form.addRow("Reframing style", self.reframe_style_combo)
+        auto_form.addRow("Caption template", self.template_combo)
+        auto_form.addRow("Options", options_row)
         form.addWidget(automation)
         ai_group = SectionCard("AI and transcription")
         ai_form = configure_form_layout(QFormLayout())
@@ -582,8 +581,9 @@ class MainWindow(QMainWindow):
         self.live_logs = self.logs_panel.live_logs
         page.addWidget(self.logs_panel)
 
-        # Direct expanding layout (no outer nested QScrollArea so Job Queue & History expands to fill viewport!)
-        return outer
+        # Responsive scroll wrapper: stretches Job Queue & History to fill tall viewports (no outer scrollbar),
+        # while preventing any vertical text crushing/overlap on compact windows or when Logs are expanded!
+        return self._scroll_page(outer)
 
     def export_logs(self) -> None:
         filename, _ = QFileDialog.getSaveFileName(self, "Export logs", "autoclip-logs.txt", "Text files (*.txt)")
@@ -806,17 +806,18 @@ class MainWindow(QMainWindow):
             self._srt_error = ""
             return
         raw_path = self.srt_input.text().strip()
+        t = theme_manager().tokens
         if not raw_path:
             self._srt_result = None
             self._srt_error = "Choose an .srt file or uncheck 'Import existing subtitle (.srt)'."
-            self.srt_status.setStyleSheet("color: #A3A8B5;")
+            self.srt_status.setStyleSheet(f"color: {t['text_secondary']};")
             self.srt_status.setText("Select an .srt file to validate cues and language.")
             return
         try:
             result = parse_srt_file(Path(raw_path), offset_seconds=self.srt_offset.value())
             self._srt_result = result
             self._srt_error = ""
-            self.srt_status.setStyleSheet("color: #2ECC71;")
+            self.srt_status.setStyleSheet(f"color: {t['semantic_success']};")
             self.srt_status.setText(
                 f"✓ Valid SRT: {Path(raw_path).name}  •  {result.cue_count} cues  •  "
                 f"{result.language_label}  •  {result.encoding}"
@@ -824,7 +825,7 @@ class MainWindow(QMainWindow):
         except SrtValidationError as error:
             self._srt_result = None
             self._srt_error = str(error)
-            self.srt_status.setStyleSheet("color: #FF9AA2;")
+            self.srt_status.setStyleSheet(f"color: {t['semantic_danger_fg']};")
             self.srt_status.setText(f"Invalid SRT: {error}")
 
     def browse_output(self) -> None:
@@ -1174,10 +1175,10 @@ class MainWindow(QMainWindow):
     def cancel_processing(self) -> None:
         downloading = not self.download_view.isHidden()
         transcribing = not self.speech_progress.isHidden()
-        button = (self.download_view.cancel_button if downloading else
-                  self.speech_progress.cancel_button if transcribing else self.cancel_button)
-        if self.worker and button.isEnabled():
-            button.setEnabled(False)
+        if self.worker and (self.cancel_button.isEnabled() or self.download_view.cancel_button.isEnabled() or self.speech_progress.cancel_button.isEnabled()):
+            self.cancel_button.setEnabled(False)
+            self.download_view.cancel_button.setEnabled(False)
+            self.speech_progress.cancel_button.setEnabled(False)
             if downloading:
                 self.download_view.status.setText("Cancelling download…")
             elif transcribing:
@@ -1205,9 +1206,13 @@ class MainWindow(QMainWindow):
         self._update_processing_rows()
 
     def _update_processing_rows(self) -> None:
-        visible = self.download_view.isHidden() and self.speech_progress.isHidden()
+        downloading = not self.download_view.isHidden()
+        transcribing = not self.speech_progress.isHidden()
+        visible = (not downloading) and (not transcribing)
         self.processing_status_row.setVisible(visible)
         self.processing_progress_row.setVisible(visible)
+        mode = "download" if downloading else ("speech" if transcribing else "generic")
+        self.active_job_card.set_stage_mode(mode)
 
     @Slot(object)
     def on_download_progress(self, progress: DownloadProgress) -> None:

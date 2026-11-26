@@ -240,19 +240,25 @@ def compute_pipeline_stages(
                 out.append({"key": key, "title": title, "subtitle": "Done", "state": "completed"})
         return out
 
-    # Determine active stage index from progress percentage + stage hints
+    # Determine active stage index from explicit stage hints first, then progress percentage
     if status == "analysis_failed":
         active_idx = 2
+    elif "download" in msg_lower:
+        active_idx = 0
+    elif any(tok in msg_lower for tok in ("transcrib", "whisper", "speech", "audio", "subtitle", "srt")):
+        active_idx = 1
+    elif any(tok in msg_lower for tok in ("highlight", "scoring", "analyz", "analys")):
+        active_idx = 2
+    elif "thumbnail" in msg_lower or progress >= 82:
+        active_idx = 5
+    elif "caption" in msg_lower or (64 <= progress < 82):
+        active_idx = 4
     elif progress < 12:
         active_idx = 0
     elif progress < 40:
         active_idx = 1
     elif progress < 48:
         active_idx = 2
-    elif "thumbnail" in msg_lower or progress >= 82:
-        active_idx = 5
-    elif "caption" in msg_lower or (64 <= progress < 82):
-        active_idx = 4
     else:
         active_idx = 3
 
@@ -350,8 +356,8 @@ class QueueOverviewBar(QFrame):
         self.setObjectName("card")
         self._paused = False
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 10, 12, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(12, 8, 12, 8)
+        root.setSpacing(6)
 
         cards_grid = QGridLayout()
         cards_grid.setContentsMargins(0, 0, 0, 0)
@@ -370,8 +376,8 @@ class QueueOverviewBar(QFrame):
             tile.setMinimumWidth(0)
             tile.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             tile_lay = QVBoxLayout(tile)
-            tile_lay.setContentsMargins(10, 6, 10, 6)
-            tile_lay.setSpacing(2)
+            tile_lay.setContentsMargins(10, 5, 10, 5)
+            tile_lay.setSpacing(1)
 
             head = QHBoxLayout()
             head.setContentsMargins(0, 0, 0, 0)
@@ -480,14 +486,15 @@ class PipelineStepperWidget(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._last_stages: list[dict[str, str]] = []
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         grid = QGridLayout(self)
-        grid.setContentsMargins(8, 6, 8, 6)
+        grid.setContentsMargins(6, 6, 6, 6)
         grid.setSpacing(6)
         self._chips: list[tuple[QFrame, QFrame, QLabel, QLabel]] = []
         for idx in range(6):
             chip = QFrame()
             chip.setMinimumWidth(0)
-            chip.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            chip.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
             chip_lay = QVBoxLayout(chip)
             chip_lay.setContentsMargins(6, 5, 6, 5)
             chip_lay.setSpacing(2)
@@ -568,7 +575,7 @@ class ActiveJobCard(QFrame):
         self._tick.timeout.connect(self._refresh_timing)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(14, 12, 14, 12)
+        root.setContentsMargins(12, 10, 12, 10)
         root.setSpacing(0)
 
         self.stack = QStackedWidget()
@@ -577,7 +584,7 @@ class ActiveJobCard(QFrame):
         # Page 0: Compact Idle State
         idle_widget = QWidget()
         idle_lay = QHBoxLayout(idle_widget)
-        idle_lay.setContentsMargins(2, 4, 2, 4)
+        idle_lay.setContentsMargins(2, 2, 2, 2)
         idle_lay.setSpacing(12)
         self._idle_icon = QLabel(objectName="summaryPill")
         self._idle_icon.setFixedSize(40, 40)
@@ -603,12 +610,12 @@ class ActiveJobCard(QFrame):
         active_widget = QWidget()
         active_lay = QVBoxLayout(active_widget)
         active_lay.setContentsMargins(0, 0, 0, 0)
-        active_lay.setSpacing(10)
+        active_lay.setSpacing(8)
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(12)
-        self.thumbnail = _SourceThumbnail(52)
+        header.setSpacing(10)
+        self.thumbnail = _SourceThumbnail(40)
         header.addWidget(self.thumbnail)
 
         meta_col = QVBoxLayout()
@@ -639,6 +646,13 @@ class ActiveJobCard(QFrame):
         self.stepper = PipelineStepperWidget()
         active_lay.addWidget(self.stepper)
 
+        # Clean inset container holding active stage progress & grouped metrics (zero overlap/collisions)
+        self.stage_box = QFrame(objectName="summaryPill")
+        self.stage_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        stage_lay = QVBoxLayout(self.stage_box)
+        stage_lay.setContentsMargins(10, 8, 10, 8)
+        stage_lay.setSpacing(6)
+
         self.processing_status_row = QWidget()
         status_row_lay = QHBoxLayout(self.processing_status_row)
         status_row_lay.setContentsMargins(0, 0, 0, 0)
@@ -648,7 +662,7 @@ class ActiveJobCard(QFrame):
         self.queue_status.setTextFormat(Qt.TextFormat.PlainText)
         self.queue_status.setMinimumWidth(0)
         status_row_lay.addWidget(self.queue_status, 1)
-        active_lay.addWidget(self.processing_status_row)
+        stage_lay.addWidget(self.processing_status_row)
 
         self.processing_progress_row = QWidget()
         progress_row_lay = QHBoxLayout(self.processing_progress_row)
@@ -657,24 +671,26 @@ class ActiveJobCard(QFrame):
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setAccessibleName("Project progress")
-        self.progress_text = QLabel("0%", objectName="transferMetric")
+        self.progress_text = QLabel("0%", objectName="transferPercentCompact")
         progress_row_lay.addWidget(self.progress_bar, 1)
         progress_row_lay.addWidget(self.progress_text)
-        active_lay.addWidget(self.processing_progress_row)
+        stage_lay.addWidget(self.processing_progress_row)
 
-        self.download_view = DownloadView()
+        self.download_view = DownloadView(embedded=True)
         self.download_view.cancel_button.clicked.connect(on_cancel)
         self.download_view.hide()
-        active_lay.addWidget(self.download_view)
+        stage_lay.addWidget(self.download_view)
 
-        self.speech_progress = SpeechProgressView()
+        self.speech_progress = SpeechProgressView(embedded=True)
         self.speech_progress.cancel_button.clicked.connect(on_cancel)
         self.speech_progress.hide()
-        active_lay.addWidget(self.speech_progress)
+        stage_lay.addWidget(self.speech_progress)
+
+        active_lay.addWidget(self.stage_box)
 
         footer = QHBoxLayout()
-        footer.setContentsMargins(0, 2, 0, 0)
-        footer.setSpacing(14)
+        footer.setContentsMargins(0, 0, 0, 0)
+        footer.setSpacing(16)
         self.elapsed_label = QLabel("Job elapsed: 00:00")
         self.elapsed_label.setObjectName("muted")
         self.eta_label = QLabel("Overall ETA: Estimating…")
@@ -690,11 +706,22 @@ class ActiveJobCard(QFrame):
         self.stack.addWidget(active_widget)
         self._set_active_page(False)
 
+    def set_stage_mode(self, mode: str) -> None:
+        """Update the single header contextual Cancel CTA so there are never duplicate cancel buttons."""
+        labels = {
+            "download": "Cancel Download",
+            "speech": "Cancel Transcription",
+            "generic": "Cancel Job",
+        }
+        self.cancel_button.setText(labels.get(mode, "Cancel Job"))
+
     def apply_theme(self, _resolved: str = "") -> None:
         t = theme_manager().tokens
         self._idle_icon.setPixmap(lucide_icon("clock", t["text_secondary"], 20).pixmap(20, 20))
         self.cancel_button.setIcon(lucide_icon("x", t["semantic_danger_fg"], 14))
         self.stepper.apply_theme(_resolved)
+        self.download_view.apply_theme(_resolved)
+        self.speech_progress.apply_theme(_resolved)
         self.thumbnail.update()
 
     def set_stage_telemetry(self, *, eta_seconds: float | None, reliable: bool) -> None:
@@ -1292,7 +1319,7 @@ class JobQueuePanel(QFrame):
         super().__init__(parent)
         self.setObjectName("card")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setMinimumHeight(170)
+        self.setMinimumHeight(240)
         self.setMinimumWidth(0)
         self._projects: list[dict[str, Any]] = []
         self._clips: list[dict[str, Any]] = []

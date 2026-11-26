@@ -173,7 +173,7 @@ class ClipLibraryCard(QFrame):
             badges.addWidget(status_lbl)
             root.addLayout(badges)
         else:
-            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
             self.setMinimumWidth(0)
             root = QHBoxLayout(self)
             root.setContentsMargins(12, 11, 12, 11)
@@ -187,47 +187,53 @@ class ClipLibraryCard(QFrame):
             info.setContentsMargins(0, 0, 0, 0)
             info.setSpacing(5)
 
-            # Upper row: full-width naturally wrapping title + compact score pill on top-right
+            # Upper row: full-width naturally wrapping title on left, compact score + duration + status in upper-right!
             top_row = QHBoxLayout()
             top_row.setContentsMargins(0, 0, 0, 0)
-            top_row.setSpacing(8)
+            top_row.setSpacing(10)
             title_lbl = QLabel(title)
             title_lbl.setWordWrap(True)
             title_lbl.setMinimumWidth(0)
             title_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
             title_lbl.setStyleSheet(f"font-weight: 600; font-size: 13.5px; color: {t['text_primary']};")
 
-            score_lbl = QLabel(f"★ {score}", objectName="scorePill")
-            score_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            top_row.addWidget(title_lbl, 1)
-            top_row.addWidget(score_lbl, 0, Qt.AlignmentFlag.AlignTop)
-            info.addLayout(top_row)
+            meta_col = QVBoxLayout()
+            meta_col.setContentsMargins(0, 0, 0, 0)
+            meta_col.setSpacing(4)
 
-            # Compact metadata pill strip (duration + semantic status) — never overflows horizontally!
-            meta_row = QHBoxLayout()
-            meta_row.setContentsMargins(0, 0, 0, 0)
-            meta_row.setSpacing(6)
+            top_pills = QHBoxLayout()
+            top_pills.setContentsMargins(0, 0, 0, 0)
+            top_pills.setSpacing(4)
+            top_pills.addStretch()
+            score_lbl = QLabel(f"★ {score}", objectName="scorePill")
             dur_lbl = QLabel(_format_duration(duration), objectName="statusChip")
+            for pill in (score_lbl, dur_lbl):
+                pill.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+                top_pills.addWidget(pill)
+
             badge_text = "Pending" if status_text == "Thumbnail pending" else status_text
             status_lbl = QLabel(badge_text, objectName="statusChip")
             status_lbl.setProperty("tone", status_tone)
+            status_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
             if badge_text != status_text:
                 status_lbl.setToolTip(status_text)
-            for pill in (dur_lbl, status_lbl):
-                pill.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-                meta_row.addWidget(pill)
-            meta_row.addStretch()
-            info.addLayout(meta_row)
+
+            meta_col.addLayout(top_pills)
+            meta_col.addWidget(status_lbl, 0, Qt.AlignmentFlag.AlignRight)
+
+            top_row.addWidget(title_lbl, 1)
+            top_row.addLayout(meta_col)
+            top_row.setAlignment(meta_col, Qt.AlignmentFlag.AlignTop)
+            info.addLayout(top_row)
 
             if desc:
-                preview_desc = desc if len(desc) <= 180 else (desc[:177].rstrip() + "…")
+                preview_desc = desc if len(desc) <= 200 else (desc[:197].rstrip() + "…")
                 desc_lbl = QLabel(preview_desc, objectName="muted")
                 desc_lbl.setWordWrap(True)
                 desc_lbl.setMinimumWidth(0)
                 desc_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
                 info.addWidget(desc_lbl)
 
-            info.addStretch()
             root.addLayout(info, 1)
 
     def mousePressEvent(self, event) -> None:
@@ -271,8 +277,8 @@ class ClipLibraryPanel(QWidget):
         summary_row = QHBoxLayout()
         summary_row.setSpacing(8)
         self.summary_count = self._summary_pill("Total clips", "0")
-        self.summary_duration = self._summary_pill("Combined duration", "00:00")
-        self.summary_score = self._summary_pill("Avg AI score", "—")
+        self.summary_duration = self._summary_pill("Duration", "00:00")
+        self.summary_score = self._summary_pill("Avg score", "—")
         for pill in (self.summary_count, self.summary_duration, self.summary_score):
             summary_row.addWidget(pill, 1)
         root.addLayout(summary_row)
@@ -806,7 +812,7 @@ class ClipDetailPlayerPanel(QFrame):
         ctrl_lay.addLayout(timeline)
 
         transport = QHBoxLayout()
-        transport.setSpacing(5)
+        transport.setSpacing(4)
         self.prev_clip_btn = QPushButton(objectName="iconButton")
         self.prev_clip_btn.setToolTip("Previous clip")
         self.prev_clip_btn.setAccessibleName("Previous clip")
@@ -840,7 +846,9 @@ class ClipDetailPlayerPanel(QFrame):
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(80)
-        self.volume_slider.setFixedWidth(74)
+        self.volume_slider.setMinimumWidth(44)
+        self.volume_slider.setMaximumWidth(74)
+        self.volume_slider.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.volume_slider.setAccessibleName("Volume")
         self.volume_slider.valueChanged.connect(self._on_volume_changed)
 
@@ -853,7 +861,7 @@ class ClipDetailPlayerPanel(QFrame):
             self.prev_clip_btn, self.skip_back_btn, self.play_btn, self.skip_fwd_btn,
             self.next_clip_btn, self.mute_btn, self.fullscreen_btn,
         ):
-            b.setFixedSize(32, 30)
+            b.setFixedSize(28, 28)
             b.setEnabled(False)
 
         transport.addWidget(self.prev_clip_btn)
