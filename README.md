@@ -19,7 +19,7 @@ The entire media pipeline runs locally on your machine. An AI API key is optiona
 - **Hybrid AI + Heatmap Highlight Ranking:** Combine AI transcript scoring with YouTube's **Most Replayed** audience heatmap (`Hybrid`, `AI Analysis`, or `Most Replayed` modes) with configurable weighting.
 
 ### Intelligent Auto Director & Smart Reframing
-- **Multi-Person Active Speaker Tracking:** Tracks multiple speakers in podcast and interview shots using OpenCV (YuNet / Haar) with lip-motion and voice-activity evidence, plus optional podcast split-screen framing.
+- **Single Active-Speaker Auto Reframing:** Tracks all visible participants in 9:16 portrait composition using OpenCV (YuNet / Haar) with lip-motion and voice-activity scoring, automatically locking onto one dominant speaker at a time (never splitting frames automatically; **Podcast Split Screen** remains selectable as an explicit manual mode).
 - **Offline Viterbi/DP Auto Director:** Eliminates rapid ping-pong speaker cuts and tripod micro-jitter with configurable reframing styles (**Natural**, **Stable**, **Dynamic**), frame-accurate original camera cut synchronization, and eased same-subject pans.
 - **Animated Caption Templates:** Word-level ASS karaoke captions with customizable built-in templates and live preview in **Caption Templates**.
 

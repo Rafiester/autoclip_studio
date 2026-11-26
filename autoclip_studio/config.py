@@ -110,7 +110,7 @@ DEFAULTS: dict[str, Any] = {
     "asd": {
         "prefer_yunet": True,
         "min_hold_seconds": 1.6,
-        "split_screen_auto": True,
+        "split_screen_auto": False,
     },
     "downloader": {
         "preferred_max_height": 1080,

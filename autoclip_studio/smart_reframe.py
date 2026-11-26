@@ -7,7 +7,7 @@ Designed cleanly from first principles with zero unlicensed third-party code:
   head-motion-compensated mouth ROI visual energy.
 - Scene-cut detection, persistent face tracks, dropout tolerance, minimum hold duration,
   switching hysteresis, dead-zone stabilization, clean cuts between distant speakers,
-  aspect-ratio group-fit checks, and automatic Podcast Split Screen <-> Close-up transitions.
+  and single active-speaker portrait framing in Auto Smart Reframe (Podcast Split Screen available explicitly).
 """
 from __future__ import annotations
 
@@ -512,7 +512,7 @@ def _plan_cache_path(
         stat = source.stat()
     except OSError:
         return None
-    key = f"reframe-v2:{source.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:{start:.3f}:{end:.3f}:{crop_width}:{mode}:{style}:{sample_fps:.2f}"
+    key = f"reframe-v3:{source.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:{start:.3f}:{end:.3f}:{crop_width}:{mode}:{style}:{sample_fps:.2f}"
     digest = hashlib.sha256(key.encode()).hexdigest()[:32]
     base_dir = cache_dir if cache_dir is not None else CACHE_DIR
     return base_dir / "tracking" / f"{digest}.json"
@@ -807,7 +807,7 @@ def _build_scene_adaptive_plan(
     style: str = "natural",
     source_fps: float = 25.0,
 ) -> FramingPlan:
-    """Partition clip into scene-aware single-speaker or stacked Podcast Split Screen segments."""
+    """Build single-speaker portrait timeline, or explicit Podcast Split Screen <-> Close-up segments."""
     if not samples:
         fb = _clamp_crop_left(src_width * 0.5, crop_width, src_width)
         return FramingPlan(
@@ -816,7 +816,21 @@ def _build_scene_adaptive_plan(
             has_split=False,
         )
 
-    # Split samples at genuine scene cuts so close-up shots auto-return to single-speaker framing!
+    # Automatic / single-stream modes strictly stay in single full-height 9:16 portrait framing.
+    # Podcast Split Screen is activated only when explicitly requested via mode == "split_screen".
+    if mode != "split_screen":
+        metrics.single_segments = 1
+        kfs = _build_single_track_keyframes(
+            samples, src_width, crop_width, mode=mode, metrics=metrics,
+            style=style, src_height=src_height, source_fps=source_fps,
+        )
+        return FramingPlan(
+            segments=[FramingSegment("single", 0.0, duration, keyframes=kfs)],
+            metrics=metrics,
+            has_split=False,
+        )
+
+    # Explicit Podcast Split Screen: split at camera cuts so close-up shots return to single-speaker framing.
     scenes: list[list[_FrameSample]] = [[]]
     for sample in samples:
         if sample.is_cut and scenes[-1]:
@@ -832,9 +846,7 @@ def _build_scene_adaptive_plan(
         if seg_end - seg_start < 0.08:
             continue
 
-        # Check if this scene is a stable 2-person wide shot eligible for split screen.
         distant_two_frames = 0
-        overlap_speech_frames = 0
         left_faces: list[FaceDetection] = []
         right_faces: list[FaceDetection] = []
         for s in scene_samples:
@@ -846,18 +858,13 @@ def _build_scene_adaptive_plan(
                     ordered = sorted(dets, key=lambda d: d.cx)
                     left_faces.append(ordered[0])
                     right_faces.append(ordered[-1])
-                    confs = sorted((c for _, _, c in s.tracks), reverse=True)
-                    if s.vad >= 0.25 and len(confs) >= 2 and confs[1] >= confs[0] * 0.72 and confs[1] >= 0.08:
-                        overlap_speech_frames += 1
 
         two_shot_ratio = distant_two_frames / max(1, len(scene_samples))
-        overlap_ratio = overlap_speech_frames / max(1, len(scene_samples))
         use_split = (
             two_shot_ratio >= 0.50
             and (seg_end - seg_start) >= 0.80
-            and left_faces
-            and right_faces
-            and (mode == "split_screen" or (mode == "auto" and overlap_ratio >= 0.35 and (seg_end - seg_start) >= 2.5))
+            and bool(left_faces)
+            and bool(right_faces)
         )
 
         if use_split:
@@ -879,7 +886,6 @@ def _build_scene_adaptive_plan(
             metrics.split_segments += 1
             segments.append(FramingSegment("split", seg_start, seg_end, top_box=top_box, bottom_box=bottom_box))
         else:
-            # Shift timestamps relative to segment start for FFmpeg segment rendering.
             shifted = [
                 _FrameSample(
                     max(0.0, s.rel_t - seg_start), False, s.vad, s.tracks, s.saliency_x,
@@ -964,7 +970,7 @@ def analyze_smart_reframe(
     if cache_path is not None and cache_path.is_file():
         try:
             plan = FramingPlan.from_dict(json.loads(cache_path.read_text(encoding="utf-8")))
-            if plan.segments:
+            if plan.segments and (selected_mode == "split_screen" or not plan.has_split):
                 log(f"Using cached face tracking / Auto Director plan ({selected_mode}/{selected_style}, {len(plan.segments)} segment(s))")
                 return plan
         except (OSError, ValueError, KeyError, TypeError):

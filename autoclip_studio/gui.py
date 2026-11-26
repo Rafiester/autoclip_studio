@@ -430,6 +430,10 @@ class MainWindow(QMainWindow):
         self.reframe_combo = configure_input(QComboBox())
         for code, label in REFRAME_MODES:
             self.reframe_combo.addItem(label, code)
+        self.reframe_combo.setToolTip(
+            "Auto Smart Reframe keeps single-speaker 9:16 portrait framing by default.\n"
+            "Select Podcast Split Screen manually if you want a stacked two-host layout."
+        )
         saved_reframe = str(proj_defaults.get("reframe_mode", "auto"))
         reframe_idx = self.reframe_combo.findData(saved_reframe)
         self.reframe_combo.setCurrentIndex(reframe_idx if reframe_idx >= 0 else 0)

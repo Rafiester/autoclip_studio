@@ -1,11 +1,31 @@
 # AutoClip Studio — Agent Handoff & Progress
 
 **Last Updated:** 2026-11-26  
-**Current Phase:** Precision Caption Timing & Animation Synchronization Complete
+**Current Phase:** Single Active Speaker Auto Reframing Complete
 
 ## Execution Status
 
 ### Completed Tasks
+- **Single Active Speaker Reframing (Auto Smart Reframe & Intelligent Auto Director):** (Pre-modification checkpoint: `fa6fcc6`)
+  - **Confirmed Root Causes:**
+    1. **Automatic Split-Screen Trigger ([`autoclip_studio/smart_reframe.py`](autoclip_studio/smart_reframe.py)):** `_build_scene_adaptive_plan()` activated stacked `split` segments whenever `mode == "auto"` encountered wide two-person shots (`two_shot_ratio >= 0.50`) with overlapping audio/laughter (`overlap_ratio >= 0.35`, duration `>= 2.5s`), duplicating panels instead of keeping a full-height 9:16 single-speaker composition.
+    2. **Close-Speaker Midpoint Group Averaging ([`autoclip_studio/auto_director.py`](autoclip_studio/auto_director.py)):** `_optimize_multi_speaker_shot()` enabled `allow_group = (mode == "auto")`, appending a `"group"` state that beat individual speaker tracks during overlapping banter or silence pauses and averaged faces (`(min_left + max_right) * 0.5`) rather than framing the dominant active speaker.
+    3. **Ambiguous Simultaneous Speech Instability & Cache Reuse ([`autoclip_studio/auto_director.py`](autoclip_studio/auto_director.py), [`autoclip_studio/smart_reframe.py`](autoclip_studio/smart_reframe.py)):** Simultaneous laughter or near-tied ASD scores needed stronger incumbent hold penalties in Viterbi DP transitions, and cached `"reframe-v2"` tracking plans on disk could still replay legacy `has_split=True` decisions under `auto` mode.
+  - **Modified Decision Logic:**
+    - Removed split-screen branching from `_build_scene_adaptive_plan()` for all modes except explicit `mode == "split_screen"`, routing `auto`, `active_speaker`, and `single_subject` directly through `direct_single_stream()` to emit a continuous full-height 9:16 `"single"` timeline with clean frame-accurate `cut=True` transitions and continuous subtitles.
+    - Disabled `"group"` state (`allow_group` removed in `_optimize_multi_speaker_shot()`) so Auto Smart Reframe tracks each visible participant independently and focuses strictly on one active speaker regardless of participant count or proximity.
+    - Strengthened Viterbi DP continuity during simultaneous speech, group laughter, or low-confidence windows (`ambiguous_frames` penalty multiplier `1.65x`), preserving `Natural`/`Stable`/`Dynamic` presets, `min_shot_duration`, `switch_cooldown`, `confirm_window`, `short_turn_override`, lookahead, reaction damping, and dropout backfill.
+    - Bumped tracking cache key to `reframe-v3` and added a cache-read guard rejecting cached `has_split=True` plans whenever `selected_mode != "split_screen"`.
+    - Updated default config `asd.split_screen_auto = False` ([`autoclip_studio/config.py`](autoclip_studio/config.py)), added explanatory tooltip on `reframe_combo` ([`autoclip_studio/gui.py`](autoclip_studio/gui.py)), and documented single-speaker behavior in [`README.md`](README.md).
+  - **Actual Rendered Multi-Person Podcast Comparison (`6QyRGE6Cg8E.mp4`, `[1521.5 -> 1557.1]`, `35.600s`, `1080x1920`, `25 FPS`, `Impact`):**
+    - **Explicit `split_screen` mode:** `has_split=True`, `13` alternating segments (`6` stacked split + `7` single close-ups), `alignment=5` seam subtitles — remains fully functional when chosen manually.
+    - **`auto` mode (`Auto Smart Reframe` after fix):** `has_split=False`, `1` continuous `single` segment (`35.600s`), `split_segments=0`, `frames_analyzed=179`, `scene_cuts=12`, `midpoint_avoided_frames=115`, `median_shot_duration=2.16s`, `crop_jitter_px_s=0.0`, `face_visibility_ratio=0.972`, `30` bottom `alignment=2` ASS subtitle events (verified visually across rendered frames at `0.50s`, `8.00s`, `16.00s`, `25.12s`).
+  - **Regression & Smoke Test Results:**
+    - Expanded [`tests/test_smart_reframe.py`](tests/test_smart_reframe.py) (`test_auto_mode_never_splits_and_manual_split_screen_returns_to_single_on_closeup`, `test_auto_mode_never_groups_simultaneous_laughter_or_close_faces_and_ignores_split_cache`).
+    - Targeted suites (`tests/test_auto_director.py`, `tests/test_captions.py`, `tests/test_caption_sync.py`, `tests/test_persistent_settings.py`, `tests/test_cross_platform.py`): **33 passed**.
+    - Smart Reframe suite (`tests/test_smart_reframe.py -k "not test_new_project_smart_reframe_selector_ui"`): **5 passed** (`1` host-setting UI test excluded).
+    - Media integration smoke (`.\.venv\Scripts\python.exe -m tests.integration_smoke`): **passed** (`Rendering with NVIDIA NVENC (p5)`, `1508081 bytes`, `6.30s`).
+
 - **Precision Caption Timing & Animation Synchronization:** (Pre-modification checkpoint: `df61f2c`)
   - **Confirmed Root Causes:**
     1. **Aggressive Segment Fallback & Off-Clip Boundary Bleed ([`autoclip_studio/captions.py`](autoclip_studio/captions.py)):** `_valid_words()` wiped ALL word-level timestamps in any segment containing even one zero-duration Whisper token (`word.end <= word.start`, affecting `101` words across the full transcript), while highlight boundary slicing allowed a `0.02s` (`20ms`, half-frame) bleed (`"SEHARI,"` at `0.00 -> 0.02`) before speech onset (`~0.08s`). Dropping only the `<50ms` bleed without checking whether valid words came from the clip risked falling back to off-clip `segment.text` (`"DULU PAS SMA..."`), so edge-bleed-only segments now skip cleanly without rendering off-clip speech.

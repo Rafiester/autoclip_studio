@@ -98,22 +98,31 @@ def test_active_speaker_avoids_midpoint_handles_hysteresis_dropouts_and_cuts() -
     assert "if(lt(t," in expr
 
 
-def test_split_screen_auto_returns_to_single_on_closeup_cut_and_places_captions_safely(tmp_path: Path) -> None:
+def test_auto_mode_never_splits_and_manual_split_screen_returns_to_single_on_closeup(tmp_path: Path) -> None:
     src_w, src_h, crop_w = 1920, 1080, 608
     left_f = FaceDetection(320, 240, 140, 160)
     right_f = FaceDetection(1420, 240, 140, 160)
     closeup_f = FaceDetection(840, 180, 260, 300)
 
     samples = []
-    # Scene 0 (0-4s): Wide 2-shot with overlapping speech
+    # Scene 0 (0-4s): Wide 2-shot with simultaneous overlapping speech
     for i in range(20):
         samples.append(_FrameSample(i * 0.2, is_cut=False, vad=0.85, tracks=[(1, left_f, 0.35), (2, right_f, 0.32)], saliency_x=960))
     # Scene 1 (4-7s): Camera cut to single close-up
     for i in range(20, 35):
         samples.append(_FrameSample(i * 0.2, is_cut=(i == 20), vad=0.80, tracks=[(3, closeup_f, 0.40)], saliency_x=960))
 
-    metrics = FramingMetrics(mode_used="auto")
-    plan = _build_scene_adaptive_plan(samples, 7.0, src_w, src_h, crop_w, (1080, 1920), mode="auto", metrics=metrics)
+    # 1. Auto Smart Reframe MUST remain 100% single-speaker portrait even during overlapping speech!
+    auto_metrics = FramingMetrics(mode_used="auto")
+    auto_plan = _build_scene_adaptive_plan(samples, 7.0, src_w, src_h, crop_w, (1080, 1920), mode="auto", metrics=auto_metrics)
+    assert not auto_plan.has_split
+    assert auto_metrics.split_segments == 0
+    assert all(seg.kind == "single" for seg in auto_plan.segments)
+    assert all(kf.left < 200.0 for kf in auto_plan.segments[0].keyframes if kf.time < 3.9)
+
+    # 2. Explicit Podcast Split Screen still works manually & returns to single on close-up cut
+    metrics = FramingMetrics(mode_used="split_screen")
+    plan = _build_scene_adaptive_plan(samples, 7.0, src_w, src_h, crop_w, (1080, 1920), mode="split_screen", metrics=metrics)
     assert plan.has_split
     assert len(plan.segments) == 2
     assert plan.segments[0].kind == "split"
@@ -139,6 +148,57 @@ def test_split_screen_auto_returns_to_single_on_closeup_cut_and_places_captions_
     assert "vstack=inputs=2" in fargs[1]
     assert "concat=n=2:v=1:a=0" in fargs[1]
     assert vmap == "[vout]"
+
+
+def test_auto_mode_never_groups_simultaneous_laughter_or_close_faces_and_ignores_split_cache(tmp_path: Path, monkeypatch) -> None:
+    import json
+    from autoclip_studio.smart_reframe import _plan_cache_path, analyze_smart_reframe
+
+    src_w, src_h, crop_w = 1920, 1080, 608
+    # Close side-by-side speakers + 3rd participant, simultaneous laughter & brief occlusion
+    f1 = FaceDetection(760, 220, 120, 150)   # cx=820
+    f2 = FaceDetection(1000, 220, 120, 150)  # cx=1060 (both fit 608*0.80 -> would have triggered old "group" state)
+    f3 = FaceDetection(1520, 220, 130, 150)  # cx=1585 (distant)
+    samples = []
+    for i in range(40):  # 8.0s
+        t = i * 0.2
+        if t < 3.6:
+            c1, c2, c3 = (0.34, 0.30, 0.04) if 1.6 <= t < 2.4 else (0.42, 0.06, 0.04)
+            tracks = [] if abs(t - 1.2) < 0.05 else [(1, f1, c1), (2, f2, c2), (3, f3, c3)]
+        else:
+            c1, c2, c3 = (0.28, 0.27, 0.31) if 5.2 <= t < 5.8 else (0.04, 0.05, 0.45)
+            tracks = [(1, f1, c1), (2, f2, c2), (3, f3, c3)]
+        samples.append(_FrameSample(t, is_cut=False, vad=0.80, tracks=tracks, saliency_x=960.0))
+
+    metrics = FramingMetrics(mode_used="auto")
+    plan = _build_scene_adaptive_plan(samples, 8.0, src_w, src_h, crop_w, (1080, 1920), mode="auto", metrics=metrics)
+    assert not plan.has_split
+    assert len(plan.segments) == 1 and plan.segments[0].kind == "single"
+    kfs = plan.segments[0].keyframes
+    # Must open tightly centered on Speaker 1 (cx=820 -> left~516), NEVER averaged group midpoint (cx=940 -> left~636)
+    assert abs(kfs[0].left - (820.0 - crop_w * 0.5)) < 25.0
+    # Must step-cut once cleanly to Speaker 3 (cx=1585 -> left~1281), ignoring simultaneous group laughter jitter
+    assert abs(kfs[-1].left - (1585.0 - crop_w * 0.5)) < 35.0
+    assert sum(1 for kf in kfs if kf.cut) == 1
+
+    # Verify stale cached split plan on disk is rejected automatically under mode="auto"
+    fake_src = tmp_path / "pod.mp4"
+    fake_src.write_bytes(b"12345678")
+    cpath = _plan_cache_path(fake_src, 0.0, 8.0, crop_w, "auto", 5.0, style="natural", cache_dir=tmp_path)
+    assert cpath is not None
+    cpath.parent.mkdir(parents=True, exist_ok=True)
+    stale_split = FramingPlan(
+        segments=[FramingSegment("split", 0.0, 8.0, top_box=(0, 0, 500, 500), bottom_box=(500, 0, 500, 500))],
+        has_split=True,
+    )
+    cpath.write_text(json.dumps(stale_split.to_dict()), encoding="utf-8")
+    monkeypatch.setattr("autoclip_studio.smart_reframe._analyze_clip_frames", lambda *_a, **_kw: (samples, "mock", 25.0))
+    fresh_plan = analyze_smart_reframe(
+        fake_src, 0.0, 8.0, src_w, src_h, crop_w, (1080, 1920), ProcessManager(), lambda _m: None,
+        mode="auto", cache_enabled=True, cache_dir=tmp_path,
+    )
+    assert not fresh_plan.has_split
+    assert all(seg.kind == "single" for seg in fresh_plan.segments)
 
 
 def test_render_fit_original_and_split_screen_end_to_end(tmp_path: Path) -> None:

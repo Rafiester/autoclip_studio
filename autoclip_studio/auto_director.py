@@ -357,53 +357,37 @@ def _optimize_multi_speaker_shot(
         )
         return [best_tid] * n
 
-    # Check if group framing is ever feasible in auto mode
-    allow_group = mode == "auto"
+    # Always frame one primary tracked participant at a time in Auto Smart Reframe & Active Speaker.
+    # Never group-average multiple faces so simultaneous speech, pauses, or close seating never pull off the dominant speaker.
+    _ = mode, crop_width
     states: list[int | str] = list(all_tids)
-    if allow_group:
-        any_group = any(
-            len(s.tracks) >= 2 and _can_group_obs(s.tracks, crop_width)[0]
-            for s in shot
-        )
-        if any_group:
-            states.append("group")
-
     num_states = len(states)
     shot_end_t = shot[-1].rel_t
 
-    # Precompute emission utility U[i][s_idx]
+    # Precompute emission utility U[i][s_idx] and simultaneous/ambiguous speech flags
     emit = [[0.0] * num_states for _ in range(n)]
+    ambiguous_frames = [False] * n
     for i, s in enumerate(shot):
         omap = obs_maps[i]
         ev = evidence[i]
         sorted_ev = sorted(ev.values(), reverse=True)
         top_ev = sorted_ev[0] if sorted_ev else 0.0
         second_ev = sorted_ev[1] if len(sorted_ev) >= 2 else 0.0
-        # Detect overlapping speech / group laughter (two tracks nearly tied under active speech).
-        overlapping = s.vad >= 0.28 and second_ev >= top_ev * 0.78 and second_ev >= 0.08
+        ambiguous_frames[i] = (
+            (s.vad >= 0.25 and second_ev >= top_ev * 0.80 and second_ev >= 0.08)
+            or top_ev < 0.08
+        )
 
         for si, st in enumerate(states):
-            if st == "group":
-                visible_tracks = [omap[tid] for tid in all_tids if tid in omap]
-                fits, _ = _can_group_obs(visible_tracks, crop_width)
-                if not fits or len(visible_tracks) < 2:
-                    emit[i][si] = -2.0  # Infeasible: NEVER midpoint-average distant faces!
-                else:
-                    # Prefer group framing during silence/pause or genuine overlapping banter.
-                    if s.vad < 0.25 or overlapping:
-                        emit[i][si] = top_ev + 0.06
-                    else:
-                        emit[i][si] = top_ev * 0.85
-            else:
-                tid = int(st)
-                u = ev.get(tid, 0.0)
-                # Slight penalty if track is currently missing at frame i
-                if tid not in omap:
-                    u -= 0.14
-                # Bonus for being clearly dominant speaker during speech
-                if s.vad >= 0.22 and u >= top_ev - 1e-6 and top_ev > second_ev * 1.15:
-                    u += 0.08
-                emit[i][si] = u
+            tid = int(st)
+            u = ev.get(tid, 0.0)
+            # Slight penalty if track is currently missing at frame i
+            if tid not in omap:
+                u -= 0.14
+            # Bonus for being clearly dominant speaker during speech
+            if s.vad >= 0.22 and u >= top_ev - 1e-6 and top_ev > second_ev * 1.15:
+                u += 0.08
+            emit[i][si] = u
 
     # Viterbi DP (maximize cumulative utility - transition penalties)
     dp = [[-1e9] * num_states for _ in range(n)]
@@ -439,10 +423,13 @@ def _optimize_multi_speaker_shot(
                     # 1. Offline lookahead: discourage switching right before shot ends!
                     if remaining < min(1.2, style.lookahead_seconds * 0.75):
                         pen *= 1.85
-                    # 2. Conversational boundary alignment: cheaper to cut on natural turn boundaries/pauses.
-                    if is_turn_boundary:
+                    # 2. Ambiguous simultaneous speech / group laughter / weak ASD: hold incumbent steadily.
+                    if ambiguous_frames[i]:
+                        pen *= 1.65
+                    # 3. Conversational boundary alignment: cheaper to cut on natural turn boundaries/pauses.
+                    elif is_turn_boundary:
                         pen *= 0.72
-                    # 3. If previous track disappeared (exceeded dropout), allow switch cleanly.
+                    # 4. If previous track disappeared (exceeded dropout), allow switch cleanly.
                     if prev_st != "group" and int(prev_st) not in obs_maps[i]:
                         # Check if missing for >= dropout_tolerance
                         miss_dur = 0.0
