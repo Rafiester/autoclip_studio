@@ -1,10 +1,13 @@
 """Crisp Lucide-style 24x24 stroke icons rendered natively via QPainter."""
 from __future__ import annotations
 
+from functools import lru_cache
+
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
 
+@lru_cache(maxsize=256)
 def lucide_icon(name: str, color: str = "#F5F5F7", size: int = 16) -> QIcon:
     """Render a Lucide-style vector icon on a transparent QPixmap at high-DPI."""
     dpr = 2.0
@@ -184,6 +187,34 @@ def lucide_icon(name: str, color: str = "#F5F5F7", size: int = 16) -> QIcon:
         painter.drawEllipse(QPointF(12, 12), 9, 9)
         p = QPainterPath()
         p.moveTo(12, 7); p.lineTo(12, 12); p.lineTo(15.5, 14)
+        painter.drawPath(p)
+    elif name == "sun":
+        painter.drawEllipse(QPointF(12, 12), 4, 4)
+        for p1, p2 in (
+            ((12, 2), (12, 4)), ((12, 20), (12, 22)),
+            ((2, 12), (4, 12)), ((20, 12), (22, 12)),
+            ((4.9, 4.9), (6.3, 6.3)), ((17.7, 17.7), (19.1, 19.1)),
+            ((4.9, 19.1), (6.3, 17.7)), ((17.7, 6.3), (19.1, 4.9)),
+        ):
+            painter.drawLine(QPointF(*p1), QPointF(*p2))
+    elif name == "moon":
+        p = QPainterPath()
+        p.moveTo(20, 14.5)
+        p.cubicTo(18.6, 15.1, 17.1, 15.4, 15.5, 15.4)
+        p.cubicTo(11.1, 15.4, 7.6, 11.9, 7.6, 7.5)
+        p.cubicTo(7.6, 6.0, 8.0, 4.6, 8.7, 3.4)
+        p.cubicTo(5.3, 4.8, 3.0, 8.1, 3.0, 12.0)
+        p.cubicTo(3.0, 17.0, 7.0, 21.0, 12.0, 21.0)
+        p.cubicTo(15.7, 21.0, 18.8, 18.7, 20.0, 14.5)
+        p.closeSubpath()
+        painter.drawPath(p)
+    elif name == "monitor":
+        painter.drawRoundedRect(QRectF(2.5, 3.5, 19, 13), 2, 2)
+        painter.drawLine(QPointF(8, 20.5), QPointF(16, 20.5))
+        painter.drawLine(QPointF(12, 16.5), QPointF(12, 20.5))
+    elif name == "chevron-up":
+        p = QPainterPath()
+        p.moveTo(6, 15); p.lineTo(12, 9); p.lineTo(18, 15)
         painter.drawPath(p)
 
     painter.end()

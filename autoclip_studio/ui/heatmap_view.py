@@ -6,6 +6,7 @@ from PySide6.QtGui import QColor, QLinearGradient, QMouseEvent, QPainter, QPaint
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from ..heatmap import HeatmapPoint, HighlightRegion, format_clock, parse_heatmap, summarize_heatmap
+from .theme import theme_manager
 
 
 class _HeatmapGraph(QWidget):
@@ -50,16 +51,17 @@ class _HeatmapGraph(QWidget):
         super().leaveEvent(event)
 
     def paintEvent(self, event) -> None:
+        t = theme_manager().tokens
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         bounds = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         clip = QPainterPath()
         clip.addRoundedRect(bounds, 8, 8)
         painter.setClipPath(clip)
-        painter.fillRect(bounds, QColor("#101116"))
+        painter.fillRect(bounds, QColor(t["bg_elevated"]))
 
         if not self._points:
-            painter.setPen(QColor("#696E7B"))
+            painter.setPen(QColor(t["text_secondary"]))
             painter.drawText(bounds, Qt.AlignmentFlag.AlignCenter, "No audience replay heatmap available for this video")
             return
 
@@ -110,10 +112,10 @@ class _HeatmapGraph(QWidget):
         # Draw hover crosshair
         if 0 <= self._hover_idx < len(coords):
             hc = coords[self._hover_idx]
-            painter.setPen(QPen(QColor("#F5F5F7"), 1.0, Qt.PenStyle.DashLine))
+            painter.setPen(QPen(QColor(t["text_primary"]), 1.0, Qt.PenStyle.DashLine))
             painter.drawLine(QPointF(hc.x(), pad_top), QPointF(hc.x(), pad_top + plot_h))
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#F5F5F7"))
+            painter.setBrush(QColor(t["text_primary"]))
             painter.drawEllipse(hc, 3.8, 3.8)
 
 
@@ -162,6 +164,9 @@ class AudienceHeatmapWidget(QFrame):
         self.regions_label.setText("")
         self.hide()
 
+    def apply_theme(self, _resolved: str = "") -> None:
+        self.graph.update()
+
     def set_heatmap(
         self,
         raw_heatmap: object,
@@ -181,9 +186,9 @@ class AudienceHeatmapWidget(QFrame):
         self.set_mode_label(mode_text)
         if not summary.available:
             self.availability_chip.setText("Heatmap Unavailable")
-            self.availability_chip.setStyleSheet(
-                "color: #A3A8B5; background: #22252E; padding: 2px 8px; border-radius: 6px; font-weight: 600;"
-            )
+            self.availability_chip.setProperty("tone", "")
+            self.availability_chip.style().unpolish(self.availability_chip)
+            self.availability_chip.style().polish(self.availability_chip)
             self.graph.set_data([], [], float(duration or 0.0))
             self.peaks_label.setText("YouTube did not provide replay heatmap data for this video. Falling back to AI Analysis.")
             self.regions_label.setText("")
@@ -191,9 +196,9 @@ class AudienceHeatmapWidget(QFrame):
             return False
 
         self.availability_chip.setText(f"Heatmap Available ({len(summary.points)} pts)")
-        self.availability_chip.setStyleSheet(
-            "color: #2ECC71; background: #192620; padding: 2px 8px; border-radius: 6px; font-weight: 600;"
-        )
+        self.availability_chip.setProperty("tone", "success")
+        self.availability_chip.style().unpolish(self.availability_chip)
+        self.availability_chip.style().polish(self.availability_chip)
         self.graph.set_data(list(summary.points), list(summary.regions), float(duration or 0.0))
         if summary.peak_timestamps:
             peaks_str = ", ".join(format_clock(ts) for ts in summary.peak_timestamps[:5])

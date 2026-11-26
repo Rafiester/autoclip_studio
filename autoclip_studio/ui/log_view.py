@@ -8,6 +8,7 @@ from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import QApplication, QPlainTextEdit
 
 from ..diagnostics import redact
+from .theme import theme_manager, tokens_for
 
 
 LEVEL_COLORS = {
@@ -20,11 +21,21 @@ LEVEL_COLORS = {
 MAX_LOG_ENTRIES = 4000
 
 
+def _level_color(level: str) -> str:
+    t = tokens_for(theme_manager().resolved)
+    return {
+        "INFO": t["log_info"],
+        "SUCCESS": t["log_success"],
+        "WARNING": t["log_warning"],
+        "ERROR": t["log_error"],
+    }.get(level, t["log_info"])
+
+
 class LogView(QPlainTextEdit):
     MAX_LOG_ENTRIES = MAX_LOG_ENTRIES
 
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(objectName="logView")
         self.setReadOnly(True)
         self.setUndoRedoEnabled(False)
         self.setMaximumBlockCount(MAX_LOG_ENTRIES)
@@ -38,6 +49,9 @@ class LogView(QPlainTextEdit):
         self._timer.setSingleShot(True)
         self._timer.setInterval(50)
         self._timer.timeout.connect(self.flush)
+
+    def apply_theme(self, _resolved: str = "") -> None:
+        self.set_filter()
 
     def add_entry(self, level: str, message: str) -> None:
         timestamp = datetime.now().astimezone().isoformat(sep=" ", timespec="seconds")
@@ -67,7 +81,7 @@ class LogView(QPlainTextEdit):
             if not self._matches_filter(lvl, line):
                 continue
             style = QTextCharFormat()
-            style.setForeground(QColor(LEVEL_COLORS.get(lvl, LEVEL_COLORS["INFO"])))
+            style.setForeground(QColor(_level_color(lvl)))
             if cursor.position():
                 cursor.insertBlock()
             cursor.insertText(line, style)
@@ -92,7 +106,7 @@ class LogView(QPlainTextEdit):
             if not self._matches_filter(level, message):
                 continue
             style = QTextCharFormat()
-            style.setForeground(QColor(LEVEL_COLORS.get(level, LEVEL_COLORS["INFO"])))
+            style.setForeground(QColor(_level_color(level)))
             if cursor.position():
                 cursor.insertBlock()
             cursor.insertText(message, style)

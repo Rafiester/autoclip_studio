@@ -224,7 +224,10 @@ class DependencyManagerView(QWidget):
         while self._list_layout.count():
             item = self._list_layout.takeAt(0)
             if item.widget():
-                item.widget().deleteLater()
+                w = item.widget()
+                w.hide()
+                w.setParent(None)
+                w.deleteLater()
 
         for st in self._statuses:
             card = QFrame(objectName="card")
@@ -256,11 +259,11 @@ class DependencyManagerView(QWidget):
 
             badge = QLabel(st.state, objectName="statusChip")
             if st.state in {"Ready", "Reused existing"}:
-                badge.setStyleSheet("color: #2ECC71; font-weight: 600; padding: 4px 8px; background: #192620; border-radius: 6px;")
+                badge.setProperty("tone", "success")
             elif st.state in {"Missing", "Corrupted"}:
-                badge.setStyleSheet("color: #FF9AA2; font-weight: 600; padding: 4px 8px; background: #2D1A1F; border-radius: 6px;")
+                badge.setProperty("tone", "danger")
             else:
-                badge.setStyleSheet("color: #A3A8B5; font-weight: 600; padding: 4px 8px; background: #22252E; border-radius: 6px;")
+                badge.setProperty("tone", "")
 
             if st.update_available:
                 badge.setText(f"{st.state} · Update")
@@ -269,6 +272,9 @@ class DependencyManagerView(QWidget):
             lay.addWidget(badge, alignment=Qt.AlignmentFlag.AlignVCenter)
             self._list_layout.addWidget(card)
         self._list_layout.addStretch()
+
+    def refresh_theme(self) -> None:
+        self._render_components()
 
     def _render_models(self) -> None:
         current = self.model_combo.currentData()

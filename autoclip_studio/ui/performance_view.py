@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..performance import PROFILES, HardwareMonitor, PerformanceSettings, resolve_profile_limits
-from .style import configure_form_layout, configure_input
+from .style import SectionCard, configure_form_layout, configure_input
 
 
 class PerformanceView(QWidget):
@@ -25,8 +25,9 @@ class PerformanceView(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(14)
 
-        profile_group = QGroupBox("Performance profile")
-        profile_form = configure_form_layout(QFormLayout(profile_group))
+        profile_group = SectionCard("Performance profile")
+        profile_form = configure_form_layout(QFormLayout())
+        profile_group.body_layout().addLayout(profile_form)
         self.profile_combo = configure_input(QComboBox())
         self.profile_combo.addItems(["eco", "balanced", "turbo"])
         self.profile_combo.setCurrentText(settings.profile if settings.profile in PROFILES else "balanced")
@@ -44,8 +45,9 @@ class PerformanceView(QWidget):
         profile_form.addRow("Resolved limits", self.limits_label)
         layout.addWidget(profile_group)
 
-        guard_group = QGroupBox("Thermal protection && Gaming Mode")
-        guard_form = configure_form_layout(QFormLayout(guard_group))
+        guard_group = SectionCard("Thermal protection & Gaming Mode")
+        guard_form = configure_form_layout(QFormLayout())
+        guard_group.body_layout().addLayout(guard_form)
         self.thermal_check = QCheckBox("Pause between stages if GPU temperature exceeds threshold")
         self.thermal_check.setChecked(settings.thermal_protection)
         self.temp_limit = configure_input(QSpinBox())

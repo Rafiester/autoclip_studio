@@ -59,6 +59,7 @@ DEFAULTS: dict[str, Any] = {
     "speech": asdict(SpeechSettings()),
     "performance": asdict(PerformanceSettings()),
     "hardware_encoding": True,
+    "appearance": "dark",
 }
 
 

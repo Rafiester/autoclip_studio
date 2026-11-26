@@ -36,6 +36,7 @@ from .ui.clips_workspace import ClipDetailPlayerPanel, ClipLibraryPanel
 from .ui.dependency_view import DependencyManagerView
 from .ui.download_view import DownloadView
 from .ui.heatmap_view import AudienceHeatmapWidget
+from .ui.icons import lucide_icon
 from .ui.local_preview import LocalVideoDropZone, LocalVideoMetadata, LocalVideoPreview
 from .ui.log_view import LogView
 from .ui.performance_view import PerformanceView
@@ -44,7 +45,7 @@ from .ui.queue_workspace import (
     QueueOverviewBar, project_thumbnail_path,
 )
 from .ui.speech_view import SpeechProgressView, SpeechSettingsView
-from .ui.style import STYLESHEET, configure_form_layout, configure_input
+from .ui.style import STYLESHEET, SectionCard, configure_form_layout, configure_input, theme_manager
 from .ui.youtube_preview import YouTubePreview
 from .worker import FunctionThread, PipelineWorker
 from .youtube_metadata import YouTubeMetadata
@@ -81,8 +82,11 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(icon_path)))
         self.resize(1280, 820)
         self.setMinimumSize(760, 560)
-        self.setStyleSheet(STYLESHEET)
+        self._theme = theme_manager()
+        self._theme.apply(str(self.settings.data.get("appearance") or "dark"))
         self._build_ui()
+        self._theme.theme_changed.connect(self._on_theme_changed)
+        self._on_theme_changed(self._theme.resolved)
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -90,11 +94,12 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         sidebar = QFrame(objectName="sidebar")
-        sidebar.setFixedWidth(192)
+        sidebar.setFixedWidth(204)
         side_layout = QVBoxLayout(sidebar)
-        side_layout.setContentsMargins(10, 16, 10, 16)
-        brand = self._build_brand_header(172)
-        side_layout.addWidget(brand)
+        side_layout.setContentsMargins(12, 16, 12, 16)
+        side_layout.setSpacing(4)
+        self.brand_label = self._build_brand_header(176)
+        side_layout.addWidget(self.brand_label)
         side_layout.addSpacing(12)
         self.nav_buttons: list[QPushButton] = []
         for index, name in enumerate(self.NAV_ITEMS):
@@ -104,7 +109,31 @@ class MainWindow(QMainWindow):
             side_layout.addWidget(button)
             self.nav_buttons.append(button)
         side_layout.addStretch()
-        version = QLabel("Local-first • No watermarks\nv1.0.0", objectName="muted")
+
+        # Compact Light / Dark / System appearance switcher
+        appearance_bar = QFrame(objectName="appearanceBar")
+        app_row = QHBoxLayout(appearance_bar)
+        app_row.setContentsMargins(3, 3, 3, 3)
+        app_row.setSpacing(2)
+        self.appearance_buttons: dict[str, QPushButton] = {}
+        current_appearance = str(self.settings.data.get("appearance") or "dark")
+        for mode_id, icon_name, tip in (
+            ("light", "sun", "Light mode"),
+            ("dark", "moon", "Dark mode"),
+            ("system", "monitor", "Follow system appearance"),
+        ):
+            btn = QPushButton(objectName="appearanceBtn")
+            btn.setCheckable(True)
+            btn.setChecked(current_appearance == mode_id)
+            btn.setToolTip(tip)
+            btn.setAccessibleName(tip)
+            btn.clicked.connect(lambda checked=False, m=mode_id: self.set_appearance(m))
+            app_row.addWidget(btn, 1)
+            self.appearance_buttons[mode_id] = btn
+        side_layout.addWidget(appearance_bar)
+        side_layout.addSpacing(8)
+
+        version = QLabel("Local-first • No watermarks\nv1.0.0", objectName="helperText")
         side_layout.addWidget(version)
         self.stack = QStackedWidget()
         self.stack.addWidget(self._dashboard_page())
@@ -126,12 +155,27 @@ class MainWindow(QMainWindow):
         brand.setAccessibleName("AutoClip Studio")
         brand.setToolTip("AutoClip Studio")
         brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._brand_target_width = target_width
+        self._apply_brand_pixmap(brand, self._theme.resolved)
+        return brand
+
+    def _apply_brand_pixmap(self, brand: QLabel, resolved_theme: str) -> None:
         wordmark_path = asset_path("AutoClipTrans.png")
-        pixmap = QPixmap(str(wordmark_path)) if wordmark_path.is_file() else QPixmap()
-        if not pixmap.isNull():
+        image = QImage(str(wordmark_path)) if wordmark_path.is_file() else QImage()
+        if not image.isNull():
+            if resolved_theme == "light":
+                # Recolor near-white wordmark text to dark charcoal while preserving the red brand symbol.
+                image = image.convertToFormat(QImage.Format.Format_ARGB32)
+                w, h = image.width(), image.height()
+                for y in range(h):
+                    for x in range(w):
+                        c = image.pixelColor(x, y)
+                        if c.alpha() > 20 and c.red() > 160 and c.green() > 155 and c.blue() > 155 and abs(c.red() - c.blue()) < 35:
+                            image.setPixelColor(x, y, c.__class__(23, 24, 28, c.alpha()))
+            pixmap = QPixmap.fromImage(image)
             dpr = max(1.0, self.devicePixelRatioF())
             scaled = pixmap.scaledToWidth(
-                int(round(target_width * dpr)),
+                int(round(self._brand_target_width * dpr)),
                 Qt.TransformationMode.SmoothTransformation,
             )
             scaled.setDevicePixelRatio(dpr)
@@ -140,7 +184,38 @@ class MainWindow(QMainWindow):
         else:
             brand.setText("AutoClip Studio")
             brand.setWordWrap(True)
-        return brand
+
+    def set_appearance(self, mode: str) -> None:
+        normalized = mode if mode in {"light", "dark", "system"} else "dark"
+        self.settings.data["appearance"] = normalized
+        self.settings.save()
+        for mode_id, btn in self.appearance_buttons.items():
+            btn.setChecked(mode_id == normalized)
+        self._theme.apply(normalized)
+
+    def _on_theme_changed(self, resolved: str) -> None:
+        icon_color = self._theme.tokens["text_primary"]
+        for mode_id, icon_name in (("light", "sun"), ("dark", "moon"), ("system", "monitor")):
+            if mode_id in self.appearance_buttons:
+                self.appearance_buttons[mode_id].setIcon(lucide_icon(icon_name, icon_color, 14))
+        if hasattr(self, "brand_label"):
+            self._apply_brand_pixmap(self.brand_label, resolved)
+        if hasattr(self, "live_logs"):
+            self.live_logs.apply_theme(resolved)
+        if hasattr(self, "heatmap_widget"):
+            self.heatmap_widget.apply_theme(resolved)
+        if hasattr(self, "dependency_view"):
+            self.dependency_view.refresh_theme()
+        if hasattr(self, "queue_overview"):
+            self.queue_overview.apply_theme(resolved)
+        if hasattr(self, "active_job_card"):
+            self.active_job_card.apply_theme(resolved)
+        if hasattr(self, "logs_panel"):
+            self.logs_panel.apply_theme(resolved)
+        if hasattr(self, "clips_library"):
+            self.clips_library.apply_theme(resolved)
+        if hasattr(self, "clip_detail"):
+            self.clip_detail.apply_theme(resolved)
 
     def _page(self, title: str, subtitle: str) -> tuple[QWidget, QVBoxLayout]:
         outer = QWidget()
@@ -220,9 +295,10 @@ class MainWindow(QMainWindow):
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         content = QWidget()
         form = QVBoxLayout(content)
-        form.setContentsMargins(4, 6, 4, 6)
-        source_group = QGroupBox("Source video")
-        source_layout = QVBoxLayout(source_group)
+        form.setContentsMargins(0, 0, 4, 8)
+        form.setSpacing(16)
+        source_group = SectionCard("Source video")
+        source_layout = source_group.body_layout()
 
         # Compact source tabs: YouTube Link (default) | Local File
         tab_bar = QHBoxLayout()
@@ -335,8 +411,9 @@ class MainWindow(QMainWindow):
         name_row.labelForField(self.project_name).setObjectName("projectNameLabel")
         source_layout.addLayout(name_row)
         form.addWidget(source_group)
-        settings_group = QGroupBox("Clip settings")
-        grid = QGridLayout(settings_group)
+        settings_group = SectionCard("Clip settings")
+        grid = QGridLayout()
+        settings_group.body_layout().addLayout(grid)
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(12)
         self.clip_count = configure_input(self._spin(1, 10, 3))
@@ -353,8 +430,9 @@ class MainWindow(QMainWindow):
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
         form.addWidget(settings_group)
-        automation = QGroupBox("Automation")
-        auto_layout = QGridLayout(automation)
+        automation = SectionCard("Automation")
+        auto_layout = QGridLayout()
+        automation.body_layout().addLayout(auto_layout)
         auto_layout.setHorizontalSpacing(16)
         auto_layout.setVerticalSpacing(10)
         self.face_tracking = QCheckBox("Auto face tracking"); self.face_tracking.setChecked(True)
@@ -371,8 +449,9 @@ class MainWindow(QMainWindow):
         auto_layout.setColumnStretch(0, 1)
         auto_layout.setColumnStretch(1, 1)
         form.addWidget(automation)
-        ai_group = QGroupBox("AI and transcription")
-        ai_form = configure_form_layout(QFormLayout(ai_group))
+        ai_group = SectionCard("AI and transcription")
+        ai_form = configure_form_layout(QFormLayout())
+        ai_group.body_layout().addLayout(ai_form)
         self.highlight_mode_combo = configure_input(QComboBox())
         self.highlight_mode_combo.addItem("Hybrid (AI + Most Replayed)", "hybrid")
         self.highlight_mode_combo.addItem("AI Analysis", "ai")
@@ -492,8 +571,9 @@ class MainWindow(QMainWindow):
 
     def _settings_page(self) -> QWidget:
         outer, page = self._page("AI Provider Settings", f"Credentials are stored in {credential_store_name()}")
-        group = self.provider_group = QGroupBox("Provider connection")
-        form = configure_form_layout(QFormLayout(group))
+        group = self.provider_group = SectionCard("Provider connection")
+        form = configure_form_layout(QFormLayout())
+        group.body_layout().addLayout(form)
         self.settings_provider = configure_input(QComboBox()); self.settings_provider.addItems(["gemini", "openai", "custom"])
         self.settings_provider.setCurrentText(self.settings.data["active_provider"])
         self.api_key_input = configure_input(QLineEdit()); self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
@@ -521,8 +601,9 @@ class MainWindow(QMainWindow):
         buttons.addStretch()
         form.addRow(buttons)
         page.addWidget(group)
-        local = QGroupBox("Local processing")
-        local_form = configure_form_layout(QFormLayout(local))
+        local = SectionCard("Local processing")
+        local_form = configure_form_layout(QFormLayout())
+        local.body_layout().addLayout(local_form)
         self.output_input = configure_input(QLineEdit(self.settings.data.get("output_dir", "")))
         self.output_input.setAccessibleName("Output folder")
         output_row = QHBoxLayout(); output_row.setSpacing(8); output_row.addWidget(self.output_input, 1)

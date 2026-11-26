@@ -21,6 +21,7 @@ from .download_view import DownloadView
 from .icons import lucide_icon
 from .log_view import LogView
 from .speech_view import SpeechProgressView
+from .theme import theme_manager
 
 QUEUE_STATUS_META: dict[str, tuple[str, str, str, str]] = {
     "processing": ("Processing", "#E53935", "rgba(229, 57, 53, 0.16)", "#FF8A80"),
@@ -336,6 +337,7 @@ class QueueOverviewBar(QFrame):
         cards_grid.setSpacing(8)
 
         self._counters: dict[str, QLabel] = {}
+        self._tiles: list[tuple[QFrame, QLabel, QLabel]] = []
         specs = (
             ("processing", "Processing", "#E53935"),
             ("queued", "Queued", "#F5A623"),
@@ -343,11 +345,8 @@ class QueueOverviewBar(QFrame):
             ("failed", "Failed", "#FF6B7A"),
         )
         for col, (key, label_text, dot_color) in enumerate(specs):
-            tile = QFrame()
+            tile = QFrame(objectName="summaryPill")
             tile.setMinimumWidth(0)
-            tile.setStyleSheet(
-                "QFrame { background-color: #14161D; border: 1px solid #262933; border-radius: 8px; }"
-            )
             tile_lay = QVBoxLayout(tile)
             tile_lay.setContentsMargins(12, 8, 12, 8)
             tile_lay.setSpacing(2)
@@ -358,14 +357,13 @@ class QueueOverviewBar(QFrame):
             dot = QFrame()
             dot.setFixedSize(7, 7)
             dot.setStyleSheet(f"background-color: {dot_color}; border: none; border-radius: 3px;")
-            lbl = QLabel(label_text)
-            lbl.setStyleSheet("color: #A3A8B5; font-size: 11px; font-weight: 600; border: none; background: transparent;")
+            lbl = QLabel(label_text, objectName="muted")
             head.addWidget(dot)
             head.addWidget(lbl, 1)
 
-            val = QLabel("0")
-            val.setStyleSheet("color: #F5F5F7; font-size: 20px; font-weight: 700; border: none; background: transparent;")
+            val = QLabel("0", objectName="summaryValue")
             self._counters[key] = val
+            self._tiles.append((tile, lbl, val))
 
             tile_lay.addLayout(head)
             tile_lay.addWidget(val)
@@ -377,26 +375,22 @@ class QueueOverviewBar(QFrame):
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(8)
 
-        self.engine_badge = QLabel("Engine: Idle")
-        self.engine_badge.setStyleSheet(
-            "background-color: #14161D; color: #D4D7E0; border: 1px solid #2B2E38; "
-            "border-radius: 7px; padding: 4px 10px; font-size: 12px; font-weight: 600;"
-        )
-        self.profile_badge = QLabel("Profile: Auto")
-        self.profile_badge.setStyleSheet(
-            "background-color: #14161D; color: #A3A8B5; border: 1px solid #2B2E38; "
-            "border-radius: 7px; padding: 4px 10px; font-size: 12px; font-weight: 600;"
-        )
+        self.engine_badge = QLabel("Engine: Idle", objectName="statusChip")
+        self.profile_badge = QLabel("Profile: Auto", objectName="statusChip")
         controls.addWidget(self.engine_badge)
         controls.addWidget(self.profile_badge)
         controls.addStretch()
 
         self.pause_queue_button = QPushButton("Pause Queue")
-        self.pause_queue_button.setIcon(lucide_icon("pause", "#F5F5F7", 14))
+        self.pause_queue_button.setIcon(lucide_icon("pause", theme_manager().tokens["text_primary"], 14))
         self.pause_queue_button.setIconSize(QSize(14, 14))
         self.pause_queue_button.clicked.connect(self._toggle_pause)
         controls.addWidget(self.pause_queue_button)
         root.addLayout(controls)
+
+    def apply_theme(self, _resolved: str = "") -> None:
+        icon_fg = theme_manager().tokens["text_primary"]
+        self.pause_queue_button.setIcon(lucide_icon("play" if self._paused else "pause", icon_fg, 14))
 
     def _toggle_pause(self) -> None:
         self._paused = not self._paused
@@ -441,18 +435,16 @@ class QueueOverviewBar(QFrame):
 
         state_label = "Paused" if paused and engine_state == "Idle" else engine_state
         if state_label in ("Processing", "Active"):
-            badge_bg, badge_fg, badge_border = "rgba(229, 57, 53, 0.14)", "#FFB0AA", "rgba(229, 57, 53, 0.4)"
-        elif state_label == "Waiting":
-            badge_bg, badge_fg, badge_border = "rgba(245, 166, 35, 0.14)", "#FFD07D", "rgba(245, 166, 35, 0.4)"
-        elif state_label == "Paused":
-            badge_bg, badge_fg, badge_border = "rgba(245, 166, 35, 0.10)", "#FFD07D", "#3A3E4C"
+            tone = "danger"
+        elif state_label in ("Waiting", "Paused"):
+            tone = "warning"
         else:
-            badge_bg, badge_fg, badge_border = "#14161D", "#D4D7E0", "#2B2E38"
+            tone = ""
         self.engine_badge.setText(f"Engine: {state_label}")
-        self.engine_badge.setStyleSheet(
-            f"background-color: {badge_bg}; color: {badge_fg}; border: 1px solid {badge_border}; "
-            "border-radius: 7px; padding: 4px 10px; font-size: 12px; font-weight: 600;"
-        )
+        self.engine_badge.setStyleSheet("")
+        self.engine_badge.setProperty("tone", tone)
+        self.engine_badge.style().unpolish(self.engine_badge)
+        self.engine_badge.style().polish(self.engine_badge)
         nice_profile = (profile_name or "Auto").replace("_", " ").title()
         self.profile_badge.setText(f"Profile: {nice_profile}")
 
@@ -545,17 +537,13 @@ class ActiveJobCard(QFrame):
         idle_lay = QHBoxLayout(idle_widget)
         idle_lay.setContentsMargins(2, 4, 2, 4)
         idle_lay.setSpacing(12)
-        idle_icon = QLabel()
-        idle_icon.setFixedSize(40, 40)
-        idle_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        idle_icon.setPixmap(lucide_icon("clock", "#A3A8B5", 20).pixmap(20, 20))
-        idle_icon.setStyleSheet(
-            "background-color: #14161D; border: 1px solid #262933; border-radius: 8px;"
-        )
+        self._idle_icon = QLabel(objectName="summaryPill")
+        self._idle_icon.setFixedSize(40, 40)
+        self._idle_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._idle_icon.setPixmap(lucide_icon("clock", theme_manager().tokens["text_secondary"], 20).pixmap(20, 20))
         idle_text = QVBoxLayout()
         idle_text.setSpacing(2)
-        idle_title = QLabel("No active processing job")
-        idle_title.setStyleSheet("font-size: 14px; font-weight: 600; color: #F5F5F7;")
+        idle_title = QLabel("No active processing job", objectName="cardTitle")
         idle_sub = QLabel("Queue a video from New Project or resume paused items below.")
         idle_sub.setObjectName("muted")
         idle_sub.setWordWrap(True)
@@ -564,7 +552,7 @@ class ActiveJobCard(QFrame):
         idle_btn = QPushButton("New Project")
         idle_btn.setObjectName("primary")
         idle_btn.clicked.connect(self.new_project_requested.emit)
-        idle_lay.addWidget(idle_icon)
+        idle_lay.addWidget(self._idle_icon)
         idle_lay.addLayout(idle_text, 1)
         idle_lay.addWidget(idle_btn)
         self.stack.addWidget(idle_widget)
@@ -585,14 +573,9 @@ class ActiveJobCard(QFrame):
         meta_col.setSpacing(4)
         title_line = QHBoxLayout()
         title_line.setSpacing(8)
-        self.title_label = QLabel("Active Project")
+        self.title_label = QLabel("Active Project", objectName="cardTitle")
         self.title_label.setMinimumWidth(0)
-        self.title_label.setStyleSheet("font-size: 15px; font-weight: 700; color: #F5F5F7;")
-        self.source_pill = QLabel("YouTube")
-        self.source_pill.setStyleSheet(
-            "background-color: #14161D; color: #D4D7E0; border: 1px solid #2B2E38; "
-            "border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: 600;"
-        )
+        self.source_pill = QLabel("YouTube", objectName="statusChip")
         title_line.addWidget(self.title_label, 1)
         title_line.addWidget(self.source_pill)
 
@@ -604,7 +587,7 @@ class ActiveJobCard(QFrame):
         header.addLayout(meta_col, 1)
 
         self.cancel_button = QPushButton("Cancel Job", objectName="danger")
-        self.cancel_button.setIcon(lucide_icon("x", "#FFB0AA", 14))
+        self.cancel_button.setIcon(lucide_icon("x", theme_manager().tokens["semantic_danger_fg"], 14))
         self.cancel_button.setIconSize(QSize(14, 14))
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(on_cancel)
@@ -618,11 +601,10 @@ class ActiveJobCard(QFrame):
         status_row_lay = QHBoxLayout(self.processing_status_row)
         status_row_lay.setContentsMargins(0, 0, 0, 0)
         status_row_lay.setSpacing(8)
-        self.queue_status = QLabel("Idle")
+        self.queue_status = QLabel("Idle", objectName="transferStatus")
         self.queue_status.setWordWrap(True)
         self.queue_status.setTextFormat(Qt.TextFormat.PlainText)
         self.queue_status.setMinimumWidth(0)
-        self.queue_status.setStyleSheet("color: #F5F5F7; font-size: 13px; font-weight: 600;")
         status_row_lay.addWidget(self.queue_status, 1)
         active_lay.addWidget(self.processing_status_row)
 
@@ -633,8 +615,7 @@ class ActiveJobCard(QFrame):
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setAccessibleName("Project progress")
-        self.progress_text = QLabel("0%")
-        self.progress_text.setStyleSheet("font-family: Consolas; font-weight: 700; color: #F5F5F7;")
+        self.progress_text = QLabel("0%", objectName="transferMetric")
         progress_row_lay.addWidget(self.progress_bar, 1)
         progress_row_lay.addWidget(self.progress_text)
         active_lay.addWidget(self.processing_progress_row)
@@ -665,6 +646,11 @@ class ActiveJobCard(QFrame):
         active_lay.addLayout(footer)
 
         self.stack.addWidget(active_widget)
+
+    def apply_theme(self, _resolved: str = "") -> None:
+        t = theme_manager().tokens
+        self._idle_icon.setPixmap(lucide_icon("clock", t["text_secondary"], 20).pixmap(20, 20))
+        self.cancel_button.setIcon(lucide_icon("x", t["semantic_danger_fg"], 14))
         self._set_active_page(False)
 
         self._tick = QTimer(self)
@@ -1247,19 +1233,14 @@ class CollapsibleLogsPanel(QFrame):
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(8)
-        self.toggle_button = QPushButton("Activity && Logs")
+        self.toggle_button = QPushButton("Activity && Logs", objectName="ghost")
         self.toggle_button.setFlat(True)
-        self.toggle_button.setIcon(lucide_icon("chevron-right", "#D4D7E0", 14))
+        self.toggle_button.setIcon(lucide_icon("chevron-right", theme_manager().tokens["text_secondary"], 14))
         self.toggle_button.setIconSize(QSize(14, 14))
-        self.toggle_button.setStyleSheet(
-            "QPushButton { text-align: left; font-size: 13px; font-weight: 700; color: #F5F5F7; "
-            "border: none; padding: 2px 4px; background: transparent; }"
-        )
+        self.toggle_button.setStyleSheet("text-align: left; font-weight: 600;")
         self.toggle_button.clicked.connect(self.toggle)
 
-        self.count_badge = QLabel("0 entries")
-        self.count_badge.setObjectName("muted")
-        self.count_badge.setStyleSheet("font-size: 11px;")
+        self.count_badge = QLabel("0 entries", objectName="helperText")
 
         header.addWidget(self.toggle_button, 1)
         header.addWidget(self.count_badge)
@@ -1328,7 +1309,11 @@ class CollapsibleLogsPanel(QFrame):
     def toggle(self) -> None:
         self.set_expanded(not self._expanded)
 
+    def apply_theme(self, _resolved: str = "") -> None:
+        icon_name = "chevron-down" if self._expanded else "chevron-right"
+        self.toggle_button.setIcon(lucide_icon(icon_name, theme_manager().tokens["text_secondary"], 14))
+
     def set_expanded(self, expanded: bool) -> None:
         self._expanded = bool(expanded)
         self.drawer.setVisible(self._expanded)
-        self.toggle_button.setIcon(lucide_icon("chevron-down" if self._expanded else "chevron-right", "#D4D7E0", 14))
+        self.apply_theme()

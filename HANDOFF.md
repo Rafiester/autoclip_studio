@@ -1,7 +1,7 @@
 # AutoClip Studio — Agent Handoff & Progress
 
 **Last Updated:** 2026-11-26  
-**Current Phase:** YouTube Most Replayed Analysis & Hybrid AI Highlight Detection Complete
+**Current Phase:** Centralized Design System, Poppins Typography & Light/Dark/System Theme System Complete
 
 ## Execution Status
 
@@ -13,6 +13,12 @@
 - **Generated Clips SaaS Master-Detail Redesign** (`a2f2bc6`)
 - **First-Time Setup Wizard & Dependency Manager** (`fed338b`)
 - **Local Video Import & Optional External SRT Import** (`3121a88`)
+- **Centralized Design System, Poppins Typography & Light/Dark/System Theme System:**
+  - **Bundled Poppins Typography (`autoclip_studio/assets/fonts/poppins/`):** Bundled official Google Fonts Poppins TTF weights (`Regular`, `Medium`, `SemiBold`, `Bold`) + `OFL.txt` license, loaded via `QFontDatabase` (`load_bundled_fonts()`) across all UI text, dialogs, menus, and tooltips (with monospace retained for `LogView` diagnostic logs and caption/subtitle/export fonts untouched).
+  - **Centralized ThemeManager & Design Tokens (`autoclip_studio/ui/theme.py`, `autoclip_studio/ui/style.py`, `autoclip_studio/config.py`):** Implemented semantic Light & Dark color palettes, 4px spacing scale, typography hierarchy, border radius tokens, `QPalette`, cached QSS stylesheets, and `ThemeManager` with instant live switching (no restart, preserves active jobs/navigation/playback), persisted `appearance` setting (defaulting to Dark Mode), and native OS `QStyleHints.colorSchemeChanged` synchronization in `System` mode.
+  - **Widget & Card Standardization (`autoclip_studio/assets/icons/*.svg`, `SectionCard`):** Replaced outdated intersecting `QGroupBox` borders on New Project, AI Provider Settings, and Performance with clean `SectionCard` containers; replaced native spinbox/combobox/checkbox indicators with bundled SVG chevrons (`chevron-up/down-{dark|light}.svg`) and `check-white.svg` across `QSpinBox`, `QDoubleSpinBox`, `QComboBox`, and `QCheckBox`.
+  - **Sidebar Appearance Switcher & Theme-Aware Assets (`gui.py`, `icons.py`, `log_view.py`, `heatmap_view.py`, `dependency_view.py`, `queue_workspace.py`, `clips_workspace.py`):** Added compact Sun / Moon / Monitor appearance switcher at the bottom of the sidebar, automatic light-mode charcoal wordmark recoloring preserving the red AutoClip symbol, and live theme updates across all custom painters, badges, icons, and logs.
+  - **Visual QA Verified:** Captured and inspected all 9 pages in both Dark Mode and Light Mode (`1280×820`) on macOS Retina; verified Poppins loading, spinbox/dropdown chevrons, checkboxes, logo readability, icon contrast, and zero overlapping cards.
 - **YouTube Most Replayed Analysis & Hybrid AI Highlight Detection:**
   - **Audience Heatmap (`autoclip_studio/heatmap.py`, `autoclip_studio/youtube_metadata.py`):** Extended yt-dlp metadata extraction (`schema_version=2` in existing `youtube-metadata` cache, zero video download) to retrieve `heatmap`, `subtitles`, `automatic_captions`, and `language`. Implemented local normalization (`parse_heatmap`), peak detection, neighboring segment expansion, adjacent/overlapping region merging (`detect_highlight_regions`), and deterministic interval scoring (`region_replay_score`). Never fabricates replay data when unavailable.
   - **YouTube Subtitle Extraction (`autoclip_studio/youtube_subtitles.py`):** Added optional "Use YouTube subtitles when available" workflow supporting Indonesian, English, and other available languages; prefers manual subtitles in source/preferred language over automatic captions, strips WebVTT tags, deduplicates YouTube's rolling 2-line auto-captions without fabricating word-level timestamps or silently translating, validates coverage/synchronization, and enforces transcript priority: (1) User SRT → (2) YouTube subtitles/auto-captions → (3) local/cloud Speech-to-Text.
@@ -100,7 +106,7 @@
 
 ## Test Results
 - **macOS 27.2.1 (`arm64`, Apple Silicon):**
-  - `.venv/bin/python3 -m pytest -q`: **95 passed, 3 skipped, 0 failed** (includes `tests/test_heatmap_and_hybrid.py`; 3 Windows-only/environment skips).
+  - `.venv/bin/python3 -m pytest -q`: **98 passed, 3 skipped, 0 failed** (includes `tests/test_theme_system.py` and `tests/test_heatmap_and_hybrid.py`; 3 Windows-only/environment skips).
   - `.venv/bin/python3 -m tests.integration_smoke`: **Passed** (`h264_videotoolbox`, 9 face-tracking sample points, `948,804 bytes`, `6.30s`).
   - `.venv/bin/python3 scripts/setup.py --check`: **Passed** (exit code 0).
 - **Windows 11 x64 Host (previous session):**

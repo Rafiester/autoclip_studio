@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from .clips_view import ClipThumbnailPreview, _format_duration
 from .icons import lucide_icon
+from .theme import theme_manager
 
 
 _PROBE_CACHE: dict[tuple[str, int], tuple[int, int, int]] = {}
@@ -261,7 +262,6 @@ class ClipLibraryPanel(QWidget):
         self.sort_combo.currentIndexChanged.connect(self._rebuild_cards)
 
         self.list_view_btn = QPushButton(objectName="viewToggle")
-        self.list_view_btn.setIcon(lucide_icon("list", "#F5F5F7", 15))
         self.list_view_btn.setToolTip("List View")
         self.list_view_btn.setAccessibleName("List View")
         self.list_view_btn.setCheckable(True)
@@ -269,16 +269,15 @@ class ClipLibraryPanel(QWidget):
         self.list_view_btn.clicked.connect(lambda: self.set_view_mode("list"))
 
         self.grid_view_btn = QPushButton(objectName="viewToggle")
-        self.grid_view_btn.setIcon(lucide_icon("grid", "#F5F5F7", 15))
         self.grid_view_btn.setToolTip("Grid View")
         self.grid_view_btn.setAccessibleName("Grid View")
         self.grid_view_btn.setCheckable(True)
         self.grid_view_btn.clicked.connect(lambda: self.set_view_mode("grid"))
 
         self.export_all_btn = QPushButton("Export All")
-        self.export_all_btn.setIcon(lucide_icon("download", "#F5F5F7", 15))
         self.export_all_btn.clicked.connect(self.export_all_requested.emit)
         self.export_all_btn.setEnabled(False)
+        self.apply_theme()
 
         toolbar.addWidget(self.search_input, 2)
         toolbar.addWidget(self.sort_combo, 1)
@@ -313,6 +312,12 @@ class ClipLibraryPanel(QWidget):
         val = QLabel(value, objectName="summaryValue")
         lay.addWidget(val)
         return pill
+
+    def apply_theme(self, _resolved: str = "") -> None:
+        fg = theme_manager().tokens["text_primary"]
+        self.list_view_btn.setIcon(lucide_icon("list", fg, 15))
+        self.grid_view_btn.setIcon(lucide_icon("grid", fg, 15))
+        self.export_all_btn.setIcon(lucide_icon("download", fg, 15))
 
     def set_view_mode(self, mode: str) -> None:
         normalized = "grid" if mode == "grid" else "list"
@@ -811,6 +816,17 @@ class ClipDetailPlayerPanel(QFrame):
             act.setEnabled(has_clip and file_exists)
         self.action_rename_clip.setEnabled(has_clip)
         self.action_delete_clip.setEnabled(has_clip)
+
+    def apply_theme(self, _resolved: str = "") -> None:
+        fg = theme_manager().tokens["text_primary"]
+        self.skip_back_btn.setIcon(lucide_icon("skip-back", fg, 15))
+        playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        self.play_btn.setIcon(lucide_icon("pause" if playing else "play", fg, 15))
+        self.skip_fwd_btn.setIcon(lucide_icon("skip-forward", fg, 15))
+        self.mute_btn.setIcon(lucide_icon("volume-x" if self.audio_output.isMuted() else "volume-2", fg, 15))
+        self.fullscreen_btn.setIcon(lucide_icon("maximize", fg, 15))
+        self.more_btn.setIcon(lucide_icon("more-horizontal", fg, 16))
+        self.primary_btn.setIcon(lucide_icon("external-link", "#FFFFFF", 15))
 
     def stop_playback(self) -> None:
         if self._fullscreen_dialog is not None:
