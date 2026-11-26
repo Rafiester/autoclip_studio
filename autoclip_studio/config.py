@@ -83,6 +83,8 @@ DEFAULTS: dict[str, Any] = {
     "providers": _default_provider_map(),
     "cache_enabled": True,
     "caption_template": TEMPLATE_DEFAULT,
+    "caption_sync_mode": "precise",
+    "caption_offset_ms": 0,
     "output_dir": "",
     "whisper_model": "small",
     "whisper_device": "auto",
@@ -462,6 +464,27 @@ class SettingsStore:
             if isinstance(values, dict):
                 defaults.update({key: value for key, value in values.items() if key in defaults})
             return SpeechSettings(**defaults)
+
+    def caption_timing(self) -> tuple[str, int]:
+        with self._lock:
+            raw_mode = str(self.data.get("caption_sync_mode") or "precise").strip().lower()
+            mode = raw_mode if raw_mode in {"precise", "readable"} else "precise"
+            try:
+                offset_ms = max(-500, min(500, int(self.data.get("caption_offset_ms", 0))))
+            except (TypeError, ValueError):
+                offset_ms = 0
+            return mode, offset_ms
+
+    def update_caption_timing(self, mode: str, offset_ms: int, *, debounced: bool = False) -> None:
+        clean_mode = mode.strip().lower() if isinstance(mode, str) and mode.strip().lower() in {"precise", "readable"} else "precise"
+        clean_offset = max(-500, min(500, int(offset_ms)))
+        with self._lock:
+            self.data["caption_sync_mode"] = clean_mode
+            self.data["caption_offset_ms"] = clean_offset
+        if debounced:
+            self.save_debounced()
+        else:
+            self.save()
 
     def performance(self) -> PerformanceSettings:
         with self._lock:

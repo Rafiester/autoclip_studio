@@ -3,12 +3,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, QRectF, Qt, QThread, QUrl, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QRectF, QSignalBlocker, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoSink
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton,
-    QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from ..caption_preview import PREVIEW_DURATION, render_preview
@@ -173,12 +173,22 @@ class _Card(QFrame):
 class CaptionLibrary(QWidget):
     idle = Signal()
 
-    def __init__(self, selected: str, select: Callable[[str], None], create: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        selected: str,
+        select: Callable[[str], None],
+        create: Callable[[], None],
+        *,
+        sync_mode: str = "precise",
+        offset_ms: int = 0,
+        on_timing_changed: Callable[[str, int], None] | None = None,
+    ) -> None:
         super().__init__()
         self.active: str | None = None
         self.render: _PreviewRender | None = None
         self.columns = 0
         self.visible_cards: list[str] = []
+        self._on_timing_changed = on_timing_changed
         self.player = QMediaPlayer(self)
         self.sink = QVideoSink(self)
         self.player.setVideoSink(self.sink)
@@ -197,10 +207,33 @@ class CaptionLibrary(QWidget):
         self.category = QComboBox()
         self.category.setAccessibleName("Caption template category")
         self.category.addItems(CATEGORIES)
+
+        self.sync_mode = QComboBox()
+        self.sync_mode.setAccessibleName("Caption timing mode")
+        self.sync_mode.addItem("Timing: Precise", "precise")
+        self.sync_mode.addItem("Timing: Readable", "readable")
+        self.sync_mode.setToolTip(
+            "Precise locks captions directly to spoken onsets.\n"
+            "Readable adds subtle lead-in and extended hold in silences."
+        )
+
+        self.offset_spin = QSpinBox()
+        self.offset_spin.setRange(-500, 500)
+        self.offset_spin.setSingleStep(20)
+        self.offset_spin.setSuffix(" ms")
+        self.offset_spin.setMinimumWidth(90)
+        self.offset_spin.setAccessibleName("Caption timing offset milliseconds")
+        self.offset_spin.setToolTip("Fine-tune caption timing offset (-500 ms earlier to +500 ms later).")
+        self.set_timing_preferences(sync_mode, offset_ms)
+        self.sync_mode.currentIndexChanged.connect(self._emit_timing)
+        self.offset_spin.valueChanged.connect(self._emit_timing)
+
         create_button = QPushButton("Create Project", objectName="primary")
         create_button.clicked.connect(create)
         toolbar.addWidget(self.search, 1)
         toolbar.addWidget(self.category)
+        toolbar.addWidget(self.sync_mode)
+        toolbar.addWidget(self.offset_spin)
         toolbar.addWidget(create_button)
         layout.addLayout(toolbar)
 
@@ -241,6 +274,21 @@ class CaptionLibrary(QWidget):
     def set_selected(self, name: str) -> None:
         for candidate, card in self.cards.items():
             card.set_selected(candidate == name)
+
+    def set_timing_preferences(self, sync_mode: str, offset_ms: int) -> None:
+        clean_mode = sync_mode.strip().lower() if isinstance(sync_mode, str) else "precise"
+        idx = self.sync_mode.findData(clean_mode)
+        with QSignalBlocker(self.sync_mode), QSignalBlocker(self.offset_spin):
+            self.sync_mode.setCurrentIndex(idx if idx >= 0 else 0)
+            self.offset_spin.setValue(max(-500, min(500, int(offset_ms))))
+
+    def timing_preferences(self) -> tuple[str, int]:
+        return str(self.sync_mode.currentData() or "precise"), int(self.offset_spin.value())
+
+    def _emit_timing(self) -> None:
+        if self._on_timing_changed is not None:
+            mode, offset_ms = self.timing_preferences()
+            self._on_timing_changed(mode, offset_ms)
 
     def _filter(self) -> None:
         category = self.category.currentText()

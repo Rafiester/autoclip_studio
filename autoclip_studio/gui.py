@@ -604,7 +604,15 @@ class MainWindow(QMainWindow):
 
     def _templates_page(self) -> QWidget:
         outer, page = self._page("Caption Templates", "Preview animated captions and choose a default for new projects.")
-        self.caption_library = CaptionLibrary(self.default_template(), self.choose_template, lambda: self.show_page(1))
+        sync_mode, offset_ms = self.settings.caption_timing()
+        self.caption_library = CaptionLibrary(
+            self.default_template(),
+            self.choose_template,
+            lambda: self.show_page(1),
+            sync_mode=sync_mode,
+            offset_ms=offset_ms,
+            on_timing_changed=self._on_caption_timing_changed,
+        )
         self.caption_library.idle.connect(self._finish_close)
         page.addWidget(self.caption_library, 1)
         return outer
@@ -1061,6 +1069,7 @@ class MainWindow(QMainWindow):
             )
             return
         self.settings.flush()
+        caption_sync_mode, caption_offset_ms = self.settings.caption_timing()
         options = ProjectOptions(
             source=source, clip_count=self.clip_count.value(), min_duration=self.min_duration.value(),
             max_duration=self.max_duration.value(), aspect_ratio=self.aspect.currentText(),
@@ -1068,6 +1077,7 @@ class MainWindow(QMainWindow):
             reframe_mode=reframe_mode,
             reframe_style=reframe_style,
             captions=self.captions.isChecked(), caption_template=self.template_combo.currentText(),
+            caption_sync_mode=caption_sync_mode, caption_offset_ms=caption_offset_ms,
             provider=provider_name, model=resolved_cfg["model"],
             multimodal=self.multimodal_check.isChecked(),
             cache_enabled=self.cache.isChecked(), whisper_model=self.whisper_model.currentText(),
@@ -1779,6 +1789,17 @@ class MainWindow(QMainWindow):
         if self.template_combo.currentText() == previous:
             self.template_combo.setCurrentText(name)
 
+    def _on_caption_timing_changed(self, mode: str, offset_ms: int) -> None:
+        if self._hydrating_ui:
+            return
+        try:
+            self.settings.update_caption_timing(mode, offset_ms, debounced=False)
+        except OSError as error:
+            log_error("Could not save caption timing preferences", error)
+            self.caption_library.show_notice("Could not save caption timing settings. Try again.")
+            return
+        self.caption_library.show_notice("")
+
     def _on_reframe_mode_changed(self) -> None:
         mode = str(self.reframe_combo.currentData() or "auto")
         self.face_tracking.setChecked(mode != "off")
@@ -2136,6 +2157,8 @@ class MainWindow(QMainWindow):
             self._theme.apply(appearance)
             if hasattr(self, "clip_detail"):
                 self.clip_detail.set_audio_preferences(80, False)
+            if hasattr(self, "caption_library"):
+                self.caption_library.set_timing_preferences(*self.settings.caption_timing())
         finally:
             self._hydrating_ui = False
         if hasattr(self, "general_status"):

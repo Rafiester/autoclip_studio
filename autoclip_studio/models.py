@@ -95,6 +95,8 @@ class ProjectOptions:
     reframe_style: str = "natural"
     captions: bool = True
     caption_template: str = "Impact"
+    caption_sync_mode: str = "precise"
+    caption_offset_ms: int = 0
     provider: str = "gemini"
     model: str = "gemini-2.5-flash"
     multimodal: bool = False

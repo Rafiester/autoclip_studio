@@ -16,6 +16,60 @@ from .smart_reframe import FramingPlan, FramingSegment, analyze_smart_reframe, k
 from .tracking import crop_x_expression, track_faces
 
 
+def _parse_rate(value: object) -> float | None:
+    if not isinstance(value, str) or "/" not in value:
+        return None
+    left, right = value.split("/", 1)
+    try:
+        num, den = float(left), float(right)
+    except ValueError:
+        return None
+    if den <= 0 or num <= 0:
+        return None
+    fps = num / den
+    return fps if 5.0 <= fps <= 240.0 else None
+
+
+def _stream_metadata(
+    source: Path,
+    manager: ProcessManager,
+    dimensions: tuple[int, int] | None,
+) -> tuple[tuple[int, int], float | None, bool, bool]:
+    """Return ((width, height), fps, is_vfr, has_audio) cleanly, tolerating synthetic/mocked calls."""
+    info: dict | None = None
+    if dimensions is None:
+        info = probe(source, manager)
+    elif source.is_file():
+        try:
+            info = probe(source, manager)
+        except Exception:
+            info = None
+    if not info:
+        return dimensions or (0, 0), None, False, False
+
+    streams = info.get("streams", [])
+    video = next((item for item in streams if item.get("codec_type") == "video"), None)
+    has_audio = any(item.get("codec_type") == "audio" for item in streams)
+    if dimensions is None:
+        if not video:
+            raise RuntimeError("The source has no video stream.")
+        width, height = int(video["width"]), int(video["height"])
+        for side_data in video.get("side_data_list", []):
+            rotation = side_data.get("rotation", 0)
+            if abs(rotation) % 180 == 90:
+                width, height = height, width
+                break
+        dims = (width, height)
+    else:
+        dims = dimensions
+
+    avg_fps = _parse_rate(video.get("avg_frame_rate") if video else None)
+    r_fps = _parse_rate(video.get("r_frame_rate") if video else None)
+    fps = avg_fps or r_fps
+    is_vfr = bool(avg_fps and r_fps and abs(r_fps - avg_fps) > 1.5)
+    return dims, fps, is_vfr, has_audio
+
+
 def source_dimensions(source: Path, manager: ProcessManager) -> tuple[int, int]:
     info = probe(source, manager)
     video = next((item for item in info.get("streams", []) if item.get("codec_type") == "video"), None)
@@ -41,22 +95,24 @@ def _build_filter_args(
     output_size: tuple[int, int],
     *,
     captions: bool,
+    vfr_fps: float | None = None,
 ) -> tuple[list[str], str]:
     """Build FFmpeg -vf or -filter_complex args + mapped video stream label."""
     out_w, out_h = output_size
     sub_suffix = ",subtitles=captions.ass" if captions else ""
+    pts_prefix = f"fps={vfr_fps:.6g}:round=near,setpts=PTS-STARTPTS" if vfr_fps else "setpts=PTS-STARTPTS"
 
-    # Fast single-segment single-crop path (normalize PTS to 0.000s so crop t matches exact frame-accurate cuts!)
+    # Fast single-segment single-crop path (normalize PTS to 0.000s so crop t & subtitles stay aligned)
     if len(plan.segments) == 1 and plan.segments[0].kind == "single":
         seg = plan.segments[0]
         x_expr = keyframes_to_crop_x_expression(seg.keyframes, x_fallback).replace(",", "\\,")
-        vf = f"setpts=PTS-STARTPTS,crop={crop_width}:{crop_height}:'{x_expr}':{y},scale={out_w}:{out_h}:flags=lanczos{sub_suffix}"
+        vf = f"{pts_prefix},crop={crop_width}:{crop_height}:'{x_expr}':{y},scale={out_w}:{out_h}:flags=lanczos{sub_suffix}"
         return ["-vf", vf], "0:v:0"
 
     # Fit Original Video with blurred vertical background
     if len(plan.segments) == 1 and plan.segments[0].kind == "fit":
         fc = (
-            f"[0:v]split=2[bg][fg];"
+            f"[0:v]{pts_prefix},split=2[bg][fg];"
             f"[bg]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h},gblur=sigma=24[b];"
             f"[fg]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease[f];"
             f"[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1{sub_suffix}[vout]"
@@ -70,7 +126,7 @@ def _build_filter_args(
         tx, ty, tw, th = plan.segments[0].top_box
         bx, by, bw, bh = plan.segments[0].bottom_box
         fc = (
-            f"[0:v]split=2[topin][botin];"
+            f"[0:v]{pts_prefix},split=2[topin][botin];"
             f"[topin]crop={tw}:{th}:{tx}:{ty},scale={out_w}:{half_h}:flags=lanczos,setsar=1[top];"
             f"[botin]crop={bw}:{bh}:{bx}:{by},scale={out_w}:{bot_h}:flags=lanczos,setsar=1[bot];"
             f"[top][bot]vstack=inputs=2,setsar=1{sub_suffix}[vout]"
@@ -79,7 +135,7 @@ def _build_filter_args(
 
     # Multi-segment mixed timeline (e.g., Split Screen <-> Single-Speaker Close-Up cuts)
     n = len(plan.segments)
-    parts = [f"[0:v]split={n}" + "".join(f"[s{i}]" for i in range(n))]
+    parts = [f"[0:v]{pts_prefix},split={n}" + "".join(f"[s{i}]" for i in range(n))]
     out_labels: list[str] = []
     for i, seg in enumerate(plan.segments):
         trim = f"trim=start={seg.start:.3f}:end={seg.end:.3f},setpts=PTS-STARTPTS"
@@ -109,10 +165,12 @@ def render_clip(source: Path, highlight: Highlight, transcript: Transcript,
                 cache_enabled: bool = False,
                 video_codec: str = "h264",
                 reframe_mode: str | None = None,
-                reframe_style: str = "natural") -> float:
+                reframe_style: str = "natural",
+                caption_sync_mode: str = "precise",
+                caption_offset_ms: int = 0) -> float:
     work_dir.mkdir(parents=True, exist_ok=True)
     output.parent.mkdir(parents=True, exist_ok=True)
-    src_width, src_height = dimensions or source_dimensions(source, manager)
+    (src_width, src_height), source_fps, is_vfr, has_audio = _stream_metadata(source, manager, dimensions)
     ratio_left, ratio_right = (float(item) for item in aspect_ratio.split(":", 1))
     target_ratio = ratio_left / ratio_right
     if src_width / src_height > target_ratio:
@@ -141,18 +199,27 @@ def render_clip(source: Path, highlight: Highlight, transcript: Transcript,
 
     if captions:
         ass_path = work_dir / "captions.ass"
-        write_ass(transcript, highlight, ass_path, output_size, caption_template, split_screen=plan.has_split)
+        write_ass(
+            transcript, highlight, ass_path, output_size, caption_template,
+            split_screen=plan.has_split,
+            fps=source_fps,
+            sync_mode=caption_sync_mode,
+            offset_ms=caption_offset_ms,
+        )
 
+    vfr_fps = source_fps if is_vfr and source_fps else None
     filter_args, video_map = _build_filter_args(
-        plan, crop_width, crop_height, y, x_fallback, output_size, captions=captions,
+        plan, crop_width, crop_height, y, x_fallback, output_size,
+        captions=captions, vfr_fps=vfr_fps,
     )
     duration = highlight.end - highlight.start
     thread_args = ["-threads", str(profile_limits.ffmpeg_threads)] if profile_limits else []
+    audio_args = ["-af", "asetpts=PTS-STARTPTS"] if has_audio else []
     base = [
         find_media_tool("ffmpeg"), "-hide_banner", "-nostats", "-progress", "pipe:1",
         "-stats_period", "0.5", "-y", *thread_args, "-ss", f"{highlight.start:.3f}",
         "-i", str(source), "-t", f"{duration:.3f}", *filter_args,
-        "-map", video_map, "-map", "0:a?", "-c:a", "aac", "-b:a", "160k",
+        "-map", video_map, "-map", "0:a?", *audio_args, "-c:a", "aac", "-b:a", "160k",
         "-movflags", "+faststart", "-pix_fmt", "yuv420p",
     ]
     descriptor, staging_path = mkstemp(prefix=".render-", suffix=".mp4", dir=output.parent)

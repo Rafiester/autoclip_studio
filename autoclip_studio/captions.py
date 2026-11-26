@@ -9,6 +9,53 @@ from pathlib import Path
 
 from .models import Highlight, Transcript, Word
 
+SYNC_MODES = ("precise", "readable")
+_SENTENCE_END = frozenset(".!?:")
+_CLAUSE_END = frozenset(",;")
+_EDGE_BLEED_MIN_S = 0.05
+_MAX_WORD_GAP_GROUP_S = 0.36
+_HYPHEN_CHARS = frozenset("-\u2010\u2011\u2013\u2014")
+_PUNCT_ATTACH = frozenset(".,!?:;…'\"”’)]")
+
+
+@dataclass(frozen=True, slots=True)
+class CaptionSyncProfile:
+    lead_in_s: float
+    trailing_hold_s: float
+    min_duration_s: float
+    max_hold_extension_s: float
+    bridge_word_gap_s: float
+    bridge_cue_gap_s: float
+
+
+_SYNC_PROFILES: dict[str, CaptionSyncProfile] = {
+    "precise": CaptionSyncProfile(
+        lead_in_s=0.0,
+        trailing_hold_s=0.06,
+        min_duration_s=0.38,
+        max_hold_extension_s=0.30,
+        bridge_word_gap_s=0.14,
+        bridge_cue_gap_s=0.04,
+    ),
+    "readable": CaptionSyncProfile(
+        lead_in_s=0.035,
+        trailing_hold_s=0.11,
+        min_duration_s=0.55,
+        max_hold_extension_s=0.45,
+        bridge_word_gap_s=0.18,
+        bridge_cue_gap_s=0.05,
+    ),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class CaptionCue:
+    start: float
+    end: float
+    words: tuple[Word, ...]
+    text: str
+    has_word_timing: bool
+
 
 @dataclass(frozen=True, slots=True)
 class CaptionTemplate:
@@ -164,31 +211,381 @@ def _gradient(text: str, start: str, end: str) -> str:
     return separator.join(parts)
 
 
-def _valid_words(words: list[Word], highlight: Highlight) -> list[Word]:
-    if any(not math.isfinite(word.start) or not math.isfinite(word.end) or word.end <= word.start or
-           not word.text.strip() for word in words):
-        return []
-    if any(current.start < previous.start for previous, current in zip(words, words[1:])):
-        return []
-    result = []
-    for index, word in enumerate(words):
-        start = max(word.start, highlight.start)
-        end = min(word.end, highlight.end)
-        if index + 1 < len(words):
-            end = min(end, words[index + 1].start)
-        if _cs(end - highlight.start) > _cs(start - highlight.start):
-            result.append(Word(start - highlight.start, end - highlight.start, word.text.strip()))
-    return result
+def _is_pure_punct(text: str) -> bool:
+    return bool(text) and all(unicodedata.category(ch).startswith("P") for ch in text)
+
+
+def _merge_compound_tokens(words: list[Word]) -> list[Word]:
+    """Attach split hyphenated stems ('bener' + '-bener' / '-' + 'bener') and stray punctuation."""
+    merged: list[Word] = []
+    join_next = False
+    for raw in words:
+        text = raw.text.strip()
+        if not text:
+            continue
+        if join_next and merged:
+            prev = merged[-1]
+            merged[-1] = Word(prev.start, max(prev.end, raw.end), prev.text + text)
+            join_next = text[-1] in _HYPHEN_CHARS
+            continue
+        if merged:
+            prev = merged[-1]
+            gap = raw.start - prev.end
+            if text in _HYPHEN_CHARS and gap <= 0.35:
+                merged[-1] = Word(prev.start, max(prev.end, raw.end), prev.text + "-")
+                join_next = True
+                continue
+            if (text[0] in _HYPHEN_CHARS or text[0] in "'’" or _is_pure_punct(text)) and gap <= 0.35:
+                merged[-1] = Word(prev.start, max(prev.end, raw.end), prev.text + text)
+                join_next = False
+                continue
+            if prev.text[-1] in _HYPHEN_CHARS and gap <= 0.25:
+                merged[-1] = Word(prev.start, max(prev.end, raw.end), prev.text + text)
+                join_next = text[-1] in _HYPHEN_CHARS
+                continue
+        merged.append(Word(raw.start, raw.end, text))
+        join_next = False
+    return merged
+
+
+def _repair_isolated_zero_words(tokens: list[Word], seg_start: float, seg_end: float) -> list[Word]:
+    """Give isolated zero-duration words monotonic non-zero bounds from neighboring slack."""
+    repaired = [Word(w.start, w.end, w.text) for w in tokens]
+    n = len(repaired)
+    idx = 0
+    while idx < n:
+        if repaired[idx].end > repaired[idx].start:
+            idx += 1
+            continue
+        run_end = idx
+        while run_end + 1 < n and repaired[run_end + 1].end <= repaired[run_end + 1].start:
+            run_end += 1
+        count = run_end - idx + 1
+        lower = repaired[idx - 1].end if idx > 0 else seg_start
+        upper = repaired[run_end + 1].start if run_end + 1 < n else max(seg_end, lower + 0.12 * count)
+        span = upper - lower
+        if span >= 0.05 * count:
+            step = min(0.24, span / count)
+            for offset in range(count):
+                s = lower + offset * step
+                e = min(upper, s + step)
+                repaired[idx + offset] = Word(s, max(s + 0.03, e), repaired[idx + offset].text)
+        else:
+            # Borrow tightly from the adjacent valid word when neighbors butt together.
+            anchor_idx = run_end + 1 if run_end + 1 < n and repaired[run_end + 1].end - repaired[run_end + 1].start > 0.16 else idx - 1
+            if 0 <= anchor_idx < n and repaired[anchor_idx].end - repaired[anchor_idx].start > 0.14:
+                anchor = repaired[anchor_idx]
+                borrow = min(0.08 * count, (anchor.end - anchor.start) * 0.38)
+                step = borrow / count
+                if anchor_idx > run_end:
+                    anchor_new_start = anchor.start + borrow
+                    repaired[anchor_idx] = Word(anchor_new_start, anchor.end, anchor.text)
+                    base = anchor_new_start - borrow
+                else:
+                    anchor_new_end = anchor.end - borrow
+                    repaired[anchor_idx] = Word(anchor.start, anchor_new_end, anchor.text)
+                    base = anchor_new_end
+                for offset in range(count):
+                    s = base + offset * step
+                    repaired[idx + offset] = Word(s, s + step, repaired[idx + offset].text)
+            else:
+                s = max(lower, repaired[idx].start)
+                for offset in range(count):
+                    cur_s = s + offset * 0.06
+                    repaired[idx + offset] = Word(cur_s, cur_s + 0.06, repaired[idx + offset].text)
+        idx = run_end + 1
+
+    # Final strict monotonic cleanup inside segment tokens.
+    cleaned: list[Word] = []
+    for pos, item in enumerate(repaired):
+        s = item.start
+        e = item.end
+        if cleaned:
+            s = max(s, cleaned[-1].end)
+        if pos + 1 < len(repaired):
+            next_start = repaired[pos + 1].start
+            if next_start > s + 0.04:
+                e = min(e, next_start)
+        if e <= s:
+            if cleaned and not _is_pure_punct(item.text):
+                prev = cleaned[-1]
+                cleaned[-1] = Word(prev.start, max(prev.end, s + 0.03), f"{prev.text} {item.text}")
+            continue
+        cleaned.append(Word(s, e, item.text))
+    return cleaned
+
+
+def _valid_words_with_status(
+    words: list[Word],
+    highlight: Highlight,
+    seg_start: float = 0.0,
+    seg_end: float = 0.0,
+    *,
+    offset_sec: float = 0.0,
+) -> tuple[list[Word], bool]:
+    """Return (clipped_words, has_valid_word_timings).
+
+    Distinguishes segments lacking word timestamps (falls back to segment text)
+    from segments whose genuine word timestamps fell purely outside clip bounds
+    or within <50ms edge bleed (skips off-clip text).
+    """
+    if not words:
+        return [], False
+    if any(not math.isfinite(word.start) or not math.isfinite(word.end) or not word.text.strip() for word in words):
+        return [], False
+    # Allow tiny Whisper jitter (<=50ms) but reject scrambled/unaligned word arrays.
+    if any(current.start + 0.05 < previous.start for previous, current in zip(words, words[1:])):
+        return [], False
+
+    merged = _merge_compound_tokens(words)
+    if not merged:
+        return [], False
+    zero_count = sum(1 for word in merged if word.end <= word.start)
+    if zero_count == len(merged):
+        return [], False
+    if (len(merged) <= 2 and zero_count > 0) or (zero_count / len(merged) >= 0.35):
+        return [], False
+
+    fixed = _repair_isolated_zero_words(merged, seg_start or merged[0].start, seg_end or merged[-1].end)
+    clip_dur = max(0.0, highlight.end - highlight.start)
+    result: list[Word] = []
+    for index, word in enumerate(fixed):
+        orig_dur = max(0.0, word.end - word.start)
+        rel_start = word.start - highlight.start + offset_sec
+        rel_end = word.end - highlight.start + offset_sec
+        if index + 1 < len(fixed):
+            next_rel_start = fixed[index + 1].start - highlight.start + offset_sec
+            rel_end = min(rel_end, next_rel_start)
+        clamped_start = max(0.0, rel_start)
+        clamped_end = min(clip_dur, rel_end)
+        kept_dur = clamped_end - clamped_start
+        # Drop tiny <50ms edge bleeds sliced at clip start/end when most of the word is outside the clip.
+        if (rel_start < 0.0 or rel_end > clip_dur) and kept_dur < _EDGE_BLEED_MIN_S:
+            if orig_dur > 0.12 or kept_dur / max(orig_dur, 1e-6) < 0.25:
+                continue
+        if result:
+            clamped_start = max(clamped_start, result[-1].end)
+        if _cs(clamped_end) > _cs(clamped_start):
+            result.append(Word(clamped_start, clamped_end, word.text))
+    return result, True
+
+
+def _valid_words(
+    words: list[Word],
+    highlight: Highlight,
+    seg_start: float = 0.0,
+    seg_end: float = 0.0,
+    *,
+    offset_sec: float = 0.0,
+) -> list[Word]:
+    clipped, _ = _valid_words_with_status(words, highlight, seg_start, seg_end, offset_sec=offset_sec)
+    return clipped
 
 
 def _phrases(words: list[Word], maximum: int) -> list[list[Word]]:
+    if not words:
+        return []
+    max_words = max(1, maximum)
+    max_chars = 28 if max_words <= 5 else 34
     groups: list[list[Word]] = []
     for word in words:
-        if (not groups or len(groups[-1]) >= maximum or word.start - groups[-1][-1].end > .6
-                or sum(len(item.text) + 1 for item in groups[-1]) + len(word.text) > 34):
-            groups.append([])
-        groups[-1].append(word)
+        if not groups:
+            groups.append([word])
+            continue
+        prev = groups[-1][-1]
+        pause_gap = word.start - prev.end
+        prev_char = prev.text[-1] if prev.text else ""
+        curr_chars = sum(len(item.text) + 1 for item in groups[-1]) + len(word.text)
+        curr_dur = prev.end - groups[-1][0].start
+        should_break = (
+            pause_gap > _MAX_WORD_GAP_GROUP_S
+            or prev_char in _SENTENCE_END
+            or (prev_char in _CLAUSE_END and (len(groups[-1]) >= 2 or curr_dur >= 0.55))
+            or len(groups[-1]) >= max_words
+            or curr_chars > max_chars
+        )
+        if should_break:
+            groups.append([word])
+        else:
+            groups[-1].append(word)
+
+    # Anti-orphan rebalance: eliminate accidental 5+1 tails when words belong to the same clause.
+    if max_words >= 2 and len(groups) > 1:
+        changed = True
+        while changed:
+            changed = False
+            for idx in range(1, len(groups)):
+                prev_group = groups[idx - 1]
+                curr_group = groups[idx]
+                if len(curr_group) != 1 or len(prev_group) < 3:
+                    continue
+                bridge_gap = curr_group[0].start - prev_group[-1].end
+                boundary_char = prev_group[-1].text[-1] if prev_group[-1].text else ""
+                if bridge_gap > _MAX_WORD_GAP_GROUP_S or boundary_char in _SENTENCE_END:
+                    continue
+                tail_word = prev_group[-1]
+                moved_chars = len(tail_word.text) + 1 + len(curr_group[0].text)
+                if moved_chars <= max_chars + 4 and not (tail_word.text[-1:] in _CLAUSE_END and len(prev_group) <= 3):
+                    groups[idx - 1] = prev_group[:-1]
+                    groups[idx] = [tail_word, curr_group[0]]
+                    changed = True
+                    break
     return groups
+
+
+def _quantize_time(value: float, fps: float | None, clip_dur: float) -> float:
+    clamped = max(0.0, min(clip_dur, value))
+    if not fps or fps <= 0:
+        return clamped
+    snapped = round(clamped * fps) / fps
+    return max(0.0, min(clip_dur, snapped))
+
+
+def _normalize_cues(
+    raw_cues: list[CaptionCue],
+    clip_dur: float,
+    profile: CaptionSyncProfile,
+    *,
+    fps: float | None = None,
+) -> list[CaptionCue]:
+    if not raw_cues or clip_dur <= 0:
+        return []
+    ordered = sorted(raw_cues, key=lambda item: (item.start, item.end))
+    deduped: list[CaptionCue] = []
+    for cue in ordered:
+        start = max(0.0, min(clip_dur, cue.start))
+        end = max(0.0, min(clip_dur, cue.end))
+        if end <= start + 0.01:
+            continue
+        if deduped:
+            prev = deduped[-1]
+            # Drop completely redundant duplicate text overlapping inside previous cue.
+            if cue.text == prev.text and start < prev.end + 0.05:
+                merged_words = prev.words if len(prev.words) >= len(cue.words) else cue.words
+                deduped[-1] = CaptionCue(prev.start, max(prev.end, end), merged_words, prev.text, prev.has_word_timing or cue.has_word_timing)
+                continue
+            if start < prev.end:
+                start = prev.end
+            if end <= start + 0.015:
+                continue
+        deduped.append(CaptionCue(start, end, cue.words, cue.text, cue.has_word_timing))
+
+    normalized: list[CaptionCue] = []
+    for idx, cue in enumerate(deduped):
+        prev_end = normalized[-1].end if normalized else 0.0
+        next_start = deduped[idx + 1].start if idx + 1 < len(deduped) else clip_dur
+
+        apply_lead = profile.lead_in_s > 0.0
+        apply_tail = cue.has_word_timing or profile.trailing_hold_s > 0.08
+        lead_in = profile.lead_in_s if apply_lead else 0.0
+        new_start = max(prev_end, cue.start - lead_in)
+
+        avail_after = max(0.0, next_start - cue.end)
+        tail_pad = min(profile.trailing_hold_s, avail_after) if apply_tail else 0.0
+        new_end = min(next_start, cue.end + tail_pad)
+
+        # Ensure crisp minimum display duration within surrounding silence without pushing into next spoken phrase.
+        if new_end - new_start < profile.min_duration_s and (cue.has_word_timing or cue.end - cue.start < 0.35):
+            needed = profile.min_duration_s - (new_end - new_start)
+            extra_cap = max(0.0, cue.end + profile.max_hold_extension_s - new_end)
+            extend = min(needed, max(0.0, next_start - new_end), extra_cap)
+            new_end += extend
+
+        new_start = max(0.0, min(clip_dur, new_start))
+        new_end = max(new_start, min(clip_dur, new_end))
+        if _cs(new_end) <= _cs(new_start):
+            continue
+
+        words = list(cue.words)
+        if words:
+            w_list: list[Word] = []
+            for w_idx, word in enumerate(words):
+                ws = new_start if w_idx == 0 else max(new_start, word.start, w_list[-1].end)
+                we = new_end if w_idx == len(words) - 1 else min(new_end, word.end)
+                if we > ws + 0.01:
+                    w_list.append(Word(ws, we, word.text))
+            if w_list:
+                w_list[-1] = Word(w_list[-1].start, max(w_list[-1].start + 0.01, new_end), w_list[-1].text)
+            words = w_list
+        normalized.append(CaptionCue(new_start, new_end, tuple(words), cue.text, cue.has_word_timing))
+
+    # Close micro-gaps (<35-50ms, ~1 frame) so consecutive captions never blink blank between cues.
+    for idx in range(len(normalized) - 1):
+        curr = normalized[idx]
+        nxt = normalized[idx + 1]
+        gap = nxt.start - curr.end
+        if 0.0 < gap <= profile.bridge_cue_gap_s:
+            words = curr.words
+            if words:
+                words = (*words[:-1], Word(words[-1].start, nxt.start, words[-1].text))
+            normalized[idx] = CaptionCue(curr.start, nxt.start, words, curr.text, curr.has_word_timing)
+
+    if fps and fps > 0:
+        frame_min = max(0.02, 1.0 / fps)
+        quantized: list[CaptionCue] = []
+        for idx, cue in enumerate(normalized):
+            prev_end = quantized[-1].end if quantized else 0.0
+            q_start = max(prev_end, _quantize_time(cue.start, fps, clip_dur))
+            q_end = _quantize_time(cue.end, fps, clip_dur)
+            if q_end <= q_start + 1e-4:
+                q_end = min(clip_dur, q_start + frame_min)
+            if _cs(q_end) <= _cs(q_start):
+                continue
+            q_words: list[Word] = []
+            if cue.words:
+                for w_idx, word in enumerate(cue.words):
+                    ws = q_start if w_idx == 0 else max(q_words[-1].end, _quantize_time(word.start, fps, clip_dur))
+                    if w_idx == len(cue.words) - 1:
+                        we = q_end
+                    else:
+                        we = min(q_end, _quantize_time(word.end, fps, clip_dur))
+                        if we <= ws + 1e-4:
+                            we = min(q_end, ws + frame_min)
+                    if _cs(we) > _cs(ws):
+                        q_words.append(Word(ws, we, word.text))
+                if q_words:
+                    q_words[-1] = Word(q_words[-1].start, q_end, q_words[-1].text)
+            quantized.append(CaptionCue(q_start, q_end, tuple(q_words), cue.text, cue.has_word_timing))
+        return quantized
+    return normalized
+
+
+def build_caption_cues(
+    transcript: Transcript,
+    highlight: Highlight,
+    template: CaptionTemplate,
+    *,
+    fps: float | None = None,
+    sync_mode: str = "precise",
+    offset_ms: int = 0,
+) -> list[CaptionCue]:
+    profile = _SYNC_PROFILES.get(str(sync_mode).lower(), _SYNC_PROFILES["precise"])
+    offset_sec = max(-500, min(500, int(offset_ms))) / 1000.0
+    clip_dur = max(0.0, highlight.end - highlight.start)
+    raw_cues: list[CaptionCue] = []
+    for segment in transcript.segments:
+        if segment.end <= highlight.start or segment.start >= highlight.end:
+            continue
+        words, used_word_timing = _valid_words_with_status(
+            segment.words, highlight, segment.start, segment.end, offset_sec=offset_sec,
+        )
+        if used_word_timing:
+            if not words:
+                continue
+            for grp in _phrases(words, template.words):
+                text = " ".join(item.text for item in grp)
+                raw_cues.append(CaptionCue(grp[0].start, grp[-1].end, tuple(grp), text, True))
+        else:
+            raw_start = segment.start - highlight.start + offset_sec
+            raw_end = segment.end - highlight.start + offset_sec
+            start = max(0.0, raw_start)
+            end = min(clip_dur, raw_end)
+            # Guard un-worded SRT boundaries against <80ms tail bleed from off-clip sentences.
+            if (raw_start < -0.25 or raw_end > clip_dur + 0.25) and (end - start) < 0.08:
+                continue
+            if _cs(end) > _cs(start) and segment.text.strip():
+                raw_cues.append(CaptionCue(start, end, (), segment.text.strip(), False))
+    return _normalize_cues(raw_cues, clip_dur, profile, fps=fps)
 
 
 class _CaptionScript:
@@ -197,15 +594,16 @@ class _CaptionScript:
         self.width = width
         self.height = height
         self.split_screen = split_screen
-        self.events: list[str] = []
+        self.events: list[tuple[int, int, int, str]] = []
         self.scale = min(width / 1080, height / 1080)
         self.margin = 0 if split_screen else round(height * .14)
 
     def add(self, start: float, end: float, text: str, tags: str = "", *, layer: int = 0) -> None:
-        if _cs(end) > _cs(start):
+        start_cs, end_cs = _cs(start), _cs(end)
+        if end_cs > start_cs:
             override = f"{{{tags}}}" if tags else ""
-            self.events.append(f"Dialogue: {layer},{ass_timestamp(start)},{ass_timestamp(end)},Default,,0,0,0,,"
-                               + override + text)
+            row = f"Dialogue: {layer},{ass_timestamp(start)},{ass_timestamp(end)},Default,,0,0,0,," + override + text
+            self.events.append((layer, start_cs, end_cs, row))
 
     def transform_text(self, text: str) -> str:
         return text.upper() if self.template.uppercase else text
@@ -220,13 +618,18 @@ class _CaptionScript:
         text = self.transform_text(text)
         body = _escape(text)
         fit = self.fit(text)
-        length = round((end - start) * 1000)
-        short_fade = min(140, length // 4)
+        length = max(1, round((end - start) * 1000))
+        short_fade = min(140, max(25, length // 4))
         effect = style.effect
         if effect == "punch":
-            tags = r"\fscx82\fscy82\t(0,105,\fscx111\fscy111)\t(105,210,\fscx100\fscy100)"
+            if length >= 260:
+                half, full = 105, 210
+            else:
+                full = max(65, round(length * 0.68))
+                half = max(32, full // 2)
+            tags = fr"\fscx82\fscy82\t(0,{half},\fscx111\fscy111)\t({half},{full},\fscx100\fscy100)"
         elif effect == "dissolve":
-            fade = min(300, length // 3)
+            fade = min(300, max(40, length // 3))
             tags = fr"\fsp{round(self.scale * 4)}\fad({fade},{fade})"
         elif effect == "podcast":
             tags = fr"\fad({min(90, short_fade)},0)"
@@ -235,75 +638,116 @@ class _CaptionScript:
 
         if effect == "glow":
             border = max(2, round(16 * self.scale))
+            glow_peak = min(160, max(50, length // 3))
+            glow_fade = min(460, max(glow_peak + 60, length))
             glow = (fr"\bord{border}\blur{max(1, round(10 * self.scale))}\3c{_ass_color(style.accent)}"
-                    r"\1a&HFF&\3a&H92&\t(0,160,\3a&H15&)\t(160,460,\3a&H8C&)")
+                    fr"\1a&HFF&\3a&H92&\t(0,{glow_peak},\3a&H15&)\t({glow_peak},{glow_fade},\3a&H8C&)")
             self.add(start, end, body, fit + glow)
             self.add(start, end, body, fit + tags, layer=1)
             return
         if effect == "gradient":
             body = _gradient(text, style.primary, style.accent)
-            tags += fr"\fsp{max(1, round(self.scale * 6))}\t(0,280,\fsp0)"
+            track_ms = min(280, max(90, length // 2))
+            tags += fr"\fsp{max(1, round(self.scale * 6))}\t(0,{track_ms},\fsp0)"
         if effect == "karaoke" and words:
             body = " ".join(
-                fr"{{\kt{_cs(word.start) - _cs(start)}\kf{_cs(word.end) - _cs(word.start)}}}"
+                fr"{{\kt{max(0, _cs(word.start) - _cs(start))}\kf{max(1, _cs(word.end) - _cs(word.start))}}}"
                 + _escape(self.transform_text(word.text)) for word in words
             )
         if effect == "karaoke" and not words:
             tags += r"\1c&H00F4F4F4&"
         self.add(start, end, body, fit + tags)
 
-    def group(self, words: list[Word]) -> None:
+    def _base_y(self) -> int:
+        if self.split_screen:
+            return self.height // 2
+        if self.template.alignment in (7, 8, 9):
+            return self.margin
+        return self.height - self.margin
+
+    def group(self, cue: CaptionCue, profile: CaptionSyncProfile) -> None:
         style = self.template
-        text = " ".join(item.text for item in words)
-        if style.effect not in {"emphasis", "viral", "bounce", "box", "typewriter"}:
-            self.phrase(words[0].start, words[-1].end, text, words)
+        words = list(cue.words)
+        if not words or not cue.has_word_timing:
+            self.phrase(cue.start, cue.end, cue.text, None)
             return
-        text = self.transform_text(text)
+        if style.effect not in {"emphasis", "viral", "bounce", "box", "typewriter"}:
+            self.phrase(cue.start, cue.end, " ".join(item.text for item in words), words)
+            return
+
+        full_text = self.transform_text(" ".join(item.text for item in words))
         plain = [_escape(self.transform_text(word.text)) for word in words]
-        fit = self.fit(text)
+        fit = self.fit(full_text)
         background = fr"\bord1\3c{_ass_color('#13101C')}"
         before = ""
-        cursor = words[0].start
+        base_y = self._base_y()
+
+        # Precompute word spans, seamlessly bridging tiny <=140-180ms gaps inside one phrase.
+        spans: list[tuple[float, float]] = []
+        for idx, word in enumerate(words):
+            next_start = words[idx + 1].start if idx + 1 < len(words) else cue.end
+            if 0.0 < next_start - word.end <= profile.bridge_word_gap_s:
+                spans.append((word.start, next_start))
+            elif idx == len(words) - 1 and cue.end > word.end:
+                spans.append((word.start, cue.end))
+            else:
+                spans.append((word.start, word.end))
+
+        cursor = cue.start
         for index, word in enumerate(words):
-            text = self.transform_text(word.text)
-            length = max(1, round((word.end - word.start) * 1000))
+            w_start, w_end = spans[index]
+            word_text = self.transform_text(word.text)
+            length = max(1, round((w_end - w_start) * 1000))
             if style.effect in {"emphasis", "viral"}:
-                self.add(cursor, word.start, " ".join(plain), fit)
+                if _cs(w_start) > _cs(cursor):
+                    self.add(cursor, w_start, " ".join(plain), fit)
                 accent = "#A2FFE8" if style.effect == "viral" and index % 2 else style.accent
                 emphasis = fr"\1c{_ass_color(accent)}\b1\fscy112"
                 movement = ""
                 if style.effect == "viral":
-                    y = self.height - self.margin
-                    movement = fr"\move({self.width//2},{y+round(20*self.scale)},{self.width//2},{y},0,{min(110,length)})"
-                    emphasis += fr"\fscy138\t(0,{min(130,length)},\fscy100)"
+                    if index == 0:
+                        move_ms = min(115, length)
+                        rise_y = base_y + round(16 * self.scale)
+                        movement = fr"\move({self.width // 2},{rise_y},{self.width // 2},{base_y},0,{move_ms})"
+                        emphasis += fr"\fscy122\t(0,{min(125, length)},\fscy100)"
+                    else:
+                        emphasis = fr"\1c{_ass_color(accent)}\b1\fscy114\t(0,{min(100, length)},\fscy104)"
                 line = plain.copy()
                 line[index] = "{" + emphasis + "}" + plain[index] + r"{\1c\fscy100}"
-                self.add(word.start, word.end, " ".join(line), fit + movement)
+                self.add(w_start, w_end, " ".join(line), fit + movement)
             elif style.effect == "bounce":
-                first, second, last = [max(1, round(length * fraction)) for fraction in (.28, .55, .82)]
-                self.add(word.start, word.end, _escape(text), self.fit(text) + (
-                    fr"\fscx64\fscy64\t(0,{first},\fscx122\fscy122)"
+                word_fit = self.fit(word_text)
+                if length >= 220:
+                    first, second, last = [max(1, round(length * f)) for f in (.28, .55, .82)]
+                    peak = 122
+                else:
+                    first, second, last = [max(1, round(length * f)) for f in (.30, .62, .90)]
+                    peak = 114
+                self.add(w_start, w_end, _escape(word_text), word_fit + (
+                    fr"\fscx64\fscy64\t(0,{first},\fscx{peak}\fscy{peak})"
                     fr"\t({first},{second},\fscx94\fscy94)\t({second},{last},\fscx100\fscy100)"
                 ))
             elif style.effect == "box":
-                self.add(cursor, word.start, " ".join(plain), fit + background)
+                if _cs(w_start) > _cs(cursor):
+                    self.add(cursor, w_start, " ".join(plain), fit + background)
                 box = max(2, round(style.outline * self.scale))
                 reveal = fr"\bord{box}\3c\3a&H65&\t(0,{min(95, length)},\3a&H00&)"
                 line = plain.copy()
                 line[index] = "{" + reveal + "}" + line[index] + "{" + background + r"\3a&H00&}"
-                self.add(word.start, word.end, " ".join(line), fit + background)
+                self.add(w_start, w_end, " ".join(line), fit + background)
             else:
-                if before:
-                    self.add(cursor, word.start, _escape(before.rstrip()))
-                chars = _graphemes(text)
-                stride = (word.end - word.start) * .82 / max(1, len(chars))
+                if before and _cs(w_start) > _cs(cursor):
+                    self.add(cursor, w_start, _escape(before.rstrip()), fit)
+                chars = _graphemes(word_text)
+                active_window = max(0.02, (word.end - w_start) * .82)
+                stride = active_window / max(1, len(chars))
                 for count in range(1, len(chars) + 1):
-                    start = word.start + (count - 1) * stride
-                    end = start + stride if count < len(chars) else word.end
+                    c_start = w_start + (count - 1) * stride
+                    c_end = c_start + stride if count < len(chars) else w_end
                     body = before + "".join(chars[:count])
-                    self.add(start, end, _escape(body), self.fit(body))
-                before += text + " "
-            cursor = word.end
+                    self.add(c_start, c_end, _escape(body), fit)
+                before += word_text + " "
+            cursor = w_end
 
     def write(self, output: Path) -> None:
         style = self.template
@@ -333,22 +777,25 @@ Style: {row}
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-        output.write_text(header + "\n".join(self.events) + "\n", encoding="utf-8-sig")
+        ordered = [row_str for _, _, _, row_str in sorted(self.events, key=lambda item: (item[0], item[1], item[2]))]
+        output.write_text(header + "\n".join(ordered) + "\n", encoding="utf-8-sig")
 
 
-def write_ass(transcript: Transcript, highlight: Highlight, output: Path,
-              resolution: tuple[int, int], template_name: str, *, split_screen: bool = False) -> None:
+def write_ass(
+    transcript: Transcript,
+    highlight: Highlight,
+    output: Path,
+    resolution: tuple[int, int],
+    template_name: str,
+    *,
+    split_screen: bool = False,
+    fps: float | None = None,
+    sync_mode: str = "precise",
+    offset_ms: int = 0,
+) -> None:
     template = TEMPLATES.get(template_name, TEMPLATES[TEMPLATE_DEFAULT])
+    profile = _SYNC_PROFILES.get(str(sync_mode).lower(), _SYNC_PROFILES["precise"])
     script = _CaptionScript(template, *resolution, split_screen=split_screen)
-    for segment in transcript.segments:
-        if segment.end <= highlight.start or segment.start >= highlight.end:
-            continue
-        words = _valid_words(segment.words, highlight)
-        if words:
-            for group in _phrases(words, template.words):
-                script.group(group)
-        else:
-            start = max(0, segment.start - highlight.start)
-            end = min(highlight.end, segment.end) - highlight.start
-            script.phrase(start, end, segment.text)
+    for cue in build_caption_cues(transcript, highlight, template, fps=fps, sync_mode=sync_mode, offset_ms=offset_ms):
+        script.group(cue, profile)
     script.write(output)

@@ -827,7 +827,7 @@ def probe(path: Path, manager: ProcessManager | None = None) -> dict:
     runner = manager or ProcessManager()
     result = runner.run([
         find_media_tool("ffprobe"), "-v", "error", "-show_entries",
-        "format=duration,start_time:stream=index,codec_type,codec_name,width,height,avg_frame_rate,duration,start_time:stream_side_data=rotation",
+        "format=duration,start_time:stream=index,codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,duration,start_time:stream_side_data=rotation",
         "-of", "json", path,
     ])
     return json.loads(result.stdout)

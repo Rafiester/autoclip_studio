@@ -220,6 +220,8 @@ class Pipeline:
                     profile_limits=limits, cache_enabled=options.cache_enabled,
                     reframe_mode=options.reframe_mode if options.face_tracking else "off",
                     reframe_style=options.reframe_style,
+                    caption_sync_mode=options.caption_sync_mode,
+                    caption_offset_ms=options.caption_offset_ms,
                 )
                 rendered_clip = RenderedClip(output, highlight, duration)
                 rendered.append(rendered_clip)
