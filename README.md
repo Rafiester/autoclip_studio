@@ -1,113 +1,193 @@
 # AutoClip Studio
 
-AutoClip Studio is a Windows-native desktop application that turns a YouTube video or local video into ranked, captioned short-form clips. It is local-first, has no watermarks or application quotas, and does not require Docker, WSL, Ollama, a VM, or a paid service.
+AutoClip Studio is a native cross-platform desktop application for **macOS (Apple Silicon ARM64)** and **Windows (x86-64)** that transforms YouTube videos and local recordings into ranked, reframed, captioned vertical shorts. It is local-first, has no watermarks or application quotas, and does not require Docker, WSL, a VM, or a paid subscription.
 
-The media pipeline runs on your PC. An AI API is optional: without a key, AutoClip Studio uses a deterministic transcript-density and hook scorer; with a key, it sends timestamped transcript text to Gemini, OpenAI, or an OpenAI-compatible endpoint such as Appverse.
+The entire media pipeline runs locally on your machine. An AI API key is optional: without a key, AutoClip Studio uses a local transcript-density, hook, and YouTube replay-heatmap scorer; with a key, it analyzes timestamped transcripts via **Google Gemini**, **OpenAI**, or any **OpenAI-compatible** endpoint.
 
-## Quick start
+---
 
-### Packaged Windows application
+## Key Features
 
-Open `dist\AutoClipStudio\AutoClipStudio.exe` directly. Keep its `_internal` folder beside the executable. Alternatively, run `release\AutoClipStudio-Setup-x64.exe` to install for the current Windows user with a Start Menu shortcut and an optional desktop shortcut. Uninstall from **Settings → Apps → Installed apps**. User settings, credentials, exports and caches survive uninstall.
+### Modern Desktop UI & Unified Settings
+- **Floating Collapsible Sidebar:** Inset rounded navigation container (`Dashboard`, `New Project`, `Processing Queue`, `Generated Clips`, `Caption Templates`, and an expandable `Settings` tree) with icon-only collapse mode, tooltips, and anchored Settings flyout.
+- **Light, Dark & System Themes:** Centralized design system with bundled **Poppins** typography, visual theme preview cards under **Settings → Appearance**, and instant theme switching with zero restart.
+- **Persistent Workspace State:** Atomic local settings (`settings.json` v2) preserving AI providers and selected models, project defaults, sidebar layout, appearance, and video player volume/mute across restarts.
 
-### Source checkout
+### Flexible Ingest & Highlight Discovery
+- **YouTube & Local Video Import:** Paste a YouTube URL (with debounced metadata, thumbnail, and Most Replayed heatmap preview) or drag-and-drop a local video file.
+- **Flexible Subtitle Pipeline:** Priority chain supporting optional user-supplied `.srt` files (with offset sync, skipping transcription), YouTube manual/auto subtitle extraction, or local/cloud Speech-to-Text.
+- **Hybrid AI + Heatmap Highlight Ranking:** Combine AI transcript scoring with YouTube's **Most Replayed** audience heatmap (`Hybrid`, `AI Analysis`, or `Most Replayed` modes) with configurable weighting.
 
-Requirements: Windows 11, an internet connection for initial setup/model downloads, and approximately 2 GB of free disk space. An NVIDIA GPU is optional.
+### Intelligent Auto Director & Smart Reframing
+- **Multi-Person Active Speaker Tracking:** Tracks multiple speakers in podcast and interview shots using OpenCV (YuNet / Haar) with lip-motion and voice-activity evidence, plus optional podcast split-screen framing.
+- **Offline Viterbi/DP Auto Director:** Eliminates rapid ping-pong speaker cuts and tripod micro-jitter with configurable reframing styles (**Natural**, **Stable**, **Dynamic**), frame-accurate original camera cut synchronization, and eased same-subject pans.
+- **Animated Caption Templates:** Word-level ASS karaoke captions with customizable built-in templates and live preview in **Caption Templates**.
 
-1. Double-click `AutoClipStudio.exe` in the checkout. If dependencies need setup, accept the dialog. Setup installs a project-local Python environment and FFmpeg and runs the unit tests.
-2. Optionally open **AI Provider Settings**, enter a key, choose or load a model, test the connection, and save. Keys are stored in Windows Credential Manager.
-3. Open **New Project**, paste a YouTube URL or choose a local video, configure the clip settings, then click **Generate Shorts**.
-4. Follow progress in **Processing Queue** and preview results in **Generated Clips**.
+### Reliable Downloader with Pause, Resume & Rate-Limit Recovery
+- **Persistent Partial Downloads:** Stable per-video/per-job download workspaces preserve `.part` files and resume metadata across pauses, network interruptions, and restarts using `yt-dlp --continue --part`.
+- **Distinct Pause, Resume & Cancel Controls:** Pause active YouTube downloads without losing progress, resume from preserved bytes, or cancel with clean subprocess tree termination and workspace cleanup.
+- **HTTP 429 & Verification Protection:** Stops retry storms immediately on `HTTP 429 Too Many Requests`, respects `Retry-After` headers and bounded cooldowns with live countdown badges, deduplicates concurrent metadata/subtitle requests, and suspends automatic retries when YouTube requests sign-in or verification.
 
-The source launcher uses the checkout's `.venv` and loads the latest Python source on every launch. Close the app normally or run `AutoClipStudio.exe --stop` to request shutdown for that checkout. The launcher owns its process tree and cleans up remaining children when it exits. Use `--check` to validate dependencies or `--setup` to reopen setup. Launcher diagnostics are in `logs\launcher.log` under the app data directory.
+### Native Hardware Acceleration & Telemetry
+- **macOS Apple Silicon (ARM64):**
+  - **MLX Whisper** on Apple Metal with real-time progress, speed (`×`), RTF, ETA, and live Apple Silicon memory/thermal/pressure telemetry (plus optional quantized models such as `large-v3-turbo-q4` and `small-q4`).
+  - **Apple VideoToolbox** hardware encoding (`h264_videotoolbox` / `hevc_videotoolbox`) with automatic `libx264` fallback.
+  - Dynamic P-core/E-core, unified memory, battery/AC, and thermal adaptation across **Eco**, **Balanced**, and **Turbo** profiles (with Rosetta translation detection).
+- **Windows (x86-64):**
+  - **Faster-Whisper** and **Purfview Faster-Whisper XXL** with NVIDIA CUDA acceleration and CPU fallback.
+  - **NVENC** hardware encoding with automatic `libx264` fallback, Windows Job Object process cleanup, and **Windows Credential Manager** storage.
 
-## Workflow
+### Processing Queue & Native Clip Player
+- **Processing Queue:** Live 6-stage visual pipeline stepper, transfer & transcription telemetry cards, pause/resume/retry actions, recent-activity sorting, searchable history, redacted copyable/exportable logs, and a non-modal completion popup.
+- **Generated Clips Workspace:** Master-detail library with automatic clip thumbnails (custom frame picker & export), score breakdown chips, and an embedded native 9:16 video player with synchronized audio (native macOS AVFoundation `darwin` backend with CoreAudio Bluetooth/device hot-switching, persisted volume/mute, keyboard shortcuts, and seamless fullscreen handoff).
+- **Dependency Manager & Setup:** Built-in dependency diagnostics, `yt-dlp` updates with rollback, FFmpeg/runtime verification, and Whisper model management under **Settings → Dependencies**.
 
-The implemented workflow is:
+---
 
-1. Validate/import a local file or download one YouTube video with yt-dlp.
-2. Transcribe locally with Python Faster-Whisper or Purfview XXL, with configurable word timestamps, CUDA, and CPU fallback.
-3. Analyze timestamped transcript chunks with the configured provider, or use the no-key local scorer.
-4. Sanitize, rank, and remove overlapping highlights.
-5. Run OpenCV face detection only over selected highlight ranges and smooth the crop motion.
-6. Create ASS karaoke events from Whisper word timings.
-7. Reframe, scale, caption, and encode with FFmpeg. NVENC is tried first when enabled and automatically falls back to libx264.
-8. Probe every result for a valid video stream and duration, persist clip metadata, write a project manifest, and remove successful job temporary files.
+## Navigation & Settings Structure
 
-Downloads and transcripts are cached when enabled. Heavy jobs are sequential and execute outside the GUI thread. Cancelling or closing the app terminates application-owned subprocess trees.
+```text
+AutoClip Studio
+─────────────────────
+Dashboard
+New Project
+Processing Queue
+Generated Clips
+Caption Templates
+─────────────────────
+Settings
+  ├── General         (Output folder, hardware encoding, cache management, reset)
+  ├── Appearance      (Light / Dark / System preview cards, collapsed sidebar toggle)
+  ├── AI Providers    (Gemini / OpenAI / Custom endpoint, secure keys, model discovery)
+  ├── Transcription   (MLX Whisper / Faster-Whisper / Purfview XXL / cloud engines)
+  ├── Performance     (Eco / Balanced / Turbo profiles, live hardware telemetry)
+  └── Dependencies    (Runtimes, FFmpeg, yt-dlp maintenance, Whisper models)
+```
 
-## Speech-to-Text
+---
 
-Auto can reuse an existing Subtitle Edit Purfview XXL installation and compatible models. Choose **Test Engine** to see engine compatibility, CUDA availability, and available models. The same page lets you select another executable or model folder, import an extracted standalone release, download models, and manage the transcript cache. **Auto** batching uses sequential inference. Choose **Export transcript JSON and SRT beside the clips** to keep a copy with the project. [Speech-to-text audit and benchmark](docs/speech-to-text-audit.md)
+## Quick Start
 
-## Providers
+### macOS (Apple Silicon ARM64)
 
-- **Gemini** (default): base URL `https://generativelanguage.googleapis.com/v1beta`; model `gemini-2.5-flash`.
-- **OpenAI**: base URL `https://api.openai.com/v1`; model `gpt-4o-mini`.
-- **Custom / Appverse**: enter the service's OpenAI-compatible `/v1` base URL and model name.
+Requirements: macOS on Apple Silicon (M1 or newer), Homebrew `ffmpeg-full` (with `libass` / `h264_videotoolbox`), Node.js (for `yt-dlp` YouTube JS challenges), and a native ARM64 Python 3.12 virtual environment (`.venv`).
 
-Model discovery uses each provider's model endpoint. Some compatible services do not implement model listing; in that case, type the model name directly. Custom remote endpoints must use HTTPS; HTTP is accepted only for localhost.
+1. Launch from a source checkout:
+   ```zsh
+   .venv/bin/python3 main.py
+   ```
+   Or open the generated `dist/AutoClipStudio.app` bundle.
+2. Optionally open **Settings → AI Providers**, enter your API key (stored in **macOS Keychain**), load or type a model ID, test the connection, and click **Save settings**.
+3. Open **New Project**, paste a YouTube URL or drop a local video, configure clip duration, highlight mode, reframing style, and captions, then click **Generate Shorts**.
+4. Monitor transfers and rendering in **Processing Queue** (with Pause/Resume support) and play or export results in **Generated Clips**.
 
-Gemini's optional multimodal checkbox uploads the source through the Gemini Files API, waits for processing, requests timestamped highlights, then deletes the remote file. It is off by default. Transcript-only analysis is cheaper and more private.
+### Windows (x86-64)
 
-Provider requests retry temporary gateway and overload errors up to five attempts per request and model. Temporary rate limits follow the provider's Retry-After header when supplied. Zero allocation and exhausted billing quota stop retries for that model. Under **AI Provider Settings**, enter comma-separated fallback model IDs for the selected provider and enable **Automatically try fallback models** to use them in order.
+#### Packaged Windows application
+Open `dist\AutoClipStudio\AutoClipStudio.exe` directly (keep its `_internal` folder beside the executable), or run `release\AutoClipStudio-Setup-x64.exe` to install for the current user. User settings, credentials, exports, and caches survive uninstall.
 
-When provider analysis fails, the project remains in **Processing Queue** with its progress and prepared transcript. To switch providers, choose the provider and model in **AI Provider Settings** and click **Save settings**. Select the failed project and click **Retry AI Analysis**. The retry uses the active saved provider, model, credentials, and fallbacks while reusing the prepared video, transcript, and clip settings. Providers other than Gemini use transcript analysis.
+#### Source checkout
+Requirements: Windows 11, an internet connection for initial setup/model downloads, and ~2 GB free disk space (NVIDIA GPU optional).
 
-The queue log supports mouse selection, Ctrl+A, Ctrl+C, and a right-click menu. **Copy Logs** copies all entries in the panel, **Export Logs** saves them as a TXT file, and **Clear Logs** clears the panel. Entries include timestamps and severity. Provider diagnostics are redacted before display and storage.
+1. Double-click `AutoClipStudio.exe` in the checkout (or run `.\.venv\Scripts\python.exe main.py`). If dependencies need setup, accept the setup dialog to install the project-local Python environment and FFmpeg.
+2. Optionally open **Settings → AI Providers**, enter a key (stored in **Windows Credential Manager**), choose or load a model, test, and save.
+3. Open **New Project**, choose a YouTube URL or local video, and click **Generate Shorts**.
 
-## Local data
+The Windows source launcher owns its process tree and supports `--check`, `--setup`, and `--stop`.
 
-By default, application data is stored below `%LOCALAPPDATA%\AutoClip\AutoClip Studio` (the exact platform directory is supplied by `platformdirs`):
+---
 
-- `autoclip.db` — projects and generated clip metadata
-- `settings.json` — non-secret preferences
-- `cache` — optional downloads, transcript JSON, and in-progress work
-- `cache\models` — Faster-Whisper model weights. Set `HF_HUB_CACHE` to reuse an existing Hugging Face cache.
-- `logs\autoclip.log` — rotating startup, project, and error diagnostics
-- `output` — project folders, MP4 clips, and `project.json` manifests
+## Processing Workflow
 
-Set `AUTOCLIP_DATA_DIR` before launch to use another data root, or choose an output folder in Settings.
+1. **Ingest:** Import a local video or download a YouTube source into a persistent workspace with `yt-dlp` (`--continue --part --sleep-requests`), verifying media integrity before caching.
+2. **Transcript:** Import user `.srt` if provided, reuse/extract YouTube subtitles when enabled, or transcribe locally via **MLX Whisper** (macOS) / **Faster-Whisper** or **Purfview XXL** (Windows).
+3. **Highlight Selection:** Rank candidate clips using the configured AI provider (`Gemini`, `OpenAI`, or custom OpenAI-compatible endpoint) and/or YouTube Most Replayed heatmap data, or fall back to the local no-key scorer.
+4. **Auto Director & Smart Reframing:** Detect faces and active speakers across selected highlight intervals, solve shot framing via offline Viterbi/DP optimization, and align cuts to exact source cut frames.
+5. **Captioning & Rendering:** Generate word-timed ASS captions and render vertical MP4 clips via FFmpeg using **VideoToolbox** (macOS) or **NVENC** (Windows) with automatic `libx264` CPU fallback.
+6. **Validation & Thumbnails:** Probe every rendered MP4 for valid streams and duration, generate clip thumbnails, persist metadata in SQLite, and write a `project.json` manifest beside the exported clips.
 
-## Repository layout
+---
+
+## AI Providers
+
+- **Gemini (default):** `https://generativelanguage.googleapis.com/v1beta` (`gemini-2.5-flash`) — also supports optional multimodal upload through the Gemini Files API (off by default).
+- **OpenAI:** `https://api.openai.com/v1` (`gpt-4o-mini`).
+- **Custom OpenAI-Compatible:** Enter any HTTPS `/v1` base URL (HTTP allowed for `localhost`), display name, and model ID (either discovered via **Load models** or entered manually).
+
+API keys are never written to `settings.json`; they are stored exclusively in **macOS Keychain** or **Windows Credential Manager** and redacted from all logs and diagnostics. Optional comma-separated fallback model IDs and **Retry AI Analysis** let you recover failed AI analysis without re-downloading or re-transcribing the video.
+
+---
+
+## Local Data Directories
+
+By default, application data is stored in the platform user data directory:
+
+- **macOS:** `~/Library/Application Support/AutoClip Studio/`
+- **Windows:** `%LOCALAPPDATA%\AutoClip\AutoClip Studio\`
+
+Contents:
+- `autoclip.db` — SQLite database for projects, download recovery state, and generated clips
+- `settings.json` — Non-secret versioned user preferences (schema v2)
+- `cache/` — Cached downloads, persistent partial download workspaces, metadata/subtitle caches, transcripts, and model weights (override model cache via `HF_HUB_CACHE`)
+- `logs/autoclip.log` — Rotating application, downloader, and media diagnostics
+- `output/` — Exported project folders, MP4 clips, thumbnails, and `project.json` manifests
+
+Set `AUTOCLIP_DATA_DIR` before launch to use a custom data root, or configure a custom export folder under **Settings → General**.
+
+---
+
+## Repository Layout
 
 | Location | Contents |
 | --- | --- |
-| [autoclip_studio/](autoclip_studio/) | Application logic, media pipeline, providers, and Windows process management |
-| [autoclip_studio/ui/](autoclip_studio/ui/) | PySide6 views, progress panels, and shared stylesheet |
-| [scripts/](scripts/) | Python dependency checks, setup, and bootstrap pins |
-| [packaging/](packaging/) | Native launcher source, Python build script, installer, PyInstaller spec, and icon generator |
-| [tests/](tests/) | Unit tests and media smoke tests |
+| [autoclip_studio/](autoclip_studio/) | Core pipeline, `auto_director.py`, `smart_reframe.py`, `download_state.py`, `media.py`, `transcription.py`, `performance.py`, `providers.py`, `database.py`, `config.py` |
+| [autoclip_studio/ui/](autoclip_studio/ui/) | PySide6 views, `sidebar.py`, `theme.py`, `components.py`, `icons.py`, `queue_workspace.py`, `clips_workspace.py`, `dependency_view.py`, `performance_view.py`, `speech_view.py` |
+| [autoclip_studio/assets/](autoclip_studio/assets/) | Official AutoClip Studio logos, app icons, bundled Poppins fonts (`OFL.txt`), and SVG UI assets |
+| [scripts/](scripts/) | Dependency verification, setup, and bootstrap helpers |
+| [packaging/](packaging/) | Native Windows launcher, macOS/Windows build scripts, PyInstaller spec, and installer |
+| [tests/](tests/) | Unit, UI, audio playback, download recovery, Auto Director, and integration smoke tests |
 | [docs/](docs/) | Audits, benchmarks, and third-party notices |
 
-The source launcher is in the repository root. Local tools and generated builds go in `tools/`, `build/`, `dist/`, and `release/`. Git ignores these directories.
+---
 
-## Development and validation
+## Development & Validation
 
-Run the Python build script from a Windows x64 checkout. Its default output is the small source launcher. Rebuild it when changing the C# launcher or its icon. The optional OneDir build includes its own runtime, Qt plugins, FFmpeg, ffprobe, yt-dlp, and Deno.
+### macOS (Apple Silicon)
 
-Fresh setups install the SHA-256-verified FFmpeg 9.1 Windows Essentials archive. The source checkout uses the Python yt-dlp version in `requirements.txt` when there is no project-local yt-dlp executable. OneDir uses the version pinned alongside Deno in `packaging/build.py`.
+```zsh
+# Full unit & UI regression suite
+AUTOCLIP_DATA_DIR=/tmp/autoclip-test-data .venv/bin/python3 -m pytest -q
 
-Installer compilation requires Inno Setup 6 or 7. Use `--iscc "C:\path\to\ISCC.exe"` to specify its compiler. The executable and installer are unsigned.
+# Native Cocoa audio playback & floating sidebar verification
+AUTOCLIP_DATA_DIR=/tmp/autoclip-test-cocoa .venv/bin/python3 -m pytest -v tests/test_player_audio.py tests/test_floating_sidebar_navigation.py
+
+# End-to-end FFmpeg + Auto Director + VideoToolbox render smoke test
+AUTOCLIP_DATA_DIR=/tmp/autoclip-smoke-data .venv/bin/python3 -m tests.integration_smoke
+```
+
+### Windows (PowerShell)
 
 ```powershell
+.\.venv\Scripts\python.exe -m pytest
+.\.venv\Scripts\python.exe -m tests.integration_smoke
 .\.venv\Scripts\python.exe packaging/build.py
 .\.venv\Scripts\python.exe packaging/build.py --standalone
 .\.venv\Scripts\python.exe packaging/build.py --installer
-.\.venv\Scripts\python.exe -m pytest
-.\.venv\Scripts\python.exe -m tests.integration_smoke
 ```
 
-The render smoke test creates a synthetic audio/video fixture, burns in captions, and validates the resulting MP4. The full pipeline smoke test also accepts a local speech video. See the [optimization audit and validation results](docs/optimization-plan.md).
+Installer compilation on Windows requires Inno Setup 6 or 7 (`--iscc "C:\path\to\ISCC.exe"`).
 
-## Known limitations
+---
 
-- Provider connections and Gemini multimodal upload require the user's own credentials and therefore were implemented but not live-tested in this keyless development environment.
-- Haar-cascade tracking favors the largest frontal face. Profiles, rapid cuts, screen recordings, and multi-speaker compositions may work better with face tracking disabled or with manual editing after export.
-- The first transcription with a given Whisper model downloads model weights. `small` is the balanced default; `tiny`/`base` use less RAM, while `medium` and `large-v3` need significantly more memory.
-- YouTube availability depends on yt-dlp and YouTube behavior. DRM-protected, private, age-restricted, or region-blocked sources may require user-provided access/cookies, which this GUI does not currently expose.
-- The app generates clips and metadata but does not include a timeline editor or social-network uploader.
+## Known Limitations
 
-## Reference audit and licensing
+- **YouTube access & bot checks:** Private, members-only, DRM-protected, or verification-gated videos cannot be downloaded automatically; AutoClip Studio suspends requests on bot checks rather than attempting to bypass YouTube restrictions.
+- **Visual-only speaker detection:** Without optional YuNet ONNX weights, OpenCV Haar detection can briefly lose extreme profiles or heavily downward-tilted faces (mitigated by Auto Director shot lookahead and dropout backfill). Simultaneous cross-talk relies on visual lip-motion + VAD rather than neural audio diarization.
+- **First-run Whisper downloads:** Initial transcription with a new Whisper model downloads model weights (`small` is the balanced default; `medium` and `large-v3` require more memory).
+- **Scope:** AutoClip Studio focuses on local clip generation, previewing, and export; it does not include a multi-track NLE timeline editor or direct social-media uploading.
 
-The accessible `Anil-matcha/AI-Youtube-Shorts-Generator` repository is MIT-licensed. Its patterns for transcript caching, chunk overlap, score-based deduplication, and local face-aware crop were reviewed and independently implemented here. The OpenShorts repository and Rayneth article endpoint were unavailable during the November 25, 2026 audit. [Third-party notices and dependency licenses](docs/THIRD_PARTY_NOTICES.md)
+---
+
+## Reference Audit & Licensing
+
+See [docs/THIRD_PARTY_NOTICES.md](docs/THIRD_PARTY_NOTICES.md) for third-party dependency licenses and [autoclip_studio/assets/fonts/poppins/OFL.txt](autoclip_studio/assets/fonts/poppins/OFL.txt) for the bundled Poppins SIL Open Font License.
