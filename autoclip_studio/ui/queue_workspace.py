@@ -28,20 +28,40 @@ QUEUE_STATUS_META: dict[str, tuple[str, str, str, str]] = {
     "queued": ("Queued", "#F5A623", "rgba(245, 166, 35, 0.14)", "#FFD07D"),
     "completed": ("Completed", "#2ECC71", "rgba(46, 204, 113, 0.14)", "#7BE3A6"),
     "failed": ("Failed", "#FF6B7A", "rgba(255, 107, 122, 0.14)", "#FF9EA8"),
-    "analysis_failed": ("AI Failed", "#FF6B7A", "rgba(255, 107, 122, 0.14)", "#FF9EA8"),
+    "analysis_failed": ("Failed", "#FF6B7A", "rgba(255, 107, 122, 0.14)", "#FF9EA8"),
     "cancelled": ("Cancelled", "#A3A8B5", "rgba(163, 168, 181, 0.12)", "#BFC4D0"),
 }
 
-STAGE_STATE_COLORS: dict[str, tuple[str, str, str]] = {
-    # state -> (accent, text_color, bg_color)
-    "completed": ("#2ECC71", "#8CE8B2", "rgba(46, 204, 113, 0.12)"),
-    "running": ("#E53935", "#FFB0AA", "rgba(229, 57, 53, 0.16)"),
-    "waiting": ("#F5A623", "#FFD07D", "rgba(245, 166, 35, 0.14)"),
-    "failed": ("#FF6B7A", "#FFA6AF", "rgba(255, 107, 122, 0.14)"),
-    "cancelled": ("#A3A8B5", "#B8BECB", "rgba(163, 168, 181, 0.10)"),
-    "skipped": ("#6E7485", "#9AA0AF", "rgba(110, 116, 133, 0.10)"),
-    "pending": ("#4A4F5E", "#8B91A1", "#14161D"),
-}
+
+def _status_chip_style(status: str) -> tuple[str, str]:
+    """Return (label, tone) for semantic QSS statusChip styling in Light and Dark themes."""
+    mapping = {
+        "processing": ("Processing", "info"),
+        "queued": ("Queued", "warning"),
+        "completed": ("Completed", "success"),
+        "failed": ("Failed", "danger"),
+        "analysis_failed": ("Failed", "danger"),
+        "cancelled": ("Cancelled", ""),
+    }
+    return mapping.get(status, ("Queued", ""))
+
+
+def _stage_palette(state: str) -> tuple[str, str, str, str]:
+    """Return theme-aware (dot_accent, sub_fg, chip_bg, border_color) for PipelineStepperWidget."""
+    t = theme_manager().tokens
+    if state == "completed":
+        return (t["semantic_success"], t["semantic_success"], t["semantic_success_bg"], t["border_subtle"])
+    if state == "running":
+        return (t["brand_primary"], t["brand_accent"], t["brand_tint"], t["brand_primary"])
+    if state == "waiting":
+        return (t["semantic_warning"], t["semantic_warning"], t["semantic_warning_bg"], t["semantic_warning"])
+    if state == "failed":
+        return (t["semantic_danger_fg"], t["semantic_danger_fg"], t["semantic_danger_bg"], t["semantic_danger_border"])
+    if state == "cancelled":
+        return (t["text_secondary"], t["text_secondary"], t["bg_elevated"], t["border_subtle"])
+    if state == "skipped":
+        return (t["text_disabled"], t["text_disabled"], t["bg_alt_row"], t["border_subtle"])
+    return (t["text_disabled"], t["text_secondary"], t["bg_elevated"], t["border_subtle"])
 
 
 def parse_project_options(project: dict[str, Any] | None) -> dict[str, Any]:
@@ -289,13 +309,14 @@ class _SourceThumbnail(QWidget):
         self.update()
 
     def paintEvent(self, _event) -> None:
+        t = theme_manager().tokens
         painter = QPainter(self)
         painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
         bounds = QRectF(self.rect())
         clip = QPainterPath()
         clip.addRoundedRect(bounds, 8, 8)
         painter.setClipPath(clip)
-        painter.fillRect(bounds, QColor("#14161D"))
+        painter.fillRect(bounds, QColor(t["bg_elevated"]))
         if not self._image.isNull():
             scaled = self._image.scaled(
                 int(bounds.width()), int(bounds.height()),
@@ -307,7 +328,7 @@ class _SourceThumbnail(QWidget):
             painter.drawImage(bounds, scaled, QRectF(sx, sy, bounds.width(), bounds.height()))
         else:
             icon_name = "globe" if self._is_youtube else "film"
-            icon_color = "#E53935" if self._is_youtube else "#A3A8B5"
+            icon_color = t["brand_primary"] if self._is_youtube else t["text_secondary"]
             pixmap = lucide_icon(icon_name, icon_color, max(18, self.width() // 2)).pixmap(
                 max(18, self.width() // 2), max(18, self.width() // 2),
             )
@@ -315,7 +336,7 @@ class _SourceThumbnail(QWidget):
             py = (bounds.height() - pixmap.deviceIndependentSize().height()) / 2.0
             painter.drawPixmap(int(px), int(py), pixmap)
         painter.setClipping(False)
-        painter.setPen(QColor("#2B2E38"))
+        painter.setPen(QColor(t["border_subtle"]))
         painter.drawRoundedRect(bounds.adjusted(0.5, 0.5, -0.5, -0.5), 8, 8)
 
 
@@ -329,8 +350,8 @@ class QueueOverviewBar(QFrame):
         self.setObjectName("card")
         self._paused = False
         root = QVBoxLayout(self)
-        root.setContentsMargins(14, 12, 14, 12)
-        root.setSpacing(10)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
 
         cards_grid = QGridLayout()
         cards_grid.setContentsMargins(0, 0, 0, 0)
@@ -347,8 +368,9 @@ class QueueOverviewBar(QFrame):
         for col, (key, label_text, dot_color) in enumerate(specs):
             tile = QFrame(objectName="summaryPill")
             tile.setMinimumWidth(0)
+            tile.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             tile_lay = QVBoxLayout(tile)
-            tile_lay.setContentsMargins(12, 8, 12, 8)
+            tile_lay.setContentsMargins(10, 6, 10, 6)
             tile_lay.setSpacing(2)
 
             head = QHBoxLayout()
@@ -358,10 +380,12 @@ class QueueOverviewBar(QFrame):
             dot.setFixedSize(7, 7)
             dot.setStyleSheet(f"background-color: {dot_color}; border: none; border-radius: 3px;")
             lbl = QLabel(label_text, objectName="muted")
+            lbl.setMinimumWidth(0)
             head.addWidget(dot)
             head.addWidget(lbl, 1)
 
             val = QLabel("0", objectName="summaryValue")
+            val.setMinimumWidth(0)
             self._counters[key] = val
             self._tiles.append((tile, lbl, val))
 
@@ -402,12 +426,13 @@ class QueueOverviewBar(QFrame):
         self._sync_pause_button()
 
     def _sync_pause_button(self) -> None:
+        fg = theme_manager().tokens["text_primary"]
         if self._paused:
             self.pause_queue_button.setText("Resume Queue")
-            self.pause_queue_button.setIcon(lucide_icon("play", "#F5F5F7", 14))
+            self.pause_queue_button.setIcon(lucide_icon("play", fg, 14))
         else:
             self.pause_queue_button.setText("Pause Queue")
-            self.pause_queue_button.setIcon(lucide_icon("pause", "#F5F5F7", 14))
+            self.pause_queue_button.setIcon(lucide_icon("pause", fg, 14))
 
     def update_summary(
         self,
@@ -450,61 +475,72 @@ class QueueOverviewBar(QFrame):
 
 
 class PipelineStepperWidget(QFrame):
-    """Horizontal 6-stage media processing pipeline stepper."""
+    """Horizontal 6-stage theme-aware media processing pipeline stepper."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setStyleSheet(
-            "QFrame { background-color: #14161D; border: 1px solid #262933; border-radius: 8px; }"
-        )
+        self._last_stages: list[dict[str, str]] = []
         grid = QGridLayout(self)
-        grid.setContentsMargins(10, 8, 10, 8)
+        grid.setContentsMargins(8, 6, 8, 6)
         grid.setSpacing(6)
         self._chips: list[tuple[QFrame, QFrame, QLabel, QLabel]] = []
         for idx in range(6):
             chip = QFrame()
             chip.setMinimumWidth(0)
+            chip.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             chip_lay = QVBoxLayout(chip)
-            chip_lay.setContentsMargins(8, 6, 8, 6)
+            chip_lay.setContentsMargins(6, 5, 6, 5)
             chip_lay.setSpacing(2)
 
             top = QHBoxLayout()
             top.setContentsMargins(0, 0, 0, 0)
-            top.setSpacing(5)
+            top.setSpacing(4)
             dot = QFrame()
             dot.setFixedSize(7, 7)
             title = QLabel("Stage")
             title.setMinimumWidth(0)
+            title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             title.setWordWrap(True)
-            title.setStyleSheet("font-size: 11px; font-weight: 600; color: #F5F5F7; border: none; background: transparent;")
             top.addWidget(dot, 0, Qt.AlignmentFlag.AlignTop)
             top.addWidget(title, 1)
 
             sub = QLabel("Pending")
             sub.setMinimumWidth(0)
-            sub.setStyleSheet("font-size: 10px; color: #8B91A1; border: none; background: transparent;")
+            sub.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
             chip_lay.addLayout(top)
             chip_lay.addWidget(sub)
             grid.addWidget(chip, 0, idx)
             grid.setColumnStretch(idx, 1)
             self._chips.append((chip, dot, title, sub))
+        self.apply_theme()
+
+    def apply_theme(self, _resolved: str = "") -> None:
+        t = theme_manager().tokens
+        self.setStyleSheet(
+            f"PipelineStepperWidget {{ background-color: {t['bg_alt_row']}; "
+            f"border: 1px solid {t['border_subtle']}; border-radius: 10px; }}"
+        )
+        if self._last_stages:
+            self.set_stages(self._last_stages)
 
     def set_stages(self, stages: list[dict[str, str]]) -> None:
+        self._last_stages = list(stages)
+        t = theme_manager().tokens
         for idx, (chip, dot, title, sub) in enumerate(self._chips):
             if idx >= len(stages):
                 continue
             item = stages[idx]
             state = item.get("state", "pending")
-            accent, fg, bg = STAGE_STATE_COLORS.get(state, STAGE_STATE_COLORS["pending"])
-            border_color = accent if state in ("running", "waiting", "failed") else "#262933"
+            accent, fg, bg, border_color = _stage_palette(state)
             chip.setStyleSheet(
-                f"QFrame {{ background-color: {bg}; border: 1px solid {border_color}; border-radius: 7px; }}"
+                f"QFrame {{ background-color: {bg}; border: 1px solid {border_color}; border-radius: 8px; }}"
             )
             dot.setStyleSheet(f"background-color: {accent}; border: none; border-radius: 3px;")
             title.setText(item.get("title", ""))
+            title_color = t["text_disabled"] if state == "skipped" else t["text_primary"]
             title.setStyleSheet(
-                f"font-size: 11px; font-weight: 600; color: {'#8B91A1' if state == 'skipped' else '#F5F5F7'}; "
+                f"font-size: 11px; font-weight: 600; color: {title_color}; "
                 "border: none; background: transparent;"
             )
             sub.setText(item.get("subtitle", ""))
@@ -520,10 +556,16 @@ class ActiveJobCard(QFrame):
         super().__init__(parent)
         self.setObjectName("card")
         self._started_at: float | None = None
+        self._stage_started_at: float | None = None
+        self._active_stage_eta: float | None = None
+        self._stage_has_reliable_progress: bool = False
         self._progress_value: int = 0
         self._status: str = "idle"
         self._options: dict[str, Any] = {}
         self._stage_message: str = ""
+        self._tick = QTimer(self)
+        self._tick.setInterval(1000)
+        self._tick.timeout.connect(self._refresh_timing)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 12, 14, 12)
@@ -633,9 +675,9 @@ class ActiveJobCard(QFrame):
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 2, 0, 0)
         footer.setSpacing(14)
-        self.elapsed_label = QLabel("Elapsed: 00:00")
+        self.elapsed_label = QLabel("Job elapsed: 00:00")
         self.elapsed_label.setObjectName("muted")
-        self.eta_label = QLabel("ETA: —")
+        self.eta_label = QLabel("Overall ETA: Estimating…")
         self.eta_label.setObjectName("muted")
         self.profile_label = QLabel("Profile: Auto")
         self.profile_label.setObjectName("muted")
@@ -646,16 +688,25 @@ class ActiveJobCard(QFrame):
         active_lay.addLayout(footer)
 
         self.stack.addWidget(active_widget)
+        self._set_active_page(False)
 
     def apply_theme(self, _resolved: str = "") -> None:
         t = theme_manager().tokens
         self._idle_icon.setPixmap(lucide_icon("clock", t["text_secondary"], 20).pixmap(20, 20))
         self.cancel_button.setIcon(lucide_icon("x", t["semantic_danger_fg"], 14))
-        self._set_active_page(False)
+        self.stepper.apply_theme(_resolved)
+        self.thumbnail.update()
 
-        self._tick = QTimer(self)
-        self._tick.setInterval(1000)
-        self._tick.timeout.connect(self._refresh_timing)
+    def set_stage_telemetry(self, *, eta_seconds: float | None, reliable: bool) -> None:
+        """Feed real stage-level ETA (e.g. from MLX/Faster-Whisper or yt-dlp) into overall job ETA."""
+        self._stage_has_reliable_progress = bool(reliable)
+        self._active_stage_eta = eta_seconds if (eta_seconds is not None and eta_seconds >= 0) else None
+        self._refresh_timing()
+
+    def elapsed_seconds(self) -> float | None:
+        if self._started_at is None:
+            return None
+        return max(0.0, time.monotonic() - self._started_at)
 
     def _set_active_page(self, active: bool) -> None:
         idx = 1 if active else 0
@@ -665,10 +716,17 @@ class ActiveJobCard(QFrame):
             if w is None:
                 continue
             if i == idx:
-                w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+                w.setSizePolicy(
+                    QSizePolicy.Policy.Expanding,
+                    QSizePolicy.Policy.Minimum if active else QSizePolicy.Policy.Maximum,
+                )
             else:
                 w.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self.stack.setMaximumHeight(16777215 if active else 84)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum if active else QSizePolicy.Policy.Maximum,
+        )
         self.stack.updateGeometry()
         self.updateGeometry()
 
@@ -683,6 +741,9 @@ class ActiveJobCard(QFrame):
         thumb_path: str = "",
     ) -> None:
         self._started_at = time.monotonic()
+        self._stage_started_at = self._started_at
+        self._active_stage_eta = None
+        self._stage_has_reliable_progress = False
         self._progress_value = max(0, min(100, int(initial_progress)))
         self._status = "processing"
         self._options = dict(options_dict)
@@ -747,12 +808,25 @@ class ActiveJobCard(QFrame):
 
     def _refresh_timing(self) -> None:
         if self._started_at is None:
-            self.elapsed_label.setText("Elapsed: 00:00")
-            self.eta_label.setText("ETA: —")
+            self.elapsed_label.setText("Job elapsed: 00:00")
+            self.eta_label.setText("Overall ETA: —")
             return
         elapsed = time.monotonic() - self._started_at
-        self.elapsed_label.setText(f"Elapsed: {format_elapsed(elapsed)}")
-        self.eta_label.setText(f"ETA: {estimate_eta_text(self._started_at, self._progress_value, status=self._status)}")
+        self.elapsed_label.setText(f"Job elapsed: {format_elapsed(elapsed)}")
+        # Do not fabricate misleading overall ETAs while transcription/download has no measurable progress!
+        in_speech = not self.speech_progress.isHidden()
+        in_download = not self.download_view.isHidden()
+        if (in_speech or in_download) and not self._stage_has_reliable_progress:
+            self.eta_label.setText("Overall ETA: Estimating…")
+            return
+        if in_speech and self._active_stage_eta is not None:
+            # Estimate remaining post-transcription work conservatively based on clip count
+            clip_count = max(1, int(self._options.get("clip_count") or 3))
+            post_est = 12.0 + clip_count * 12.0
+            self.eta_label.setText(f"Overall ETA: ~{format_elapsed(self._active_stage_eta + post_est)}")
+            return
+        eta = estimate_eta_text(self._started_at, self._progress_value, status=self._status)
+        self.eta_label.setText(f"Overall ETA: {eta if eta != '—' else 'Estimating…'}")
 
 
 class JobDetailsDialog(QDialog):
@@ -771,9 +845,9 @@ class JobDetailsDialog(QDialog):
         status = str(project.get("status") or "queued")
         label, _accent, _bg, _fg = QUEUE_STATUS_META.get(status, QUEUE_STATUS_META["queued"])
 
-        head = QLabel(project_display_name(project))
+        t = theme_manager().tokens
+        head = QLabel(project_display_name(project), objectName="sectionHeading")
         head.setWordWrap(True)
-        head.setStyleSheet("font-size: 16px; font-weight: 700; color: #F5F5F7;")
         layout.addWidget(head)
 
         meta = QLabel(
@@ -790,8 +864,8 @@ class JobDetailsDialog(QDialog):
             src_box = QLabel(f"Source reference: {src_detail}")
             src_box.setWordWrap(True)
             src_box.setStyleSheet(
-                "background-color: #14161D; border: 1px solid #262933; border-radius: 8px; "
-                "padding: 8px 10px; font-size: 12px; color: #D4D7E0;"
+                f"background-color: {t['bg_elevated']}; border: 1px solid {t['border_subtle']}; border-radius: 8px; "
+                f"padding: 8px 10px; font-size: 12px; color: {t['text_primary']};"
             )
             layout.addWidget(src_box)
 
@@ -804,7 +878,7 @@ class JobDetailsDialog(QDialog):
         err = redact(str(project.get("error") or "")).strip()
         if err:
             err_title = QLabel("Failure Details")
-            err_title.setStyleSheet("font-size: 12px; font-weight: 700; color: #FF9EA8;")
+            err_title.setStyleSheet(f"font-size: 12px; font-weight: 700; color: {t['semantic_danger_fg']};")
             layout.addWidget(err_title)
             err_box = QPlainTextEdit()
             err_box.setReadOnly(True)
@@ -905,8 +979,92 @@ class ErrorDetailsDialog(QDialog):
         self.accept()
 
 
+class JobCompletedDialog(QDialog):
+    """Non-disruptive completion popup celebrating finished clips with direct navigation to Generated Clips."""
+
+    view_clips_requested = Signal(str)  # project_id
+
+    def __init__(
+        self,
+        project_id: str,
+        project_title: str,
+        clip_count: int,
+        combined_duration: float,
+        processing_seconds: float | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.project_id = project_id
+        self.setWindowTitle("Clips Ready — AutoClip Studio")
+        self.setMinimumWidth(440)
+        self.setModal(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        t = theme_manager().tokens
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(22, 20, 22, 18)
+        layout.setSpacing(14)
+
+        top = QHBoxLayout()
+        top.setSpacing(12)
+        icon_badge = QLabel()
+        icon_badge.setFixedSize(44, 44)
+        icon_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_badge.setStyleSheet(
+            f"background-color: {t['semantic_success_bg']}; border: 1px solid {t['semantic_success']}; border-radius: 22px;"
+        )
+        icon_badge.setPixmap(lucide_icon("check", t["semantic_success"], 22).pixmap(22, 22))
+        top.addWidget(icon_badge, 0, Qt.AlignmentFlag.AlignTop)
+
+        head_col = QVBoxLayout()
+        head_col.setSpacing(4)
+        heading = QLabel("Your clips are ready!", objectName="sectionHeading")
+        title_lbl = QLabel(project_title or "Completed Project", objectName="cardTitle")
+        title_lbl.setWordWrap(True)
+        head_col.addWidget(heading)
+        head_col.addWidget(title_lbl)
+        top.addLayout(head_col, 1)
+        layout.addLayout(top)
+
+        stats_card = QFrame(objectName="summaryPill")
+        stats_lay = QGridLayout(stats_card)
+        stats_lay.setContentsMargins(14, 10, 14, 10)
+        stats_lay.setHorizontalSpacing(16)
+        stats_lay.setVerticalSpacing(4)
+        metrics: list[tuple[str, str]] = [
+            ("Generated clips", f"{clip_count} clip{'s' if clip_count != 1 else ''}"),
+            ("Combined duration", _format_mmss(combined_duration) or "0:00"),
+        ]
+        if processing_seconds is not None and processing_seconds >= 0.5:
+            metrics.append(("Processing time", format_elapsed(processing_seconds)))
+        for col, (lbl_text, val_text) in enumerate(metrics):
+            lbl = QLabel(lbl_text, objectName="muted")
+            val = QLabel(val_text, objectName="summaryValue")
+            stats_lay.addWidget(lbl, 0, col)
+            stats_lay.addWidget(val, 1, col)
+            stats_lay.setColumnStretch(col, 1)
+        layout.addWidget(stats_card)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(10)
+        self.stay_btn = QPushButton("Stay on Processing Queue")
+        self.stay_btn.clicked.connect(self.reject)
+        self.view_btn = QPushButton("View Generated Clips", objectName="primary")
+        self.view_btn.setDefault(True)
+        self.view_btn.setIcon(lucide_icon("film", "#FFFFFF", 15))
+        self.view_btn.clicked.connect(self._open_clips)
+        buttons.addStretch()
+        buttons.addWidget(self.stay_btn)
+        buttons.addWidget(self.view_btn)
+        layout.addLayout(buttons)
+
+    def _open_clips(self) -> None:
+        self.view_clips_requested.emit(self.project_id)
+        self.accept()
+
+
 class JobRowCard(QFrame):
-    """Single queue/history row card replacing spreadsheet table rows."""
+    """Modern SaaS queue/history card with full Light/Dark contrast, contextual CTA, and overflow menu."""
 
     clicked = Signal(str)
     action_triggered = Signal(str, str)  # action_name, project_id
@@ -926,40 +1084,47 @@ class JobRowCard(QFrame):
         self.project = project
         self.project_id = str(project["id"])
         self.setObjectName("queueRowCard")
-        self.setProperty("selected", selected)
+        self.setProperty("selected", "true" if selected else "false")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        self.setMinimumHeight(66)
+        self.setMinimumWidth(0)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
+        t = theme_manager().tokens
         status = str(project.get("status") or "queued")
         progress = int(project.get("progress") or 0)
         src_type, src_detail = project_source_info(project)
         is_yt = src_type == "YouTube"
-        label, _accent, chip_bg, chip_fg = QUEUE_STATUS_META.get(status, QUEUE_STATUS_META["queued"])
+        status_label, status_tone = _status_chip_style(status)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(12, 10, 12, 10)
-        root.setSpacing(6)
+        root.setContentsMargins(14, 11, 12, 11)
+        root.setSpacing(8)
 
         main = QHBoxLayout()
         main.setContentsMargins(0, 0, 0, 0)
-        main.setSpacing(10)
+        main.setSpacing(12)
 
-        thumb = _SourceThumbnail(42)
+        thumb = _SourceThumbnail(44)
         thumb.set_source(thumb_path, is_yt)
-        main.addWidget(thumb)
+        main.addWidget(thumb, 0, Qt.AlignmentFlag.AlignTop)
 
         info = QVBoxLayout()
         info.setSpacing(3)
         title_lbl = QLabel(project_display_name(project))
         title_lbl.setMinimumWidth(0)
-        title_lbl.setStyleSheet("font-size: 13px; font-weight: 600; color: #F5F5F7; background: transparent;")
+        title_lbl.setWordWrap(True)
+        title_lbl.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {t['text_primary']}; background: transparent;")
         title_lbl.setToolTip(src_detail or project_display_name(project))
 
         sub_parts = [src_type, project_media_summary(project), format_timestamp_short(project.get("created_at"))]
+        if status == "processing":
+            sub_parts.append(f"{progress}%")
         if clip_count:
             sub_parts.append(f"{clip_count} clip{'s' if clip_count != 1 else ''}")
-        sub_lbl = QLabel(" • ".join(p for p in sub_parts if p))
+        sub_lbl = QLabel(" • ".join(p for p in sub_parts if p), objectName="muted")
         sub_lbl.setMinimumWidth(0)
-        sub_lbl.setStyleSheet("font-size: 11px; color: #A3A8B5; background: transparent;")
+        sub_lbl.setWordWrap(True)
         info.addWidget(title_lbl)
         info.addWidget(sub_lbl)
         main.addLayout(info, 1)
@@ -968,45 +1133,62 @@ class JobRowCard(QFrame):
         right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(8)
 
-        status_pill = QLabel(label)
-        status_pill.setStyleSheet(
-            f"background-color: {chip_bg}; color: {chip_fg}; border: none; "
-            "border-radius: 6px; padding: 3px 8px; font-size: 11px; font-weight: 600;"
-        )
-        pct_lbl = QLabel(f"{progress}%")
-        pct_lbl.setStyleSheet("font-family: Consolas; font-size: 12px; font-weight: 700; color: #D4D7E0; min-width: 34px;")
-        pct_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        status_pill = QLabel(status_label, objectName="statusChip")
+        status_pill.setProperty("tone", status_tone)
+        right.addWidget(status_pill, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        menu_btn = QPushButton()
-        menu_btn.setFixedSize(28, 28)
-        menu_btn.setToolTip("Job actions")
-        menu_btn.setIcon(lucide_icon("more-horizontal", "#D4D7E0", 14))
-        menu_btn.setIconSize(QSize(14, 14))
-        menu_btn.setStyleSheet(
-            "QPushButton { background-color: transparent; border: 1px solid transparent; border-radius: 6px; padding: 0; }"
-            "QPushButton:hover { background-color: #262934; border-color: #363A46; }"
-        )
+        # Contextual primary action per job state
+        self.primary_action_btn: QPushButton | None = None
+        if status == "analysis_failed":
+            btn = QPushButton("Retry AI Analysis", objectName="primary")
+            btn.clicked.connect(lambda: self.action_triggered.emit("retry_analysis", self.project_id))
+            self.primary_action_btn = btn
+        elif status == "failed":
+            btn = QPushButton("Retry Failed Stage")
+            btn.clicked.connect(lambda: self.action_triggered.emit("retry_failed", self.project_id))
+            self.primary_action_btn = btn
+        elif status == "processing":
+            btn = QPushButton("Cancel Job", objectName="danger")
+            btn.clicked.connect(lambda: self.action_triggered.emit("cancel_active", self.project_id))
+            self.primary_action_btn = btn
+        elif status == "completed":
+            btn = QPushButton("View Generated Clips")
+            btn.clicked.connect(lambda: self.action_triggered.emit("view_clips", self.project_id))
+            self.primary_action_btn = btn
+        elif status == "queued":
+            btn = QPushButton("Cancel")
+            btn.clicked.connect(lambda: self.action_triggered.emit("cancel_queued", self.project_id))
+            self.primary_action_btn = btn
+
+        if self.primary_action_btn is not None:
+            right.addWidget(self.primary_action_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        menu_btn = QPushButton(objectName="iconButton")
+        menu_btn.setFixedSize(30, 30)
+        menu_btn.setToolTip("More job actions")
+        menu_btn.setAccessibleName("More job actions")
+        menu_btn.setIcon(lucide_icon("more-horizontal", t["text_secondary"], 15))
+        menu_btn.setIconSize(QSize(15, 15))
         menu_btn.clicked.connect(
             lambda: self._open_context_menu(menu_btn, status, clip_count, can_move_up, can_move_down)
         )
+        right.addWidget(menu_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        right.addWidget(status_pill)
-        right.addWidget(pct_lbl)
-        right.addWidget(menu_btn)
         main.addLayout(right)
         root.addLayout(main)
 
         err_full = redact(str(project.get("error") or "")).strip()
         if err_full:
             err_summary = err_full.splitlines()[0]
-            if len(err_summary) > 96:
-                err_summary = err_summary[:93] + "..."
+            if len(err_summary) > 110:
+                err_summary = err_summary[:107] + "…"
             err_bar = QHBoxLayout()
-            err_bar.setContentsMargins(52, 0, 0, 0)
+            err_bar.setContentsMargins(56, 0, 0, 0)
             err_bar.setSpacing(8)
             err_lbl = QLabel(err_summary)
             err_lbl.setMinimumWidth(0)
-            err_lbl.setStyleSheet("font-size: 11px; color: #FF9EA8; background: transparent;")
+            err_lbl.setWordWrap(True)
+            err_lbl.setStyleSheet(f"font-size: 12px; color: {t['semantic_danger_fg']}; background: transparent;")
             err_bar.addWidget(err_lbl, 1)
 
             self.details_box = QLabel(err_full)
@@ -1014,17 +1196,22 @@ class JobRowCard(QFrame):
             self.details_box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             self.details_box.setVisible(False)
             self.details_box.setStyleSheet(
-                "background-color: #14161D; border: 1px solid #2B2E38; border-radius: 6px; "
-                "padding: 8px; margin-left: 52px; font-family: Consolas; font-size: 11px; color: #FFD2D7;"
+                f"background-color: {t['bg_elevated']}; border: 1px solid {t['semantic_danger_border']}; "
+                f"border-radius: 8px; padding: 8px 10px; margin-left: 56px; font-size: 11px; color: {t['text_primary']};"
             )
+
+            copy_err_btn = QPushButton("Copy", objectName="ghost")
+            copy_err_btn.setFlat(True)
+            copy_err_btn.setStyleSheet(f"QPushButton {{ color: {t['text_secondary']}; font-size: 11px; padding: 2px 6px; }}")
+            copy_err_btn.clicked.connect(lambda _c=False, txt=err_full: QApplication.clipboard().setText(txt))
 
             self.toggle_err_btn = QPushButton("Show details")
             self.toggle_err_btn.setFlat(True)
             self.toggle_err_btn.setStyleSheet(
-                "QPushButton { color: #FF5A4F; font-size: 11px; font-weight: 600; border: none; padding: 2px 4px; }"
-                "QPushButton:hover { color: #FF8A80; }"
+                f"QPushButton {{ color: {t['brand_accent']}; font-size: 11px; font-weight: 600; border: none; padding: 2px 6px; }}"
             )
             self.toggle_err_btn.clicked.connect(self._toggle_error_details)
+            err_bar.addWidget(copy_err_btn)
             err_bar.addWidget(self.toggle_err_btn)
             root.addLayout(err_bar)
             root.addWidget(self.details_box)
@@ -1042,43 +1229,49 @@ class JobRowCard(QFrame):
         can_move_up: bool,
         can_move_down: bool,
     ) -> None:
+        t = theme_manager().tokens
+        fg = t["text_primary"]
+        danger = t["semantic_danger_fg"]
         menu = QMenu(self)
-        act_details = menu.addAction(lucide_icon("external-link", "#D4D7E0", 14), "View Details")
+        act_details = menu.addAction(lucide_icon("external-link", fg, 14), "View Details")
         act_details.triggered.connect(lambda: self.action_triggered.emit("view_details", self.project_id))
 
-        act_folder = menu.addAction(lucide_icon("folder-open", "#D4D7E0", 14), "Open Project Folder")
+        act_folder = menu.addAction(lucide_icon("folder-open", fg, 14), "Open Project Folder")
         act_folder.triggered.connect(lambda: self.action_triggered.emit("open_folder", self.project_id))
 
         if clip_count > 0 or status == "completed":
-            act_clips = menu.addAction(lucide_icon("film", "#D4D7E0", 14), "View Generated Clips")
+            act_clips = menu.addAction(lucide_icon("film", fg, 14), "View Generated Clips")
             act_clips.triggered.connect(lambda: self.action_triggered.emit("view_clips", self.project_id))
 
         menu.addSeparator()
-        if status == "queued":
+        if status == "processing":
+            act_cancel_active = menu.addAction(lucide_icon("x", danger, 14), "Cancel Job")
+            act_cancel_active.triggered.connect(lambda: self.action_triggered.emit("cancel_active", self.project_id))
+        elif status == "queued":
             if can_move_up:
-                act_up = menu.addAction(lucide_icon("arrow-up", "#D4D7E0", 14), "Move Up")
+                act_up = menu.addAction(lucide_icon("arrow-up", fg, 14), "Move Up in Queue")
                 act_up.triggered.connect(lambda: self.action_triggered.emit("move_up", self.project_id))
             if can_move_down:
-                act_down = menu.addAction(lucide_icon("arrow-down", "#D4D7E0", 14), "Move Down")
+                act_down = menu.addAction(lucide_icon("arrow-down", fg, 14), "Move Down in Queue")
                 act_down.triggered.connect(lambda: self.action_triggered.emit("move_down", self.project_id))
-            act_cancel_q = menu.addAction(lucide_icon("x", "#FF9EA8", 14), "Cancel Queued Job")
+            act_cancel_q = menu.addAction(lucide_icon("x", danger, 14), "Cancel Queued Job")
             act_cancel_q.triggered.connect(lambda: self.action_triggered.emit("cancel_queued", self.project_id))
         elif status == "analysis_failed":
-            act_retry_ai = menu.addAction(lucide_icon("refresh-cw", "#FF8A80", 14), "Retry AI Analysis")
+            act_retry_ai = menu.addAction(lucide_icon("refresh-cw", t["brand_accent"], 14), "Retry AI Analysis")
             act_retry_ai.triggered.connect(lambda: self.action_triggered.emit("retry_analysis", self.project_id))
         elif status in ("failed", "cancelled"):
-            act_retry_stage = menu.addAction(lucide_icon("refresh-cw", "#D4D7E0", 14), "Retry Failed Stage")
+            act_retry_stage = menu.addAction(lucide_icon("refresh-cw", fg, 14), "Retry Failed Stage")
             act_retry_stage.triggered.connect(lambda: self.action_triggered.emit("retry_failed", self.project_id))
 
         if status != "processing":
             menu.addSeparator()
-            act_remove = menu.addAction(lucide_icon("trash-2", "#FF9EA8", 14), "Remove from History")
+            act_remove = menu.addAction(lucide_icon("trash-2", danger, 14), "Remove from History")
             act_remove.triggered.connect(lambda: self.action_triggered.emit("remove_history", self.project_id))
 
-        menu.exec(anchor.mapToGlobal(anchor.rect().bottomRight()))
+        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
     def set_selected(self, selected: bool) -> None:
-        self.setProperty("selected", selected)
+        self.setProperty("selected", "true" if selected else "false")
         self.style().unpolish(self)
         self.style().polish(self)
         self.update()
@@ -1098,6 +1291,9 @@ class JobQueuePanel(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("card")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMinimumHeight(170)
+        self.setMinimumWidth(0)
         self._projects: list[dict[str, Any]] = []
         self._clips: list[dict[str, Any]] = []
         self._visible_projects: list[dict[str, Any]] = []
@@ -1106,23 +1302,24 @@ class JobQueuePanel(QFrame):
         self._filter_key = "all"
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(14, 12, 14, 12)
-        root.setSpacing(10)
+        root.setContentsMargins(12, 10, 12, 10)
+        root.setSpacing(8)
 
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(8)
         title = QLabel("Job Queue & History", objectName="sectionTitle")
         header.addWidget(title, 1)
+        # Contextual retry buttons live on each failed card; keep hidden alias for backward compatibility.
         self.retry_analysis_button = QPushButton("Retry AI Analysis")
         self.retry_analysis_button.setEnabled(False)
-        header.addWidget(self.retry_analysis_button)
+        self.retry_analysis_button.hide()
         root.addLayout(header)
 
         # Filter tabs row
         tabs_row = QHBoxLayout()
         tabs_row.setContentsMargins(0, 0, 0, 0)
-        tabs_row.setSpacing(6)
+        tabs_row.setSpacing(4)
         self._tab_group = QButtonGroup(self)
         self._tab_group.setExclusive(True)
         for key, label in (
@@ -1136,6 +1333,8 @@ class JobQueuePanel(QFrame):
             btn = QPushButton(label, objectName="filterTab")
             btn.setCheckable(True)
             btn.setChecked(key == "all")
+            btn.setMinimumWidth(0)
+            btn.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
             btn.clicked.connect(lambda _checked, k=key: self._set_filter(k))
             self._tab_group.addButton(btn)
             tabs_row.addWidget(btn)
@@ -1149,10 +1348,12 @@ class JobQueuePanel(QFrame):
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search jobs by title, source, or status...")
         self.search_input.setClearButtonEnabled(True)
+        self.search_input.setMinimumWidth(0)
         self.search_input.textChanged.connect(self._rebuild_rows)
 
         self.sort_combo = QComboBox()
-        self.sort_combo.addItems(["Queue Order", "Newest First", "Oldest First", "Progress", "Name"])
+        self.sort_combo.addItems(["Recent Activity", "Queue Order", "Newest First", "Oldest First", "Progress", "Name"])
+        self.sort_combo.setMinimumWidth(130)
         self.sort_combo.currentIndexChanged.connect(self._rebuild_rows)
         toolbar.addWidget(self.search_input, 1)
         toolbar.addWidget(self.sort_combo)
@@ -1162,7 +1363,9 @@ class JobQueuePanel(QFrame):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll.setMinimumHeight(96)
         self.list_container = QWidget()
+        self.list_container.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
         self.list_layout = QVBoxLayout(self.list_container)
         self.list_layout.setContentsMargins(0, 0, 2, 0)
         self.list_layout.setSpacing(8)
@@ -1201,8 +1404,34 @@ class JobQueuePanel(QFrame):
             items.append(row)
 
         mode = self.sort_combo.currentText()
-        if mode == "Queue Order":
-            rank = {"processing": 0, "queued": 1, "analysis_failed": 2, "failed": 3, "cancelled": 4, "completed": 5}
+        if mode == "Recent Activity":
+            # Active processing first -> queued (in execution order) -> completed/failed/cancelled by newest timestamp!
+            def _recent_key(r: dict[str, Any]) -> tuple:
+                st = str(r.get("status") or "")
+                ts = str(r.get("updated_at") or r.get("created_at") or "")
+                if st == "processing":
+                    return (0, 0, "")
+                if st == "queued":
+                    return (1, int(r.get("queue_order") or 0), ts)
+                # Newly completed jobs appear right at the top of history, never buried below old failed jobs!
+                return (2, 0, "")
+
+            active = [r for r in items if str(r.get("status") or "") == "processing"]
+            queued = sorted(
+                (r for r in items if str(r.get("status") or "") == "queued"),
+                key=lambda r: (int(r.get("queue_order") or 0), str(r.get("created_at") or "")),
+            )
+            history = sorted(
+                (r for r in items if str(r.get("status") or "") not in ("processing", "queued")),
+                key=lambda r: (
+                    str(r.get("updated_at") or r.get("created_at") or ""),
+                    1 if str(r.get("status") or "") == "completed" else 0,
+                ),
+                reverse=True,
+            )
+            items = active + queued + history
+        elif mode == "Queue Order":
+            rank = {"processing": 0, "queued": 1, "completed": 2, "analysis_failed": 3, "failed": 4, "cancelled": 5}
             items.sort(
                 key=lambda r: (
                     rank.get(str(r.get("status") or ""), 9),
@@ -1211,7 +1440,7 @@ class JobQueuePanel(QFrame):
                 ),
             )
         elif mode == "Newest First":
-            items.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+            items.sort(key=lambda r: str(r.get("updated_at") or r.get("created_at") or ""), reverse=True)
         elif mode == "Oldest First":
             items.sort(key=lambda r: str(r.get("created_at") or ""))
         elif mode == "Progress":
@@ -1220,11 +1449,16 @@ class JobQueuePanel(QFrame):
             items.sort(key=lambda r: project_display_name(r).lower())
         return items
 
+    def apply_theme(self, _resolved: str = "") -> None:
+        self._rebuild_rows()
+
     def _rebuild_rows(self) -> None:
         while self.list_layout.count() > 0:
             item = self.list_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()
+                widget.setParent(None)
                 widget.deleteLater()
         self._cards.clear()
 
@@ -1273,6 +1507,8 @@ class JobQueuePanel(QFrame):
             self._cards[pid] = card
             self.list_layout.addWidget(card)
         self.list_layout.addStretch()
+        self.list_container.adjustSize()
+        self.list_container.updateGeometry()
         self.selection_changed.emit()
 
     def select_project(self, project_id: str | None) -> None:

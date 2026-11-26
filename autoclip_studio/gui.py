@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFileIconProvider, QFormLayout, QFrame, QGridLayout,
     QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
     QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
-    QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .captions import TEMPLATE_DEFAULT, TEMPLATES
@@ -42,8 +42,8 @@ from .ui.local_preview import LocalVideoDropZone, LocalVideoMetadata, LocalVideo
 from .ui.log_view import LogView
 from .ui.performance_view import PerformanceView
 from .ui.queue_workspace import (
-    ActiveJobCard, CollapsibleLogsPanel, ErrorDetailsDialog, JobDetailsDialog, JobQueuePanel,
-    QueueOverviewBar, project_thumbnail_path,
+    ActiveJobCard, CollapsibleLogsPanel, ErrorDetailsDialog, JobCompletedDialog, JobDetailsDialog,
+    JobQueuePanel, QueueOverviewBar, project_display_name, project_thumbnail_path,
 )
 from .ui.speech_view import SpeechProgressView, SpeechSettingsView
 from .ui.style import STYLESHEET, SectionCard, configure_form_layout, configure_input, theme_manager
@@ -72,6 +72,8 @@ class MainWindow(QMainWindow):
         self.clip_rows: list[dict] | None = None
         self.queue_paused = False
         self._active_project_id: str | None = None
+        self._completed_popups_shown: set[str] = set()
+        self._active_completion_dialog: JobCompletedDialog | None = None
         self.closing = False
         self._hydrating_ui = True
         self._loading_provider_form = False
@@ -218,6 +220,8 @@ class MainWindow(QMainWindow):
             self.queue_overview.apply_theme(resolved)
         if hasattr(self, "active_job_card"):
             self.active_job_card.apply_theme(resolved)
+        if hasattr(self, "queue_panel"):
+            self.queue_panel.apply_theme(resolved)
         if hasattr(self, "logs_panel"):
             self.logs_panel.apply_theme(resolved)
         if hasattr(self, "clips_library"):
@@ -565,7 +569,8 @@ class MainWindow(QMainWindow):
         self.live_logs = self.logs_panel.live_logs
         page.addWidget(self.logs_panel)
 
-        return self._scroll_page(outer)
+        # Direct expanding layout (no outer nested QScrollArea so Job Queue & History expands to fill viewport!)
+        return outer
 
     def export_logs(self) -> None:
         filename, _ = QFileDialog.getSaveFileName(self, "Export logs", "autoclip-logs.txt", "Text files (*.txt)")
@@ -581,12 +586,13 @@ class MainWindow(QMainWindow):
 
     def _clips_page(self) -> QWidget:
         outer, page = self._page("Generated Clips", "Inspect, preview, and manage your exported shorts")
-        split = QHBoxLayout()
-        split.setSpacing(16)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(8)
         self.clips_library = ClipLibraryPanel()
         self.clips_library.clip_selected.connect(self._on_clip_selected)
         self.clips_library.export_all_requested.connect(self.export_all_clips)
-        split.addWidget(self.clips_library, 3)
+        splitter.addWidget(self.clips_library)
 
         self.clip_detail = ClipDetailPlayerPanel()
         self.player = self.clip_detail.player
@@ -597,8 +603,12 @@ class MainWindow(QMainWindow):
         self.clip_detail.export_thumb_requested.connect(self.export_selected_thumbnail)
         self.clip_detail.rename_clip_requested.connect(self.rename_selected_clip)
         self.clip_detail.delete_clip_requested.connect(self.delete_selected_clip)
-        split.addWidget(self.clip_detail, 2)
-        page.addLayout(split, 1)
+        self.clip_detail.prev_clip_requested.connect(lambda: self.clips_library.select_relative(-1))
+        self.clip_detail.next_clip_requested.connect(lambda: self.clips_library.select_relative(1))
+        splitter.addWidget(self.clip_detail)
+        splitter.setStretchFactor(0, 5)
+        splitter.setStretchFactor(1, 4)
+        page.addWidget(splitter, 1)
         return outer
 
     def _templates_page(self) -> QWidget:
@@ -1086,8 +1096,12 @@ class MainWindow(QMainWindow):
         elif action == "view_clips":
             clips = [c for c in (self.clip_rows or self.database.clips()) if str(c.get("project_id") or "") == project_id]
             self.show_page(3)
-            if clips and hasattr(self, "clips_library"):
-                self.clips_library.select_clip(str(clips[0]["id"]))
+            if hasattr(self, "clips_library"):
+                self.clips_library.filter_by_project(project_id, project_display_name(project))
+                if clips:
+                    self.clips_library.select_clip(str(clips[0]["id"]))
+        elif action == "cancel_active":
+            self.cancel_processing()
         elif action == "move_up":
             if self.database.reorder_queued_project(project_id, -1):
                 self.refresh_all()
@@ -1184,6 +1198,8 @@ class MainWindow(QMainWindow):
     def on_download_progress(self, progress: DownloadProgress) -> None:
         if not self.download_view.isHidden() and not self.pipeline.manager.cancel_event.is_set():
             self.download_view.update_transfer(progress)
+            reliable = bool(progress.total and progress.downloaded is not None and progress.eta_seconds is not None)
+            self.active_job_card.set_stage_telemetry(eta_seconds=progress.eta_seconds, reliable=reliable)
 
     @Slot(str)
     def on_download_log(self, message: str) -> None:
@@ -1193,6 +1209,10 @@ class MainWindow(QMainWindow):
     def on_speech_progress(self, progress: SpeechProgress) -> None:
         if not self.speech_progress.isHidden() and not self.pipeline.manager.cancel_event.is_set():
             self.speech_progress.update_transcription(progress)
+            self.active_job_card.set_stage_telemetry(
+                eta_seconds=progress.eta,
+                reliable=bool(progress.reliable_percentage and progress.processed is not None and progress.duration),
+            )
 
     def on_progress(self, value: int, message: str) -> None:
         if self.pipeline.manager.cancel_event.is_set():
@@ -1208,12 +1228,50 @@ class MainWindow(QMainWindow):
         self.metric_active.findChild(QLabel, "metricValue").setText(f"{value}%")
         self._refresh_queue_overview(message)
 
-    def on_completed(self, _project_id: str, count: int) -> None:
+    def on_completed(self, project_id: str, count: int) -> None:
+        elapsed_s = self.active_job_card.elapsed_seconds()
         self.show_download(False)
         self.show_speech(False)
         self.active_job_card.mark_finished("completed", f"Completed {count} clips")
         self._log("SUCCESS", "All outputs passed MP4 validation.")
         self.refresh_all()
+        self._show_job_completed_popup(project_id, count, elapsed_s)
+
+    def _show_job_completed_popup(self, project_id: str, count: int, elapsed_seconds: float | None) -> None:
+        if self.closing or count <= 0 or not project_id or project_id in self._completed_popups_shown:
+            return
+        self._completed_popups_shown.add(project_id)
+        projects = self.project_rows or self.database.projects()
+        project = next((p for p in projects if str(p["id"]) == str(project_id)), None)
+        clips = [c for c in (self.clip_rows or self.database.clips()) if str(c.get("project_id") or "") == str(project_id)]
+        combined_duration = sum(float(c.get("duration") or 0.0) for c in clips)
+        title = project_display_name(project) if project else "Completed Project"
+
+        if self._active_completion_dialog is not None:
+            try:
+                self._active_completion_dialog.close()
+            except RuntimeError:
+                pass
+            self._active_completion_dialog = None
+
+        dlg = JobCompletedDialog(
+            str(project_id), title, len(clips) or count, combined_duration, elapsed_seconds, self,
+        )
+        dlg.view_clips_requested.connect(self._navigate_to_project_clips)
+        dlg.destroyed.connect(lambda: setattr(self, "_active_completion_dialog", None))
+        self._active_completion_dialog = dlg
+        dlg.show()
+        dlg.raise_()
+
+    def _navigate_to_project_clips(self, project_id: str) -> None:
+        projects = self.project_rows or self.database.projects()
+        project = next((p for p in projects if str(p["id"]) == str(project_id)), None)
+        clips = [c for c in (self.clip_rows or self.database.clips()) if str(c.get("project_id") or "") == str(project_id)]
+        self.show_page(3)
+        if hasattr(self, "clips_library"):
+            self.clips_library.filter_by_project(str(project_id), project_display_name(project) if project else "")
+            if clips:
+                self.clips_library.select_clip(str(clips[0]["id"]))
 
     def on_failed(self, project_id: str, message: str) -> None:
         self.show_download(False)

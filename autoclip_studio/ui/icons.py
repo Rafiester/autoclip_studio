@@ -77,6 +77,16 @@ def lucide_icon(name: str, color: str = "#F5F5F7", size: int = 16) -> QIcon:
             p = QPainterPath()
             p.moveTo(*pts[0]); p.lineTo(*pts[1]); p.lineTo(*pts[2])
             painter.drawPath(p)
+    elif name == "minimize":
+        for pts in (
+            ((8, 3), (8, 8), (3, 8)),
+            ((21, 8), (16, 8), (16, 3)),
+            ((16, 21), (16, 16), (21, 16)),
+            ((3, 16), (8, 16), (8, 21)),
+        ):
+            p = QPainterPath()
+            p.moveTo(*pts[0]); p.lineTo(*pts[1]); p.lineTo(*pts[2])
+            painter.drawPath(p)
     elif name == "list":
         for y in (6, 12, 18):
             painter.drawLine(QPointF(8, y), QPointF(21, y))
@@ -145,6 +155,10 @@ def lucide_icon(name: str, color: str = "#F5F5F7", size: int = 16) -> QIcon:
     elif name == "chevron-down":
         p = QPainterPath()
         p.moveTo(6, 9); p.lineTo(12, 15); p.lineTo(18, 9)
+        painter.drawPath(p)
+    elif name == "chevron-left":
+        p = QPainterPath()
+        p.moveTo(15, 6); p.lineTo(9, 12); p.lineTo(15, 18)
         painter.drawPath(p)
     elif name == "chevron-right":
         p = QPainterPath()

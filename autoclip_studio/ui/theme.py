@@ -642,7 +642,12 @@ QProgressBar::chunk {{
 }}
 QSlider::groove:horizontal {{
     height: 5px;
-    background: {t["bg_elevated"]};
+    background: {t["border_subtle"]};
+    border-radius: 2px;
+}}
+QSlider::sub-page:horizontal {{
+    height: 5px;
+    background: {t["brand_primary"]};
     border-radius: 2px;
 }}
 QSlider::handle:horizontal {{
@@ -650,7 +655,15 @@ QSlider::handle:horizontal {{
     height: 14px;
     margin: -5px 0;
     background: {t["brand_primary"]};
+    border: 2px solid {t["bg_surface"]};
     border-radius: 7px;
+}}
+QSplitter::handle {{
+    background: transparent;
+}}
+QSplitter::handle:hover {{
+    background: {t["border_subtle"]};
+    border-radius: 2px;
 }}
 
 /* Transfer & Speech progress */
@@ -869,7 +882,7 @@ QPushButton#filterTab {{
     background: transparent;
     border: 1px solid transparent;
     border-radius: 8px;
-    padding: 5px 10px;
+    padding: 4px 8px;
     color: {t["text_secondary"]};
     font-weight: 500;
 }}

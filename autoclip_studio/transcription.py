@@ -14,7 +14,9 @@ from importlib.metadata import version
 from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from time import perf_counter
-from typing import Callable
+from typing import Any, Callable
+
+import psutil
 
 from .media import probe
 from .models import Segment, Transcript, Word
@@ -75,28 +77,152 @@ class SpeechProgress:
     speed: float | None = None
     gpu: GpuInfo | None = None
     reliable_percentage: bool = False
+    rtf: float | None = None
+    inference_elapsed: float | None = None
+    apple_telemetry: dict[str, Any] | None = None
+    indeterminate: bool = False
+    backend_kind: str = "local"  # "local" | "cloud" | "subtitle"
+
+
+def sample_apple_memory_telemetry(profile_name: str = "") -> dict[str, Any] | None:
+    """Collect lightweight, rate-limited Apple Silicon unified & MLX memory telemetry (no sudo, no fabricated values)."""
+    if sys.platform != "darwin":
+        return None
+    data: dict[str, Any] = {}
+    if profile_name:
+        data["profile"] = profile_name
+    try:
+        vm = psutil.virtual_memory()
+        data["unified_used_gb"] = round(vm.used / (1024 ** 3), 2)
+        data["unified_total_gb"] = round(vm.total / (1024 ** 3), 1)
+        data["unified_percent"] = round(float(vm.percent), 1)
+    except Exception:
+        pass
+    try:
+        rss = psutil.Process().memory_info().rss
+        data["app_mib"] = round(rss / (1024 ** 2), 1)
+    except Exception:
+        pass
+    try:
+        import mlx.core as mx
+        active = getattr(mx, "get_active_memory", None) or getattr(getattr(mx, "metal", None), "get_active_memory", None)
+        peak = getattr(mx, "get_peak_memory", None) or getattr(getattr(mx, "metal", None), "get_peak_memory", None)
+        cache = getattr(mx, "get_cache_memory", None) or getattr(getattr(mx, "metal", None), "get_cache_memory", None)
+        if callable(active):
+            data["mlx_active_mib"] = round(float(active()) / (1024 ** 2), 1)
+        if callable(peak):
+            data["mlx_peak_mib"] = round(float(peak()) / (1024 ** 2), 1)
+        if callable(cache):
+            data["mlx_cache_mib"] = round(float(cache()) / (1024 ** 2), 1)
+    except Exception:
+        pass
+    try:
+        from .performance import _read_macos_thermal_state, parse_memory_pressure_output
+        thermal = _read_macos_thermal_state()
+        if thermal:
+            data["thermal_state"] = thermal
+        res = subprocess.run(
+            ["/usr/bin/memory_pressure", "-Q"],
+            capture_output=True, text=True, timeout=1.5, stdin=subprocess.DEVNULL,
+        )
+        if res.returncode == 0 and res.stdout:
+            level, _detail = parse_memory_pressure_output(res.stdout)
+            if level:
+                data["memory_pressure"] = level
+    except Exception:
+        pass
+    return data or None
+
+
+class _InferenceMetricsTracker:
+    """Shared monotonic processed-audio, EMA speed, RTF, and bounded ETA calculator."""
+
+    def __init__(self, duration: float | None = None, *, smoothing_alpha: float = 0.25) -> None:
+        self.duration: float | None = duration if (duration is not None and math.isfinite(duration) and duration > 0) else None
+        self.alpha = smoothing_alpha
+        self.inference_started: float | None = None
+        self.processed: float = 0.0
+        self.smoothed_speed: float | None = None
+
+    def start_inference(self, duration: float | None = None) -> None:
+        if duration is not None and math.isfinite(duration) and duration > 0:
+            self.duration = duration
+        self.inference_started = perf_counter()
+        self.processed = 0.0
+        self.smoothed_speed = None
+
+    def update(self, raw_processed: float) -> tuple[float, float | None, float | None, float | None, float | None]:
+        """Return (monotonic_processed, speed_x, rtf, eta_seconds, active_inference_elapsed)."""
+        now = perf_counter()
+        if self.inference_started is None:
+            self.inference_started = now
+        clamped = max(0.0, float(raw_processed))
+        if self.duration is not None:
+            clamped = min(self.duration, clamped)
+        self.processed = max(self.processed, clamped)
+        active_elapsed = max(0.0, now - self.inference_started)
+
+        speed: float | None = None
+        rtf: float | None = None
+        eta: float | None = None
+        if active_elapsed >= 0.35 and self.processed >= 0.5:
+            inst_speed = self.processed / active_elapsed
+            if math.isfinite(inst_speed) and inst_speed > 0.01:
+                if self.smoothed_speed is None:
+                    self.smoothed_speed = inst_speed
+                else:
+                    self.smoothed_speed = self.alpha * inst_speed + (1.0 - self.alpha) * self.smoothed_speed
+                speed = self.smoothed_speed
+                rtf = 1.0 / speed if speed > 0 else None
+                min_processed_for_eta = min(4.0, (self.duration * 0.05) if self.duration else 4.0)
+                if (
+                    self.duration is not None
+                    and active_elapsed >= 1.2
+                    and self.processed >= min_processed_for_eta
+                    and speed > 0.02
+                ):
+                    remaining = max(0.0, self.duration - self.processed)
+                    raw_eta = remaining / speed
+                    if math.isfinite(raw_eta) and 0.0 <= raw_eta <= 86400.0:
+                        eta = raw_eta
+        return self.processed, speed, rtf, eta, active_elapsed
 
 
 class _Reporter:
-    def __init__(self, model: str, callback: Callable[[SpeechProgress], None] | None) -> None:
+    def __init__(self, model: str, callback: Callable[[SpeechProgress], None] | None, *, profile_name: str = "") -> None:
         self.model = model
         self.callback = callback
+        self.profile_name = profile_name
         self.start = perf_counter()
         self.device = self.compute = self.engine = ""
         self.gpu = None
-        self.last_gpu_at = 0.0
+        self.apple_telemetry: dict[str, Any] | None = None
+        self.last_hw_at = 0.0
 
     def emit(self, stage: str, *, processed: float | None = None, duration: float | None = None,
-             eta: float | None = None, speed: float | None = None, reliable: bool = False) -> None:
+             eta: float | None = None, speed: float | None = None, reliable: bool = False,
+             rtf: float | None = None, inference_elapsed: float | None = None,
+             indeterminate: bool = False, backend_kind: str = "local") -> None:
         if not self.callback:
             return
         now = perf_counter()
-        if self.device == "cuda" and now - self.last_gpu_at >= 2.5:
-            self.gpu = gpu_info()
-            self.last_gpu_at = now
+        if now - self.last_hw_at >= 1.5 or self.last_hw_at == 0.0:
+            if self.device == "cuda":
+                self.gpu = gpu_info()
+            elif sys.platform == "darwin" and self.device == "mlx":
+                self.apple_telemetry = sample_apple_memory_telemetry(self.profile_name)
+            self.last_hw_at = now
+        computed_rtf = rtf if rtf is not None else ((1.0 / speed) if (speed is not None and speed > 0) else None)
         self.callback(SpeechProgress(
             stage, self.engine, self.model, self.device, self.compute, now - self.start,
-            processed, duration, eta, speed, self.gpu if self.device == "cuda" else None, reliable,
+            processed, duration, eta, speed,
+            self.gpu if self.device == "cuda" else None,
+            reliable,
+            rtf=computed_rtf,
+            inference_elapsed=inference_elapsed,
+            apple_telemetry=self.apple_telemetry if (sys.platform == "darwin" and self.device == "mlx") else None,
+            indeterminate=indeterminate,
+            backend_kind=backend_kind,
         ))
 
 
@@ -174,8 +300,9 @@ def transcribe(media_path: Path, model_name: str, device_preference: str,
                profile_limits: ProfileLimits | None = None) -> Transcript:
     settings = settings or SpeechSettings()
     language = language or settings.language or None
-    reporter = _Reporter(model_name, progress)
-    reporter.emit("Checking speech engine")
+    profile_name = profile_limits.profile if profile_limits is not None else ""
+    reporter = _Reporter(model_name, progress, profile_name=profile_name)
+    reporter.emit("Preparing audio", indeterminate=True)
     manager.check_cancelled()
     if sys.platform == "darwin" and device_preference != "cpu" and settings.engine in {"auto", "mlx"} and mlx_whisper_available():
         repo = MLX_REPOS.get(model_name, f"mlx-community/whisper-{model_name}-mlx")
@@ -187,14 +314,19 @@ def transcribe(media_path: Path, model_name: str, device_preference: str,
             cache_path = transcript_cache_path(media_path, model_name, language, identity=mlx_id) if cache else None
             if cache_path is not None and (cached := _get_cache(cache_path)):
                 log(f"Using cached MLX transcript ({len(cached.segments)} segments)")
-                reporter.emit("Using cached transcript")
+                reporter.emit("Using cached transcript", processed=cached.duration, duration=cached.duration, reliable=True)
                 return cached
             offset, audio_duration, video_duration = _audio_timing(media_path, manager)
+            total_dur = audio_duration or video_duration
+            reporter.known_duration = total_dur
             log(f"Loading MLX Whisper {model_name} on Apple Silicon ({repo})")
-            reporter.emit("Loading model", duration=audio_duration)
-            entries, detected, duration = _run_mlx_whisper(repo, media_path, language, settings, manager, reporter)
+            entries, detected, duration = _run_mlx_whisper(
+                repo, media_path, language, settings, manager, reporter,
+            )
+            reporter.emit("Finalizing timestamps", processed=duration, duration=duration, reliable=True)
             transcript = _validated_transcript(entries, detected, duration, offset, video_duration, log)
             if cache_path is not None:
+                reporter.emit("Saving transcript", processed=duration, duration=duration, reliable=True)
                 _cache(cache_path, transcript)
             reporter.emit("Transcription complete", processed=duration, duration=duration, reliable=True)
             return transcript
@@ -338,7 +470,8 @@ def _run_python(model_name: str | Path, media_path: Path, device: str, compute: 
             iterator, info = model.transcribe(str(media_path), **shared)
         duration = float(info.duration)
         results = []
-        started = perf_counter()
+        tracker = _InferenceMetricsTracker(duration)
+        tracker.start_inference(duration)
         for item in iterator:
             manager.check_cancelled()
             results.append({
@@ -346,8 +479,17 @@ def _run_python(model_name: str | Path, media_path: Path, device: str, compute: 
                 "avg_logprob": item.avg_logprob,
                 "words": [{"start": word.start, "end": word.end, "word": word.word} for word in item.words or []],
             })
-            speed = item.end / max(0.001, perf_counter() - started)
-            reporter.emit("Transcribing speech", processed=item.end, duration=duration, speed=speed)
+            processed, speed, rtf, eta, inf_elapsed = tracker.update(float(item.end))
+            reporter.emit(
+                "Transcribing audio",
+                processed=processed,
+                duration=duration,
+                eta=eta,
+                speed=speed,
+                rtf=rtf,
+                inference_elapsed=inf_elapsed,
+                reliable=True,
+            )
         return results, str(info.language), duration
     finally:
         if iterator is not None:
@@ -357,21 +499,130 @@ def _run_python(model_name: str | Path, media_path: Path, device: str, compute: 
         gc.collect()
 
 
+def _mlx_repo_is_cached(repo: str) -> bool:
+    """Check whether a Hugging Face MLX Whisper repo snapshot already exists locally."""
+    if Path(repo).is_dir():
+        return True
+    hf_home = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
+    hub_dir = Path(os.environ.get("HF_HUB_CACHE", hf_home / "hub"))
+    slug = "models--" + repo.replace("/", "--")
+    snaps = hub_dir / slug / "snapshots"
+    return snaps.is_dir() and any(snaps.iterdir())
+
+
 def _run_mlx_whisper(repo: str, media_path: Path, language: str | None, settings: SpeechSettings,
                      manager: ProcessManager, reporter: _Reporter) -> tuple[list[dict], str, float]:
+    import importlib
+    import sys
     import mlx_whisper
 
-    reporter.emit("Transcribing speech on Apple Silicon")
+    known_duration: float | None = getattr(reporter, "known_duration", None)
+    mlx_tr = sys.modules.get("mlx_whisper.transcribe")
+    if not hasattr(mlx_tr, "tqdm"):
+        mlx_tr = importlib.import_module("mlx_whisper.transcribe")
+
     manager.check_cancelled()
+    model_cached = _mlx_repo_is_cached(repo)
+    reporter.emit(
+        "Loading model" if model_cached else "Downloading model",
+        duration=known_duration,
+        indeterminate=True,
+    )
+    tracker = _InferenceMetricsTracker(known_duration)
+
+    try:
+        import mlx.core as mx
+        reset_peak = getattr(mx, "reset_peak_memory", None) or getattr(getattr(mx, "metal", None), "reset_peak_memory", None)
+        if callable(reset_peak):
+            reset_peak()
+    except Exception:
+        pass
+
+    # Instrument mlx_whisper's internal Mel-frame progress loop (pbar.update(seek - previous_seek))
+    # WITHOUT altering chunking, decoding, or accuracy.
+    hop_seconds = float(getattr(mlx_tr, "HOP_LENGTH", 160)) / float(getattr(mlx_tr, "SAMPLE_RATE", 16000))
+    last_emit_at = 0.0
+
+    class _MlxProgressProxy:
+        def __init__(self, *args: Any, total: int | None = None, **_kwargs: Any) -> None:
+            self.total_frames = int(total) if total is not None and total > 0 else 0
+            self.current_frames = 0
+            self.total_duration = (
+                self.total_frames * hop_seconds if self.total_frames > 0 else (known_duration or 0.0)
+            )
+            if known_duration and self.total_duration <= 0:
+                self.total_duration = known_duration
+
+        def __enter__(self) -> "_MlxProgressProxy":
+            manager.check_cancelled()
+            tracker.start_inference(self.total_duration or known_duration)
+            reporter.emit(
+                "Transcribing audio",
+                processed=0.0,
+                duration=tracker.duration,
+                inference_elapsed=0.0,
+                reliable=bool(tracker.duration),
+                indeterminate=not bool(tracker.duration),
+            )
+            return self
+
+        def update(self, n: int = 1) -> None:
+            nonlocal last_emit_at
+            manager.check_cancelled()
+            if n > 0:
+                self.current_frames += int(n)
+                if self.total_frames > 0:
+                    self.current_frames = min(self.total_frames, self.current_frames)
+            raw_sec = self.current_frames * hop_seconds
+            processed, speed, rtf, eta, inf_elapsed = tracker.update(raw_sec)
+            now = perf_counter()
+            done_now = self.total_frames > 0 and self.current_frames >= self.total_frames
+            if done_now or (now - last_emit_at >= 0.20):
+                last_emit_at = now
+                reporter.emit(
+                    "Transcribing audio",
+                    processed=processed,
+                    duration=tracker.duration,
+                    eta=eta,
+                    speed=speed,
+                    rtf=rtf,
+                    inference_elapsed=inf_elapsed,
+                    reliable=bool(tracker.duration),
+                )
+
+        def close(self) -> None:
+            return None
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
     try:
         kwargs: dict[str, object] = {
             "path_or_hf_repo": repo,
             "word_timestamps": settings.word_timestamps,
+            "verbose": False,
         }
         if language:
             kwargs["language"] = language
         with _MLX_INFERENCE_LOCK:
-            result = mlx_whisper.transcribe(str(media_path), **kwargs)
+            orig_tqdm = mlx_tr.tqdm.tqdm
+            orig_load_model = getattr(mlx_tr.ModelHolder, "get_model", None)
+
+            def _wrapped_get_model(*a: Any, **kw: Any) -> Any:
+                manager.check_cancelled()
+                res = orig_load_model(*a, **kw)
+                reporter.emit("Initializing inference", duration=known_duration, indeterminate=True)
+                return res
+
+            mlx_tr.tqdm.tqdm = _MlxProgressProxy
+            if callable(orig_load_model):
+                mlx_tr.ModelHolder.get_model = staticmethod(_wrapped_get_model)
+            try:
+                result = mlx_whisper.transcribe(str(media_path), **kwargs)
+            finally:
+                mlx_tr.tqdm.tqdm = orig_tqdm
+                if callable(orig_load_model):
+                    mlx_tr.ModelHolder.get_model = orig_load_model
         manager.check_cancelled()
         segments = result.get("segments") or []
         entries = []
@@ -390,7 +641,8 @@ def _run_mlx_whisper(repo: str, media_path: Path, language: str | None, settings
                     for w in (item.get("words") or [])
                 ],
             })
-        return entries, str(result.get("language") or language or "unknown"), last_end
+        final_duration = max(last_end, tracker.duration or known_duration or 0.0)
+        return entries, str(result.get("language") or language or "unknown"), final_duration
     finally:
         release_mlx_memory()
 

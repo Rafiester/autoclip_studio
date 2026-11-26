@@ -59,15 +59,33 @@ class SpeechProgressView(QWidget):
         bar_layout.addWidget(self.percent)
         layout.addLayout(bar_layout)
         grid = QGridLayout()
-        self.values = {}
-        for i, name in enumerate(("Audio through", "Elapsed", "Time left", "Speed / RTF", "GPU / VRAM")):
+        grid.setContentsMargins(0, 2, 0, 0)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(4)
+        self.labels: dict[str, QLabel] = {}
+        self.values: dict[str, QLabel] = {}
+        for i, name in enumerate(("Audio through", "Elapsed", "Time left", "Speed / RTF")):
             row, col = divmod(i, 2)
-            label = QLabel(name, objectName="transferMetricLabel")
+            label_text = "Audio processed" if name == "Audio through" else name
+            label = QLabel(label_text, objectName="transferMetricLabel")
             value = QLabel("—", objectName="transferMetric")
-            value.setWordWrap(True)
+            value.setMinimumWidth(0)
             grid.addWidget(label, row, col * 2)
             grid.addWidget(value, row, col * 2 + 1)
+            self.labels[name] = label
             self.values[name] = value
+        # Full-width telemetry row for Apple Silicon Unified Memory / Windows GPU & VRAM
+        res_label_text = "Apple Silicon Memory" if os.name != "nt" else "GPU / VRAM"
+        res_label = QLabel(res_label_text, objectName="transferMetricLabel")
+        res_value = QLabel("—", objectName="transferMetric")
+        res_value.setWordWrap(True)
+        res_value.setMinimumWidth(0)
+        grid.addWidget(res_label, 2, 0)
+        grid.addWidget(res_value, 2, 1, 1, 3)
+        self.labels["GPU / VRAM"] = res_label
+        self.values["GPU / VRAM"] = res_value
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
         layout.addLayout(grid)
         self.clock = QElapsedTimer()
         self.elapsed = 0.0
@@ -75,10 +93,9 @@ class SpeechProgressView(QWidget):
         self.timer.timeout.connect(self._tick)
 
     def begin(self) -> None:
-        self.stage.setText("Preparing transcription…")
+        self.stage.setText("Preparing audio…")
         self.engine.clear()
-        self.bar.setRange(0, 1000)
-        self.bar.setValue(0)
+        self.bar.setRange(0, 0)  # Indeterminate until measurable progress arrives
         self.percent.setText("—")
         for value in self.values.values():
             value.setText("—")
@@ -88,27 +105,72 @@ class SpeechProgressView(QWidget):
         self.timer.start()
 
     def update_transcription(self, progress: SpeechProgress) -> None:
-        self.stage.setText(progress.stage)
-        self.engine.setText(" · ".join(value for value in
-                             (progress.engine, progress.model, progress.device.upper(), progress.compute) if value))
-        if progress.processed is not None and progress.duration and progress.reliable_percentage:
-            percent = min(100, 100 * progress.processed / progress.duration)
+        has_measurable = progress.processed is not None and bool(progress.duration) and progress.reliable_percentage
+        if has_measurable and progress.duration:
+            percent = min(100.0, 100.0 * float(progress.processed or 0.0) / float(progress.duration))
+            self.stage.setText(
+                f"{progress.stage} — Transcribed {int(round(progress.processed or 0))}s / {int(round(progress.duration))}s"
+            )
+            if self.bar.maximum() != 1000:
+                self.bar.setRange(0, 1000)
             self.percent.setText(f"{percent:.1f}%")
             self.bar.setValue(round(percent * 10))
         else:
+            self.stage.setText(progress.stage)
+            if progress.indeterminate:
+                self.bar.setRange(0, 0)
+            else:
+                self.bar.setRange(0, 1000)
+                self.bar.setValue(0)
             self.percent.setText("—")
-            self.bar.setValue(0)
+
+        self.engine.setText(" · ".join(value for value in
+                             (progress.engine, progress.model, progress.device.upper(), progress.compute) if value))
         self.bar.setAccessibleDescription("Percentage unavailable" if self.percent.text() == "—" else self.percent.text())
         self.elapsed = progress.elapsed
         self.clock.restart()
         self._tick()
+
         self.values["Audio through"].setText(f"{_clock(progress.processed)} / {_clock(progress.duration)}")
-        self.values["Time left"].setText(_clock(progress.eta))
-        self.values["Speed / RTF"].setText(f"{progress.speed:.1f}× / {1 / progress.speed:.2f}"
-                                           if progress.speed and progress.speed > 0 else "—")
+        if progress.eta is not None:
+            self.values["Time left"].setText(_clock(progress.eta))
+        elif has_measurable and (progress.processed or 0.0) > 0:
+            self.values["Time left"].setText("Estimating…")
+        else:
+            self.values["Time left"].setText("—")
+
+        if progress.speed and progress.speed > 0:
+            rtf = progress.rtf if progress.rtf is not None else (1.0 / progress.speed)
+            self.values["Speed / RTF"].setText(f"{progress.speed:.1f}× / {rtf:.2f}")
+        else:
+            self.values["Speed / RTF"].setText("—")
+
+        apple = progress.apple_telemetry
         gpu = progress.gpu
-        utilization = f"{gpu.utilization}% · " if gpu and gpu.utilization is not None else ""
-        self.values["GPU / VRAM"].setText(f"{utilization}{gpu.used_mib:,}/{gpu.total_mib:,} MiB" if gpu else "—")
+        if apple is not None or progress.device == "mlx":
+            self.labels["GPU / VRAM"].setText("Apple Silicon Memory")
+            if apple:
+                parts: list[str] = []
+                if "mlx_active_mib" in apple:
+                    peak = f" (peak {apple['mlx_peak_mib']:.0f} MiB)" if "mlx_peak_mib" in apple else ""
+                    parts.append(f"MLX {apple['mlx_active_mib']:.0f} MiB{peak}")
+                if "mlx_cache_mib" in apple:
+                    parts.append(f"Cache {apple['mlx_cache_mib']:.0f} MiB")
+                if "app_mib" in apple:
+                    parts.append(f"App {apple['app_mib']:.0f} MiB")
+                if "unified_used_gb" in apple and "unified_total_gb" in apple:
+                    parts.append(f"Unified {apple['unified_used_gb']:.1f}/{apple['unified_total_gb']:.0f} GB")
+                if apple.get("memory_pressure"):
+                    parts.append(f"Pressure: {apple['memory_pressure']}")
+                if apple.get("thermal_state"):
+                    parts.append(f"Thermal: {apple['thermal_state']}")
+                self.values["GPU / VRAM"].setText(" · ".join(parts) if parts else "N/A")
+            else:
+                self.values["GPU / VRAM"].setText("N/A")
+        else:
+            self.labels["GPU / VRAM"].setText("GPU / VRAM")
+            utilization = f"{gpu.utilization}% · " if gpu and gpu.utilization is not None else ""
+            self.values["GPU / VRAM"].setText(f"{utilization}{gpu.used_mib:,}/{gpu.total_mib:,} MiB" if gpu else "—")
 
     def _tick(self) -> None:
         self.values["Elapsed"].setText(_clock(self.elapsed + self.clock.elapsed() / 1000))
