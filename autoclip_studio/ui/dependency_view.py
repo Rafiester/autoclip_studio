@@ -18,6 +18,7 @@ from ..dependencies import (
 from ..paths import APP_ROOT, LOG_DIR, MODEL_CACHE
 from ..speech_engine import SpeechSettings
 from ..worker import FunctionThread
+from .style import configure_input
 
 
 class _LogViewerDialog(QDialog):
@@ -59,9 +60,13 @@ class DependencyManagerView(QWidget):
 
         # Toolbar card
         bar = QFrame(objectName="card")
-        bar_layout = QHBoxLayout(bar)
+        bar_layout = QVBoxLayout(bar)
         bar_layout.setContentsMargins(16, 12, 16, 12)
         bar_layout.setSpacing(8)
+        primary_row = QHBoxLayout()
+        primary_row.setSpacing(8)
+        secondary_row = QHBoxLayout()
+        secondary_row.setSpacing(8)
         self.check_btn = QPushButton("Check Dependencies")
         self.check_btn.clicked.connect(self.refresh_async)
         self.repair_btn = QPushButton("Repair Missing Components", objectName="primary")
@@ -72,9 +77,14 @@ class DependencyManagerView(QWidget):
         self.open_folder_btn.clicked.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(APP_ROOT))))
         self.logs_btn = QPushButton("View Install Logs")
         self.logs_btn.clicked.connect(lambda: _LogViewerDialog(self).exec())
-        for btn in (self.check_btn, self.repair_btn, self.update_btn, self.open_folder_btn, self.logs_btn):
-            bar_layout.addWidget(btn)
-        bar_layout.addStretch()
+        for btn in (self.repair_btn, self.check_btn, self.update_btn):
+            primary_row.addWidget(btn)
+        primary_row.addStretch()
+        for btn in (self.open_folder_btn, self.logs_btn):
+            secondary_row.addWidget(btn)
+        secondary_row.addStretch()
+        bar_layout.addLayout(primary_row)
+        bar_layout.addLayout(secondary_row)
         root.addWidget(bar)
 
         self.status_label = QLabel("Ready", objectName="muted")
@@ -100,7 +110,7 @@ class DependencyManagerView(QWidget):
         ml.addWidget(QLabel("Whisper Transcription Models", objectName="sectionTitle"))
         row = QHBoxLayout()
         row.setSpacing(8)
-        self.model_combo = QComboBox()
+        self.model_combo = configure_input(QComboBox(), min_contents_length=24)
         self.model_combo.currentIndexChanged.connect(self._update_model_buttons)
         self.download_model_btn = QPushButton("Download Model", objectName="primary")
         self.download_model_btn.clicked.connect(self.download_selected_model)
@@ -227,14 +237,19 @@ class DependencyManagerView(QWidget):
             kind = "Mandatory" if st.spec.mandatory else "Optional"
             title = QLabel(f"{st.spec.name}  ({kind})")
             title.setStyleSheet("font-weight: 600;")
+            title.setWordWrap(True)
+            title.setMinimumWidth(0)
             title.setToolTip(st.resolved_path or st.spec.install_path)
             sub = QLabel(
                 f"Installed: {st.installed_version}  •  Required: {st.spec.version}  •  "
                 f"Size: {format_bytes(st.storage_bytes) if st.storage_bytes else '—'}",
                 objectName="muted",
             )
+            sub.setWordWrap(True)
+            sub.setMinimumWidth(0)
             detail = QLabel(st.detail, objectName="muted")
             detail.setWordWrap(True)
+            detail.setMinimumWidth(0)
             left.addWidget(title)
             left.addWidget(sub)
             left.addWidget(detail)

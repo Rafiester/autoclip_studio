@@ -21,6 +21,7 @@ from ..speech_engine import (
 )
 from ..transcription import SpeechProgress
 from .download_view import cancel_icon
+from .style import configure_form_layout, configure_input
 
 
 def _clock(seconds: float | None) -> str:
@@ -121,9 +122,8 @@ class SpeechSettingsView(QWidget):
         self.update_project = update_project
         self.start_task = start_task
         current = settings.speech()
-        form = QFormLayout(self)
-        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        self.engine = QComboBox()
+        form = configure_form_layout(QFormLayout(self))
+        self.engine = configure_input(QComboBox())
         engines = [("Auto", "auto"), ("Purfview Faster-Whisper-XXL", "purfview"),
                    ("Python Faster-Whisper", "python"), ("MLX Whisper (Apple Silicon)", "mlx")]
         for name, value in engines:
@@ -132,12 +132,12 @@ class SpeechSettingsView(QWidget):
         self.model = self._combo(MODELS, settings.data["whisper_model"])
         self.device = self._combo(("auto", "cuda", "cpu"), settings.data["whisper_device"])
         self.compute = self._combo(("auto", "float16", "int8_float16", "int8", "float32"), current.compute_type)
-        self.batch = QSpinBox()
+        self.batch = configure_input(QSpinBox())
         self.batch.setRange(0, 16)
         self.batch.setSpecialValueText("Auto")
         self.batch.setToolTip("Auto uses validated sequential inference. Manual batch sizes are capped by free VRAM.")
         self.batch.setValue(current.batch_size)
-        self.language = QLineEdit(current.language)
+        self.language = configure_input(QLineEdit(current.language))
         self.language.setPlaceholderText("Auto when empty, or a manual code such as en or id")
         self.vad = QCheckBox("Filter non-speech with VAD")
         self.vad.setChecked(current.vad)
@@ -158,6 +158,10 @@ class SpeechSettingsView(QWidget):
         for checkbox in (self.vad, self.words, self.fallback, self.srt):
             form.addRow(checkbox)
         actions = QGridLayout()
+        actions.setHorizontalSpacing(10)
+        actions.setVerticalSpacing(8)
+        actions.setColumnStretch(0, 1)
+        actions.setColumnStretch(1, 1)
         for index, (name, callback) in enumerate((
             ("Save Speech Settings", self.save), ("Test Engine", self.test),
             ("Download Model", self.download), ("Open Model Cache", self.open_model_cache),
@@ -168,8 +172,12 @@ class SpeechSettingsView(QWidget):
             button.clicked.connect(callback)
             actions.addWidget(button, index // 2, index % 2)
         form.addRow(actions)
-        self.status = QLabel("Purfview detected. Test the engine to check CUDA and local models." if detected
-                             else "Python Faster-Whisper is available. A separate Purfview installation is optional.")
+        default_status = (
+            "Purfview detected. Test the engine to check CUDA and local models." if detected
+            else ("MLX Whisper (Apple Silicon) and Python Faster-Whisper are available." if os.name != "nt"
+                  else "Python Faster-Whisper is available. A separate Purfview installation is optional.")
+        )
+        self.status = QLabel(default_status)
         self.status.setWordWrap(True)
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         self.status.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -177,13 +185,13 @@ class SpeechSettingsView(QWidget):
 
     @staticmethod
     def _combo(items: tuple[str, ...], current: str) -> QComboBox:
-        field = QComboBox()
+        field = configure_input(QComboBox())
         field.addItems(items)
         field.setCurrentText(current)
         return field
 
     def _path(self, layout: QFormLayout, label: str, value: str, *, directory: bool) -> QLineEdit:
-        field = QLineEdit(value)
+        field = configure_input(QLineEdit(value))
         field.setAccessibleName(label)
         browse = QPushButton("Browse")
 
@@ -196,6 +204,7 @@ class SpeechSettingsView(QWidget):
 
         browse.clicked.connect(choose)
         row = QHBoxLayout()
+        row.setSpacing(8)
         row.addWidget(field, 1)
         row.addWidget(browse)
         layout.addRow(label, row)

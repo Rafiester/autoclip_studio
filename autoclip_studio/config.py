@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,23 @@ from .speech_engine import SpeechSettings
 
 
 SERVICE_NAME = "AutoClip Studio"
+
+
+def credential_store_name() -> str:
+    """Return a human-readable name for the active OS credential storage backend."""
+    try:
+        backend_name = type(keyring.get_keyring()).__name__.lower()
+    except Exception:
+        backend_name = ""
+    if "macos" in backend_name or "osx" in backend_name or "keychain" in backend_name:
+        return "macOS Keychain"
+    if "win" in backend_name or "vault" in backend_name:
+        return "Windows Credential Manager"
+    if sys.platform == "darwin":
+        return "macOS Keychain"
+    if os.name == "nt":
+        return "Windows Credential Manager"
+    return "System Keyring"
 
 
 @dataclass(slots=True)

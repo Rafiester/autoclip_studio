@@ -1,7 +1,7 @@
 # AutoClip Studio — Agent Handoff & Progress
 
 **Last Updated:** 2026-11-26  
-**Current Phase:** Native macOS Apple Silicon Build & Hardware Validation Complete
+**Current Phase:** Global UI/UX Refinement & Native macOS Apple Silicon Validation Complete
 
 ## Execution Status
 
@@ -13,7 +13,13 @@
 - **Generated Clips SaaS Master-Detail Redesign** (`a2f2bc6`)
 - **First-Time Setup Wizard & Dependency Manager** (`fed338b`)
 - **Local Video Import & Optional External SRT Import** (`3121a88`)
-- **Native macOS Apple Silicon Support** (`8ab99b3`, Windows validated; native macOS compile/runtime pending Apple Silicon hardware)
+- **Global UI/UX Refinement (UI/UX Pro Max):**
+  - **Shared Layout & Style Architecture (`autoclip_studio/ui/style.py`):** Added reusable `configure_form_layout()` (`ExpandingFieldsGrow`, `AlignLeft | AlignTop`, `WrapLongRows`, consistent 18×12px spacing) and `configure_input()` (`Expanding` horizontal policy, `AdjustToMinimumContentsLengthWithIcon`, unelided dropdown popups) to eliminate macOS `QFormLayout` narrow/centered field collapse across the entire app while preserving Windows parity.
+  - **Global Stylesheet Polish:** Added `QDoubleSpinBox` and `QDialog` dark-surface rules, unified input/button `min-height: 20px` alignment, styled `QComboBox::drop-down`, `QScrollBar:horizontal`, transparent `QGroupBox QStackedWidget`, and crisp dark-mode `QCheckBox::indicator:unchecked` borders.
+  - **Platform-Aware Credential Storage Label (`autoclip_studio/config.py`, `autoclip_studio/gui.py`):** Added `credential_store_name()` backed by the active `keyring` backend (`macOS Keychain` on macOS, `Windows Credential Manager` on Windows).
+  - **Page & Dialog Improvements:** Refined all 9 pages (`Dashboard`, `New Project`, `Processing Queue`, `Generated Clips`, `Caption Templates`, `AI Provider Settings`, `Speech-to-Text`, `Performance`, `Dependencies`) and dialogs (`ExportThumbnailDialog`, `FramePickerDialog`, `_LogViewerDialog`, `JobDetailsDialog`): paired page title/subtitle headers, equal-stretch Dashboard KPI cards & table columns, dynamic `source_stack` height on New Project, 2-row responsive toolbars on Dependencies and Generated Clips (preventing 45px input collapse at `760×560`), unclipped wrapped labels & escaped `&&` mnemonics on Performance (`Thermal protection & Gaming Mode`) and Processing Queue (`Activity & Logs`), non-clipping Caption Template card descriptions, and macOS `Menlo` / Windows `Consolas` badge fonts.
+  - **Validated on macOS Retina (`1280×820` & `760×560`):** Visual screenshot inspection and automated geometry audit confirmed zero narrow form inputs (`805–967px` at `1280×820`, `262–563px` at `760×560`), zero clipped labels, and `macOS Keychain` subtitle rendering.
+- **Native macOS Apple Silicon Support** (`8ab99b3`, validated on Apple Silicon in `90e4abf`)
 - **Processing Queue SaaS Redesign & Scheduler:**
   - Replaced legacy spreadsheet table and console block on `_queue_page` with [queue_workspace.py](file:///c:/Users/Suzurui/Documents/Antigravity/OShorts/autoclip_studio/ui/queue_workspace.py):
     - `QueueOverviewBar`: 4 dynamic status KPI cards (`Processing`, `Queued`, `Completed`, `Failed`), live engine status + active performance profile badges, and `Pause Queue` / `Resume Queue` control.

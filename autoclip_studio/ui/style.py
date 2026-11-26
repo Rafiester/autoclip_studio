@@ -66,7 +66,7 @@ def build_stylesheet(tokens: dict[str, str] = TOKENS, font_family: str | None = 
     font-size: 13px;
     color: {t["text_primary"]};
 }}
-QMainWindow, QWidget {{
+QMainWindow, QWidget, QDialog {{
     background: {t["bg_app"]};
 }}
 QLabel, QCheckBox, QRadioButton {{
@@ -145,8 +145,8 @@ QFrame#card, QGroupBox {{
     border-radius: 12px;
 }}
 QGroupBox {{
-    margin-top: 16px;
-    padding: 20px 16px 16px;
+    margin-top: 14px;
+    padding: 22px 18px 18px;
     font-weight: 600;
 }}
 QGroupBox::title {{
@@ -160,7 +160,8 @@ QPushButton {{
     background: {t["bg_elevated"]};
     border: 1px solid {t["border_subtle"]};
     border-radius: 8px;
-    padding: 8px 14px;
+    padding: 7px 14px;
+    min-height: 20px;
     font-weight: 500;
 }}
 QPushButton:hover {{
@@ -232,20 +233,28 @@ QPushButton:focus, QPushButton#primary:focus, QPushButton#nav:focus, QPushButton
 QCheckBox:focus, QTableWidget:focus {{
     border: 2px solid {t["brand_accent"]};
 }}
-QLineEdit, QSpinBox, QComboBox, QPlainTextEdit {{
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPlainTextEdit {{
     background: {t["bg_elevated"]};
     border: 1px solid {t["border_subtle"]};
     border-radius: 8px;
-    padding: 8px 10px;
+    padding: 7px 10px;
+    min-height: 20px;
     selection-background-color: {t["brand_primary"]};
 }}
-QLineEdit:focus, QSpinBox:focus, QComboBox:focus, QPlainTextEdit:focus {{
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus, QPlainTextEdit:focus {{
     border-color: {t["brand_accent"]};
+}}
+QComboBox::drop-down {{
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 26px;
+    border: none;
 }}
 QComboBox QAbstractItemView {{
     background: {t["bg_elevated"]};
     selection-background-color: {t["brand_tint"]};
     border: 1px solid {t["border_strong"]};
+    padding: 4px;
 }}
 QTableWidget {{
     background: {t["bg_surface"]};
@@ -384,12 +393,23 @@ QPushButton#captionSelect[selected="true"]:hover {{
 QPushButton#captionSelect[selected="true"]:focus {{
     border-color: {t["brand_accent"]};
 }}
+QGroupBox QStackedWidget, QGroupBox QStackedWidget > QWidget {{
+    background: transparent;
+}}
 QCheckBox {{
     spacing: 8px;
 }}
 QCheckBox::indicator {{
-    width: 17px;
-    height: 17px;
+    width: 16px;
+    height: 16px;
+}}
+QCheckBox::indicator:unchecked {{
+    border: 1px solid {t["border_strong"]};
+    border-radius: 4px;
+    background: {t["bg_elevated"]};
+}}
+QCheckBox::indicator:unchecked:hover {{
+    border-color: {t["brand_accent"]};
 }}
 QScrollBar:vertical {{
     width: 9px;
@@ -398,6 +418,15 @@ QScrollBar:vertical {{
 QScrollBar::handle:vertical {{
     background: {t["border_strong"]};
     min-height: 28px;
+    border-radius: 4px;
+}}
+QScrollBar:horizontal {{
+    height: 9px;
+    background: transparent;
+}}
+QScrollBar::handle:horizontal {{
+    background: {t["border_strong"]};
+    min-width: 28px;
     border-radius: 4px;
 }}
 QSlider::groove:horizontal {{
@@ -547,3 +576,34 @@ QMenu::separator {{
 
 
 STYLESHEET = build_stylesheet()
+
+
+def configure_form_layout(form, *, horizontal_spacing: int = 18, vertical_spacing: int = 12):
+    """Apply consistent, cross-platform responsive QFormLayout behavior on macOS and Windows."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QFormLayout
+
+    form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+    form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+    form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+    form.setHorizontalSpacing(horizontal_spacing)
+    form.setVerticalSpacing(vertical_spacing)
+    return form
+
+
+def configure_input(widget, *, min_width: int = 0, min_contents_length: int = 16):
+    """Configure an input or selector widget to expand responsively without clipping or blowing out layouts."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QComboBox, QSizePolicy
+
+    widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    if min_width > 0:
+        widget.setMinimumWidth(min_width)
+    if isinstance(widget, QComboBox):
+        widget.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        widget.setMinimumContentsLength(min_contents_length)
+        view = widget.view()
+        if view is not None:
+            view.setTextElideMode(Qt.TextElideMode.ElideNone)
+    return widget

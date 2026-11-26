@@ -54,7 +54,8 @@ class _Thumbnail(QWidget):
             painter.setPen(QColor("#A3A8B5"))
             painter.drawText(bounds, Qt.AlignmentFlag.AlignCenter, "Thumbnail unavailable")
         if self.clock:
-            font = QFont("Consolas")
+            import sys
+            font = QFont("Menlo" if sys.platform == "darwin" else "Consolas")
             font.setPixelSize(13)
             font.setBold(True)
             painter.setFont(font)

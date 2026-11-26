@@ -70,7 +70,8 @@ class ClipThumbnailPreview(QWidget):
             painter.drawText(bounds, Qt.AlignmentFlag.AlignCenter, label)
 
         if self._duration_text:
-            font = QFont("Consolas")
+            import sys
+            font = QFont("Menlo" if sys.platform == "darwin" else "Consolas")
             font.setPixelSize(12)
             font.setBold(True)
             painter.setFont(font)
@@ -149,7 +150,9 @@ class ExportThumbnailDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
-        layout.addWidget(QLabel(f"Clip: {title}", objectName="sectionTitle"))
+        title_lbl = QLabel(f"Clip: {title}", objectName="sectionTitle")
+        title_lbl.setWordWrap(True)
+        layout.addWidget(title_lbl)
         self.overlay_check = QCheckBox("Include clip title overlay (red brand accent & caption font)")
         self.overlay_check.setChecked(True)
         layout.addWidget(self.overlay_check)

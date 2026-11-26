@@ -1247,7 +1247,7 @@ class CollapsibleLogsPanel(QFrame):
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.setSpacing(8)
-        self.toggle_button = QPushButton("Activity & Logs")
+        self.toggle_button = QPushButton("Activity && Logs")
         self.toggle_button.setFlat(True)
         self.toggle_button.setIcon(lucide_icon("chevron-right", "#D4D7E0", 14))
         self.toggle_button.setIconSize(QSize(14, 14))

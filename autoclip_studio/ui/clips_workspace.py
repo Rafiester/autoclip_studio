@@ -280,12 +280,17 @@ class ClipLibraryPanel(QWidget):
         self.export_all_btn.clicked.connect(self.export_all_requested.emit)
         self.export_all_btn.setEnabled(False)
 
-        toolbar.addWidget(self.search_input, 1)
-        toolbar.addWidget(self.sort_combo)
-        toolbar.addWidget(self.list_view_btn)
-        toolbar.addWidget(self.grid_view_btn)
-        toolbar.addWidget(self.export_all_btn)
+        toolbar.addWidget(self.search_input, 2)
+        toolbar.addWidget(self.sort_combo, 1)
         root.addLayout(toolbar)
+
+        controls_row = QHBoxLayout()
+        controls_row.setSpacing(8)
+        controls_row.addWidget(self.list_view_btn)
+        controls_row.addWidget(self.grid_view_btn)
+        controls_row.addStretch()
+        controls_row.addWidget(self.export_all_btn)
+        root.addLayout(controls_row)
 
         # Independently scrollable library
         self.scroll = QScrollArea()

@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from .captions import TEMPLATE_DEFAULT, TEMPLATES
-from .config import SettingsStore
+from .config import SettingsStore, credential_store_name
 from .database import Database
 from .diagnostics import LOG, SUCCESS, log_error, redact
 from .media import DownloadProgress, is_youtube_url, youtube_id, youtube_source_error
@@ -43,7 +43,7 @@ from .ui.queue_workspace import (
     QueueOverviewBar, project_thumbnail_path,
 )
 from .ui.speech_view import SpeechProgressView, SpeechSettingsView
-from .ui.style import STYLESHEET
+from .ui.style import STYLESHEET, configure_form_layout, configure_input
 from .ui.youtube_preview import YouTubePreview
 from .worker import FunctionThread, PipelineWorker
 from .youtube_metadata import YouTubeMetadata
@@ -144,10 +144,14 @@ class MainWindow(QMainWindow):
     def _page(self, title: str, subtitle: str) -> tuple[QWidget, QVBoxLayout]:
         outer = QWidget()
         page = QVBoxLayout(outer)
-        page.setContentsMargins(20, 20, 20, 20)
-        page.setSpacing(16)
-        page.addWidget(self._wrapping_label(title, object_name="pageTitle"))
-        page.addWidget(self._wrapping_label(subtitle, object_name="muted"))
+        page.setContentsMargins(24, 20, 24, 20)
+        page.setSpacing(14)
+        header = QVBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(4)
+        header.addWidget(self._wrapping_label(title, object_name="pageTitle"))
+        header.addWidget(self._wrapping_label(subtitle, object_name="muted"))
+        page.addLayout(header)
         return outer, page
 
     @staticmethod
@@ -169,15 +173,16 @@ class MainWindow(QMainWindow):
     def _dashboard_page(self) -> QWidget:
         outer, page = self._page("Dashboard", "Your local short-form production workspace")
         metrics = QHBoxLayout()
+        metrics.setSpacing(12)
         self.metric_projects = self._metric_card("Projects", "0")
         self.metric_clips = self._metric_card("Generated clips", "0")
         self.metric_active = self._metric_card("Queue status", "Idle")
         for card in (self.metric_projects, self.metric_clips, self.metric_active):
-            metrics.addWidget(card)
+            metrics.addWidget(card, 1)
         page.addLayout(metrics)
         action_card = QFrame(objectName="card")
         action_layout = QVBoxLayout(action_card)
-        action_layout.setContentsMargins(24, 24, 24, 24)
+        action_layout.setContentsMargins(20, 18, 20, 18)
         action_layout.setSpacing(10)
         action_title = self._wrapping_label("Create polished vertical clips from any long video", object_name="sectionTitle")
         action_layout.addWidget(action_title)
@@ -191,6 +196,10 @@ class MainWindow(QMainWindow):
         page.addWidget(action_card)
         page.addWidget(QLabel("Recent projects", objectName="sectionTitle"))
         self.recent_table = self._table(["Project", "Status", "Progress", "Created"])
+        header = self.recent_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for col in (1, 2, 3):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         page.addWidget(self.recent_table, 1)
         return outer
 
@@ -268,6 +277,7 @@ class MainWindow(QMainWindow):
         local_layout.addWidget(self.local_preview)
         self.source_stack.addWidget(local_pane)
         source_layout.addWidget(self.source_stack)
+        self.set_source_tab(0)
 
         # Compact optional SRT import
         self.import_srt_check = QCheckBox("Import existing subtitle (.srt)")
@@ -306,8 +316,8 @@ class MainWindow(QMainWindow):
         self.srt_panel.hide()
         source_layout.addWidget(self.srt_panel)
 
-        name_row = QFormLayout()
-        self.project_name = QLineEdit(placeholderText="Optional project name")
+        name_row = configure_form_layout(QFormLayout())
+        self.project_name = configure_input(QLineEdit(placeholderText="Optional project name"))
         self._auto_project_name = ""
         name_row.addRow("&Project name", self.project_name)
         name_row.labelForField(self.project_name).setObjectName("projectNameLabel")
@@ -316,25 +326,29 @@ class MainWindow(QMainWindow):
         settings_group = QGroupBox("Clip settings")
         grid = QGridLayout(settings_group)
         grid.setHorizontalSpacing(16)
-        grid.setVerticalSpacing(10)
-        self.clip_count = self._spin(1, 10, 3)
-        self.min_duration = self._spin(10, 120, 25, " sec")
-        self.max_duration = self._spin(15, 180, 60, " sec")
-        self.aspect = QComboBox(); self.aspect.addItems(["9:16", "1:1", "4:5", "16:9"])
-        self.resolution = QComboBox(); self.resolution.addItems(["1080x1920", "720x1280", "1080x1080", "1080x1350", "1920x1080"])
+        grid.setVerticalSpacing(12)
+        self.clip_count = configure_input(self._spin(1, 10, 3))
+        self.min_duration = configure_input(self._spin(10, 120, 25, " sec"))
+        self.max_duration = configure_input(self._spin(15, 180, 60, " sec"))
+        self.aspect = configure_input(QComboBox(), min_contents_length=8); self.aspect.addItems(["9:16", "1:1", "4:5", "16:9"])
+        self.resolution = configure_input(QComboBox(), min_contents_length=12); self.resolution.addItems(["1080x1920", "720x1280", "1080x1080", "1080x1350", "1920x1080"])
         self.aspect.currentTextChanged.connect(self._aspect_changed)
         grid.addWidget(QLabel("Number of clips"), 0, 0); grid.addWidget(self.clip_count, 0, 1)
         grid.addWidget(QLabel("Minimum duration"), 0, 2); grid.addWidget(self.min_duration, 0, 3)
         grid.addWidget(QLabel("Maximum duration"), 1, 0); grid.addWidget(self.max_duration, 1, 1)
         grid.addWidget(QLabel("Aspect ratio"), 1, 2); grid.addWidget(self.aspect, 1, 3)
         grid.addWidget(QLabel("Resolution"), 2, 0); grid.addWidget(self.resolution, 2, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
         form.addWidget(settings_group)
         automation = QGroupBox("Automation")
         auto_layout = QGridLayout(automation)
+        auto_layout.setHorizontalSpacing(16)
+        auto_layout.setVerticalSpacing(10)
         self.face_tracking = QCheckBox("Auto face tracking"); self.face_tracking.setChecked(True)
         self.captions = QCheckBox("Animated word captions"); self.captions.setChecked(True)
         self.cache = QCheckBox("Cache downloads and transcripts"); self.cache.setChecked(True)
-        self.template_combo = QComboBox()
+        self.template_combo = configure_input(QComboBox())
         self.template_combo.addItems(TEMPLATES.keys())
         self.template_combo.setCurrentText(self.default_template())
         auto_layout.addWidget(self.face_tracking, 0, 0)
@@ -342,15 +356,17 @@ class MainWindow(QMainWindow):
         auto_layout.addWidget(self.cache, 1, 0, 1, 2)
         auto_layout.addWidget(QLabel("Caption template"), 2, 0)
         auto_layout.addWidget(self.template_combo, 2, 1)
+        auto_layout.setColumnStretch(0, 1)
+        auto_layout.setColumnStretch(1, 1)
         form.addWidget(automation)
         ai_group = QGroupBox("AI and transcription")
-        ai_form = QFormLayout(ai_group)
-        self.project_provider = QComboBox(); self.project_provider.addItems(["gemini", "openai", "custom"])
+        ai_form = configure_form_layout(QFormLayout(ai_group))
+        self.project_provider = configure_input(QComboBox()); self.project_provider.addItems(["gemini", "openai", "custom"])
         self.project_provider.setCurrentText(self.settings.data["active_provider"])
-        self.project_model = QLineEdit(self.settings.provider().get("model", ""))
+        self.project_model = configure_input(QLineEdit(self.settings.provider().get("model", "")))
         self.multimodal_check = QCheckBox("Optional Gemini video analysis (uploads source)")
-        self.whisper_model = QComboBox(); self.whisper_model.addItems(MODELS); self.whisper_model.setCurrentText(self.settings.data["whisper_model"])
-        self.whisper_device = QComboBox(); self.whisper_device.addItems(["auto", "cuda", "cpu"]); self.whisper_device.setCurrentText(self.settings.data["whisper_device"])
+        self.whisper_model = configure_input(QComboBox()); self.whisper_model.addItems(MODELS); self.whisper_model.setCurrentText(self.settings.data["whisper_model"])
+        self.whisper_device = configure_input(QComboBox()); self.whisper_device.addItems(["auto", "cuda", "cpu"]); self.whisper_device.setCurrentText(self.settings.data["whisper_device"])
         self.project_provider.currentTextChanged.connect(self._project_provider_changed)
         ai_form.addRow("Provider", self.project_provider)
         ai_form.addRow("Model", self.project_model)
@@ -447,16 +463,15 @@ class MainWindow(QMainWindow):
         return outer
 
     def _settings_page(self) -> QWidget:
-        outer, page = self._page("AI Provider Settings", "Credentials are stored in Windows Credential Manager")
+        outer, page = self._page("AI Provider Settings", f"Credentials are stored in {credential_store_name()}")
         group = self.provider_group = QGroupBox("Provider connection")
-        form = QFormLayout(group)
-        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        self.settings_provider = QComboBox(); self.settings_provider.addItems(["gemini", "openai", "custom"])
+        form = configure_form_layout(QFormLayout(group))
+        self.settings_provider = configure_input(QComboBox()); self.settings_provider.addItems(["gemini", "openai", "custom"])
         self.settings_provider.setCurrentText(self.settings.data["active_provider"])
-        self.api_key_input = QLineEdit(); self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.base_url_input = QLineEdit()
-        self.model_input = QComboBox(); self.model_input.setEditable(True)
-        self.fallback_models_input = QLineEdit()
+        self.api_key_input = configure_input(QLineEdit()); self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.base_url_input = configure_input(QLineEdit())
+        self.model_input = configure_input(QComboBox(), min_contents_length=24); self.model_input.setEditable(True)
+        self.fallback_models_input = configure_input(QLineEdit())
         self.fallback_models_input.setPlaceholderText("Comma-separated model IDs, in retry order")
         self.auto_fallback_check = QCheckBox("Automatically try fallback models")
         self.auto_fallback_check.toggled.connect(self.fallback_models_input.setEnabled)
@@ -479,17 +494,20 @@ class MainWindow(QMainWindow):
         form.addRow(buttons)
         page.addWidget(group)
         local = QGroupBox("Local processing")
-        local_form = QFormLayout(local)
-        local_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        self.output_input = QLineEdit(self.settings.data.get("output_dir", ""))
+        local_form = configure_form_layout(QFormLayout(local))
+        self.output_input = configure_input(QLineEdit(self.settings.data.get("output_dir", "")))
         self.output_input.setAccessibleName("Output folder")
-        output_row = QHBoxLayout(); output_row.addWidget(self.output_input)
+        output_row = QHBoxLayout(); output_row.setSpacing(8); output_row.addWidget(self.output_input, 1)
         output_browse = QPushButton("Browse"); output_browse.clicked.connect(self.browse_output); output_row.addWidget(output_browse)
         hw_label = "Use Apple VideoToolbox when available" if sys.platform == "darwin" else "Use NVENC when available"
         self.hardware_check = QCheckBox(hw_label); self.hardware_check.setChecked(bool(self.settings.data.get("hardware_encoding", True)))
         local_form.addRow("Output folder", output_row); local_form.addRow("Encoding", self.hardware_check)
+        local_actions = QHBoxLayout()
+        local_actions.setSpacing(10)
         save_local = QPushButton("Save local settings"); save_local.clicked.connect(self.save_local_settings)
-        local_form.addRow(save_local)
+        local_actions.addWidget(save_local)
+        local_actions.addStretch()
+        local_form.addRow(local_actions)
         page.addWidget(local)
         self.connection_status = self._wrapping_label("", object_name="muted")
         self.connection_status.setTextFormat(Qt.TextFormat.PlainText)
@@ -550,6 +568,11 @@ class MainWindow(QMainWindow):
         self.youtube_tab_btn.setChecked(tab == 0)
         self.local_tab_btn.setChecked(tab == 1)
         self.source_stack.setCurrentIndex(tab)
+        for i in range(self.source_stack.count()):
+            page = self.source_stack.widget(i)
+            policy = QSizePolicy.Policy.Preferred if i == tab else QSizePolicy.Policy.Ignored
+            page.setSizePolicy(QSizePolicy.Policy.Expanding, policy)
+        self.source_stack.adjustSize()
 
     def browse_source(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

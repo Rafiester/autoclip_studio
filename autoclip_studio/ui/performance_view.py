@@ -6,10 +6,11 @@ from typing import Callable
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFormLayout, QFrame, QGridLayout, QGroupBox,
-    QHBoxLayout, QLabel, QPushButton, QSpinBox, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QPushButton, QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from ..performance import PROFILES, HardwareMonitor, PerformanceSettings, resolve_profile_limits
+from .style import configure_form_layout, configure_input
 
 
 class PerformanceView(QWidget):
@@ -25,31 +26,33 @@ class PerformanceView(QWidget):
         layout.setSpacing(14)
 
         profile_group = QGroupBox("Performance profile")
-        profile_form = QFormLayout(profile_group)
-        profile_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        self.profile_combo = QComboBox()
+        profile_form = configure_form_layout(QFormLayout(profile_group))
+        self.profile_combo = configure_input(QComboBox())
         self.profile_combo.addItems(["eco", "balanced", "turbo"])
         self.profile_combo.setCurrentText(settings.profile if settings.profile in PROFILES else "balanced")
         self.profile_desc = QLabel(PROFILES[self.profile_combo.currentText()], objectName="muted")
         self.profile_desc.setWordWrap(True)
+        self.profile_desc.setMinimumWidth(0)
+        self.profile_desc.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.limits_label = QLabel("", objectName="muted")
         self.limits_label.setWordWrap(True)
+        self.limits_label.setMinimumWidth(0)
+        self.limits_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.profile_combo.currentTextChanged.connect(self._profile_changed)
         profile_form.addRow("Active profile", self.profile_combo)
         profile_form.addRow("Behavior", self.profile_desc)
         profile_form.addRow("Resolved limits", self.limits_label)
         layout.addWidget(profile_group)
 
-        guard_group = QGroupBox("Thermal protection & Gaming Mode")
-        guard_form = QFormLayout(guard_group)
-        guard_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        guard_group = QGroupBox("Thermal protection && Gaming Mode")
+        guard_form = configure_form_layout(QFormLayout(guard_group))
         self.thermal_check = QCheckBox("Pause between stages if GPU temperature exceeds threshold")
         self.thermal_check.setChecked(settings.thermal_protection)
-        self.temp_limit = QSpinBox()
+        self.temp_limit = configure_input(QSpinBox())
         self.temp_limit.setRange(70, 92)
         self.temp_limit.setValue(settings.gpu_temp_limit_c)
         self.temp_limit.setSuffix(" °C")
-        self.temp_resume = QSpinBox()
+        self.temp_resume = configure_input(QSpinBox())
         self.temp_resume.setRange(60, 85)
         self.temp_resume.setValue(settings.gpu_temp_resume_c)
         self.temp_resume.setSuffix(" °C")
@@ -91,8 +94,12 @@ class PerformanceView(QWidget):
             row, col = divmod(idx, 2)
             grid.addWidget(QLabel(title, objectName="muted"), row, col * 2)
             val = QLabel("N/A")
+            val.setWordWrap(True)
+            val.setMinimumWidth(0)
             self._metric_values[key] = val
             grid.addWidget(val, row, col * 2 + 1)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
         metrics_layout.addLayout(grid)
         layout.addWidget(metrics_card)
         layout.addStretch()
