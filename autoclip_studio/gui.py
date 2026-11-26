@@ -35,6 +35,7 @@ from .ui.clips_view import ExportThumbnailDialog, FramePickerDialog, ThumbnailTa
 from .ui.clips_workspace import ClipDetailPlayerPanel, ClipLibraryPanel
 from .ui.dependency_view import DependencyManagerView
 from .ui.download_view import DownloadView
+from .ui.heatmap_view import AudienceHeatmapWidget
 from .ui.local_preview import LocalVideoDropZone, LocalVideoMetadata, LocalVideoPreview
 from .ui.log_view import LogView
 from .ui.performance_view import PerformanceView
@@ -253,6 +254,17 @@ class MainWindow(QMainWindow):
         self.youtube_preview.idle.connect(self._finish_close)
         self.source_input.textChanged.connect(self.youtube_preview.set_source)
         yt_layout.addWidget(self.youtube_preview)
+        self.heatmap_widget = AudienceHeatmapWidget()
+        yt_layout.addWidget(self.heatmap_widget)
+        self.use_yt_subtitles_check = QCheckBox("Use YouTube subtitles when available")
+        self.use_yt_subtitles_check.setToolTip(
+            "Reuse manual YouTube subtitles or normalized automatic captions before running Whisper"
+        )
+        yt_layout.addWidget(self.use_yt_subtitles_check)
+        self.yt_subtitles_hint = QLabel("", objectName="muted")
+        self.yt_subtitles_hint.setWordWrap(True)
+        self.yt_subtitles_hint.hide()
+        yt_layout.addWidget(self.yt_subtitles_hint)
         self.source_stack.addWidget(yt_pane)
 
         # Tab 1: Local File
@@ -361,6 +373,18 @@ class MainWindow(QMainWindow):
         form.addWidget(automation)
         ai_group = QGroupBox("AI and transcription")
         ai_form = configure_form_layout(QFormLayout(ai_group))
+        self.highlight_mode_combo = configure_input(QComboBox())
+        self.highlight_mode_combo.addItem("Hybrid (AI + Most Replayed)", "hybrid")
+        self.highlight_mode_combo.addItem("AI Analysis", "ai")
+        self.highlight_mode_combo.addItem("Most Replayed", "most_replayed")
+        self.highlight_mode_combo.setCurrentIndex(1)  # Defaults to AI until YouTube heatmap is detected
+        self.highlight_mode_combo.currentIndexChanged.connect(self._on_highlight_mode_changed)
+        self.highlight_mode_note = QLabel("", objectName="muted")
+        self.highlight_mode_note.setWordWrap(True)
+        self.highlight_mode_note.hide()
+        self.hybrid_weight_spin = configure_input(self._spin(0, 100, 60, "% AI / 40% Replay"))
+        self.hybrid_weight_spin.setToolTip("Adjust Hybrid ranking weight between AI content score and audience replay score")
+        self.hybrid_weight_spin.valueChanged.connect(self._on_hybrid_weight_changed)
         self.project_provider = configure_input(QComboBox()); self.project_provider.addItems(["gemini", "openai", "custom"])
         self.project_provider.setCurrentText(self.settings.data["active_provider"])
         self.project_model = configure_input(QLineEdit(self.settings.provider().get("model", "")))
@@ -368,11 +392,15 @@ class MainWindow(QMainWindow):
         self.whisper_model = configure_input(QComboBox()); self.whisper_model.addItems(MODELS); self.whisper_model.setCurrentText(self.settings.data["whisper_model"])
         self.whisper_device = configure_input(QComboBox()); self.whisper_device.addItems(["auto", "cuda", "cpu"]); self.whisper_device.setCurrentText(self.settings.data["whisper_device"])
         self.project_provider.currentTextChanged.connect(self._project_provider_changed)
+        ai_form.addRow("Highlight detection", self.highlight_mode_combo)
+        ai_form.addRow("", self.highlight_mode_note)
+        ai_form.addRow("Hybrid weighting", self.hybrid_weight_spin)
         ai_form.addRow("Provider", self.project_provider)
         ai_form.addRow("Model", self.project_model)
         ai_form.addRow("Multimodal", self.multimodal_check)
         ai_form.addRow("Whisper model", self.whisper_model)
         ai_form.addRow("Whisper device", self.whisper_device)
+        self._on_highlight_mode_changed()
         form.addWidget(ai_group)
         actions = QHBoxLayout()
         self.generate_button = QPushButton("Generate Shorts", objectName="primary")
@@ -573,6 +601,8 @@ class MainWindow(QMainWindow):
             policy = QSizePolicy.Policy.Preferred if i == tab else QSizePolicy.Policy.Ignored
             page.setSizePolicy(QSizePolicy.Policy.Expanding, policy)
         self.source_stack.adjustSize()
+        if hasattr(self, "highlight_mode_combo"):
+            self._sync_highlight_mode_availability()
 
     def browse_source(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -645,12 +675,79 @@ class MainWindow(QMainWindow):
         path = QFileDialog.getExistingDirectory(self, "Choose output folder", self.output_input.text() or str(OUTPUT_DIR))
         if path: self.output_input.setText(path)
 
+    def _on_hybrid_weight_changed(self, ai_pct: int) -> None:
+        replay_pct = max(0, 100 - int(ai_pct))
+        self.hybrid_weight_spin.setSuffix(f"% AI / {replay_pct}% Replay")
+
+    def _on_highlight_mode_changed(self) -> None:
+        mode = self.highlight_mode_combo.currentData() or "ai"
+        self.hybrid_weight_spin.setEnabled(mode == "hybrid")
+        if hasattr(self, "heatmap_widget"):
+            self.heatmap_widget.set_mode_label(self.highlight_mode_combo.currentText())
+        self._sync_highlight_mode_availability()
+
+    def _sync_highlight_mode_availability(self) -> None:
+        using_local = self.source_stack.currentIndex() == 1
+        metadata = (getattr(self, "_latest_youtube_metadata", None) or self.youtube_preview.result) if not using_local else None
+        has_heatmap = bool(metadata and metadata.has_heatmap)
+        selected_mode = self.highlight_mode_combo.currentData() or "ai"
+        if using_local:
+            if selected_mode != "ai":
+                with QSignalBlocker(self.highlight_mode_combo):
+                    self.highlight_mode_combo.setCurrentIndex(self.highlight_mode_combo.findData("ai"))
+            self.highlight_mode_note.setText("Local video selected — using AI Analysis (YouTube heatmap unavailable).")
+            self.highlight_mode_note.show()
+            self.hybrid_weight_spin.setEnabled(False)
+            return
+        if metadata is not None and not has_heatmap:
+            if selected_mode != "ai":
+                with QSignalBlocker(self.highlight_mode_combo):
+                    self.highlight_mode_combo.setCurrentIndex(self.highlight_mode_combo.findData("ai"))
+            self.highlight_mode_note.setText("YouTube audience heatmap is unavailable for this video — falling back to AI Analysis.")
+            self.highlight_mode_note.show()
+            self.hybrid_weight_spin.setEnabled(False)
+            return
+        self.highlight_mode_note.hide()
+        self.hybrid_weight_spin.setEnabled((self.highlight_mode_combo.currentData() or "ai") == "hybrid")
+
     @Slot(object)
     def _update_project_name(self, metadata: YouTubeMetadata | None) -> None:
+        self._latest_youtube_metadata = metadata
         suggestion = metadata.title if metadata else ""
         if self.project_name.text() in ("", self._auto_project_name):
             self.project_name.setText(suggestion)
         self._auto_project_name = suggestion
+        if metadata is None:
+            self.heatmap_widget.clear()
+            self.yt_subtitles_hint.hide()
+            self._sync_highlight_mode_availability()
+            return
+        has_heatmap = self.heatmap_widget.set_heatmap(
+            metadata.heatmap,
+            duration=metadata.duration,
+            min_duration=self.min_duration.value(),
+            max_duration=self.max_duration.value(),
+            mode_text="Hybrid (AI + Most Replayed)" if metadata.has_heatmap else "AI Analysis",
+        )
+        # Default to Hybrid when heatmap data is available; fallback to AI otherwise.
+        target_mode = "hybrid" if has_heatmap else "ai"
+        with QSignalBlocker(self.highlight_mode_combo):
+            idx = self.highlight_mode_combo.findData(target_mode)
+            if idx >= 0:
+                self.highlight_mode_combo.setCurrentIndex(idx)
+        self.heatmap_widget.set_mode_label(self.highlight_mode_combo.currentText())
+        if metadata.has_subtitles:
+            parts = []
+            if metadata.subtitle_languages:
+                parts.append(f"Manual: {', '.join(metadata.subtitle_languages[:6])}")
+            if metadata.auto_caption_languages:
+                parts.append(f"Auto: {', '.join(metadata.auto_caption_languages[:6])}")
+            self.yt_subtitles_hint.setText("Available YouTube tracks — " + "  •  ".join(parts))
+            self.yt_subtitles_hint.show()
+        else:
+            self.yt_subtitles_hint.setText("No YouTube subtitles detected; Speech-to-Text will be used.")
+            self.yt_subtitles_hint.show()
+        self._sync_highlight_mode_availability()
 
     def generate(self) -> None:
         if self.speech_utility_active:
@@ -703,6 +800,10 @@ class MainWindow(QMainWindow):
             youtube_metadata=asdict(metadata) if metadata else None,
             srt_path=srt_path,
             srt_offset_seconds=srt_offset,
+            highlight_mode=str(self.highlight_mode_combo.currentData() or "ai"),
+            ai_weight=round(self.hybrid_weight_spin.value() / 100.0, 2),
+            use_youtube_subtitles=(not using_local and self.use_yt_subtitles_check.isChecked()),
+            youtube_subtitle_language=self.settings.speech().language or "",
         )
         project_id = self.database.create_project(source, asdict(options))
         self.template_combo.setCurrentText(self.default_template())

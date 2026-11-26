@@ -11,14 +11,16 @@ from urllib.parse import urlsplit
 
 import requests
 
+from .heatmap import parse_heatmap
 from .media import youtube_id, youtube_watch_url, yt_dlp_command
 from .paths import CACHE_DIR
 from .process import ProcessManager
 
 
 _CACHE_TTL = 24 * 60 * 60
+_CACHE_SCHEMA_VERSION = 2
 _MAX_THUMBNAIL_BYTES = 3 * 1024 * 1024
-_METADATA_FIELDS = "%(.{id,title,channel,uploader,duration,view_count,upload_date,availability,formats,thumbnails,thumbnail})j"
+_METADATA_FIELDS = "%(.{id,title,channel,uploader,duration,view_count,upload_date,availability,formats,thumbnails,thumbnail,heatmap,subtitles,automatic_captions,language})j"
 
 
 class YouTubeMetadataError(RuntimeError):
@@ -34,6 +36,18 @@ class YouTubeMetadata:
     resolution: str
     view_count: int | None
     upload_date: str | None
+    heatmap: tuple[dict[str, float], ...] = ()
+    subtitle_languages: tuple[str, ...] = ()
+    auto_caption_languages: tuple[str, ...] = ()
+    language: str = ""
+
+    @property
+    def has_heatmap(self) -> bool:
+        return bool(self.heatmap)
+
+    @property
+    def has_subtitles(self) -> bool:
+        return bool(self.subtitle_languages or self.auto_caption_languages)
 
 
 def _nonnegative_int(value: object) -> int | None:
@@ -166,10 +180,26 @@ def _extract(video_id: str, manager: ProcessManager) -> tuple[YouTubeMetadata, l
     title = " ".join(data["title"].split())
     if not title or title == f"youtube video #{video_id}":
         raise YouTubeMetadataError(_extraction_error(diagnostics))
+    duration_val = _nonnegative_int(data.get("duration"))
+    heatmap_points = parse_heatmap(data.get("heatmap"), duration=duration_val)
+    heatmap_dicts = tuple(pt.to_dict() for pt in heatmap_points)
+
+    def _lang_keys(mapping: object) -> tuple[str, ...]:
+        if not isinstance(mapping, dict):
+            return ()
+        return tuple(
+            str(k) for k, v in mapping.items()
+            if isinstance(k, str) and k.strip() and k != "live_chat" and isinstance(v, list) and v
+        )
+
     metadata = YouTubeMetadata(
         video_id, title, data.get("channel") or data.get("uploader") or "",
-        _nonnegative_int(data.get("duration")), _highest_resolution(data),
+        duration_val, _highest_resolution(data),
         _nonnegative_int(data.get("view_count")), _date(data.get("upload_date")),
+        heatmap=heatmap_dicts,
+        subtitle_languages=_lang_keys(data.get("subtitles")),
+        auto_caption_languages=_lang_keys(data.get("automatic_captions")),
+        language=str(data.get("language") or "").strip(),
     )
     return metadata, _thumbnail_urls(data)
 
@@ -185,14 +215,27 @@ def fetch_youtube_metadata(video_id: str, manager: ProcessManager, *,
         if time() - record_path.stat().st_mtime > _CACHE_TTL:
             raise ValueError("Expired metadata")
         record = json.loads(record_path.read_bytes())
-        metadata = YouTubeMetadata(**record["metadata"])
+        if int(record.get("schema_version") or 1) < _CACHE_SCHEMA_VERSION:
+            raise ValueError("Upgrade cached metadata to include heatmap and subtitle tracks")
+        raw_meta = dict(record["metadata"])
+        raw_meta["heatmap"] = tuple(raw_meta.get("heatmap") or ())
+        raw_meta["subtitle_languages"] = tuple(raw_meta.get("subtitle_languages") or ())
+        raw_meta["auto_caption_languages"] = tuple(raw_meta.get("auto_caption_languages") or ())
+        metadata = YouTubeMetadata(**raw_meta)
         if metadata.video_id != video_id:
             raise ValueError("Cached video ID mismatch")
         urls = record["thumbnails"]
     except (OSError, ValueError, TypeError, KeyError):
         metadata, urls = _extract(video_id, manager)
         manager.check_cancelled()
-        _save_cache(record_path, json.dumps({"metadata": asdict(metadata), "thumbnails": urls}).encode("utf-8"))
+        _save_cache(
+            record_path,
+            json.dumps({
+                "schema_version": _CACHE_SCHEMA_VERSION,
+                "metadata": asdict(metadata),
+                "thumbnails": urls,
+            }).encode("utf-8"),
+        )
     try:
         thumbnail = thumbnail_path.read_bytes()
     except OSError:

@@ -1,7 +1,7 @@
 # AutoClip Studio — Agent Handoff & Progress
 
 **Last Updated:** 2026-11-26  
-**Current Phase:** Global UI/UX Refinement & Native macOS Apple Silicon Validation Complete
+**Current Phase:** YouTube Most Replayed Analysis & Hybrid AI Highlight Detection Complete
 
 ## Execution Status
 
@@ -13,6 +13,13 @@
 - **Generated Clips SaaS Master-Detail Redesign** (`a2f2bc6`)
 - **First-Time Setup Wizard & Dependency Manager** (`fed338b`)
 - **Local Video Import & Optional External SRT Import** (`3121a88`)
+- **YouTube Most Replayed Analysis & Hybrid AI Highlight Detection:**
+  - **Audience Heatmap (`autoclip_studio/heatmap.py`, `autoclip_studio/youtube_metadata.py`):** Extended yt-dlp metadata extraction (`schema_version=2` in existing `youtube-metadata` cache, zero video download) to retrieve `heatmap`, `subtitles`, `automatic_captions`, and `language`. Implemented local normalization (`parse_heatmap`), peak detection, neighboring segment expansion, adjacent/overlapping region merging (`detect_highlight_regions`), and deterministic interval scoring (`region_replay_score`). Never fabricates replay data when unavailable.
+  - **YouTube Subtitle Extraction (`autoclip_studio/youtube_subtitles.py`):** Added optional "Use YouTube subtitles when available" workflow supporting Indonesian, English, and other available languages; prefers manual subtitles in source/preferred language over automatic captions, strips WebVTT tags, deduplicates YouTube's rolling 2-line auto-captions without fabricating word-level timestamps or silently translating, validates coverage/synchronization, and enforces transcript priority: (1) User SRT → (2) YouTube subtitles/auto-captions → (3) local/cloud Speech-to-Text.
+  - **Hybrid AI & Most Replayed Ranking (`autoclip_studio/highlights.py`, `autoclip_studio/pipeline.py`, `autoclip_studio/models.py`, `autoclip_studio/database.py`):** Added `Hybrid (AI + Most Replayed)`, `AI Analysis`, and `Most Replayed` modes with deterministic backend weighted ranking (default 60% AI / 40% Replay, user-adjustable), compact replay-region prompt summaries preserving full-video coverage so strong non-peak moments remain eligible, sentence-boundary alignment around replay peaks, automatic fallback to AI Analysis for local videos or videos without heatmap data, and SQLite persistence of `ai_score`, `replay_score`, `reason`, and `detection_mode`.
+  - **UI Integration (`autoclip_studio/ui/heatmap_view.py`, `autoclip_studio/gui.py`, `autoclip_studio/ui/clips_workspace.py`):** Added compact interactive `AudienceHeatmapWidget` (hoverable replay intensity curve, peak markers, highlighted regions, availability & mode badges) beneath `YouTubePreview`, Highlight Detection mode selector, Hybrid AI/Replay weight control, YouTube subtitles checkbox/track summary, and Combined / AI / Replay score chips + "Why selected" rationale in Generated Clips details.
+  - **Live YouTube & Unit Validation:** Verified real YouTube extraction (`dQw4w9WgXcQ`: 100 heatmap points + manual/auto subs; `jNQXAC9IVRw`: 100 heatmap points + 6-cue manual English subtitles extracted without Whisper; `00000000000`: clean unavailable error) and `tests/test_heatmap_and_hybrid.py` (5 new tests).
+  - **Limitations:** Replay intensity is a relative YouTube popularity signal (not an exact replay count, retention percentage, or virality guarantee); YouTube may omit `heatmap` on low-view, very new, or live videos (automatically falls back to AI Analysis); YouTube VTT tracks provide cue-level rather than word-level timestamps.
 - **Global UI/UX Refinement (UI/UX Pro Max):**
   - **Shared Layout & Style Architecture (`autoclip_studio/ui/style.py`):** Added reusable `configure_form_layout()` (`ExpandingFieldsGrow`, `AlignLeft | AlignTop`, `WrapLongRows`, consistent 18×12px spacing) and `configure_input()` (`Expanding` horizontal policy, `AdjustToMinimumContentsLengthWithIcon`, unelided dropdown popups) to eliminate macOS `QFormLayout` narrow/centered field collapse across the entire app while preserving Windows parity.
   - **Global Stylesheet Polish:** Added `QDoubleSpinBox` and `QDialog` dark-surface rules, unified input/button `min-height: 20px` alignment, styled `QComboBox::drop-down`, `QScrollBar:horizontal`, transparent `QGroupBox QStackedWidget`, and crisp dark-mode `QCheckBox::indicator:unchecked` borders.
@@ -93,7 +100,7 @@
 
 ## Test Results
 - **macOS 27.2.1 (`arm64`, Apple Silicon):**
-  - `.venv/bin/python3 -m pytest -q`: **90 passed, 3 skipped, 0 failed** (3 Windows-only/environment skips).
+  - `.venv/bin/python3 -m pytest -q`: **95 passed, 3 skipped, 0 failed** (includes `tests/test_heatmap_and_hybrid.py`; 3 Windows-only/environment skips).
   - `.venv/bin/python3 -m tests.integration_smoke`: **Passed** (`h264_videotoolbox`, 9 face-tracking sample points, `948,804 bytes`, `6.30s`).
   - `.venv/bin/python3 scripts/setup.py --check`: **Passed** (exit code 0).
 - **Windows 11 x64 Host (previous session):**

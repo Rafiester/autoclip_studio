@@ -10,8 +10,9 @@ from typing import Callable
 from .config import SettingsStore
 from .database import Database
 from .diagnostics import LOG, SUCCESS, log_error, redact
+from .heatmap import HeatmapPoint, parse_heatmap
 from .highlights import select_highlights
-from .media import DownloadProgress, acquire_source, is_youtube_url, probe
+from .media import DownloadProgress, acquire_source, is_youtube_url, probe, youtube_id
 from .models import ProjectOptions, RenderedClip, Transcript
 from .paths import CACHE_DIR, OUTPUT_DIR
 from .performance import HardwareMonitor, resolve_profile_limits
@@ -21,6 +22,8 @@ from .rendering import render_clip, source_dimensions
 from .subtitles import parse_srt_file
 from .thumbnails import generate_clip_thumbnail
 from .transcription import SpeechProgress, export_transcript, transcribe
+from .youtube_metadata import YouTubeMetadata, YouTubeMetadataError, fetch_youtube_metadata
+from .youtube_subtitles import fetch_youtube_transcript
 
 
 Progress = Callable[[int, str], None]
@@ -65,8 +68,18 @@ class Pipeline:
             job_dir.mkdir(parents=True, exist_ok=True)
             if resume_analysis:
                 source, dimensions, transcript = _load_analysis(checkpoint)
+                yt_meta_obj = _metadata_from_options(options)
             else:
                 youtube_source = is_youtube_url(options.source)
+                yt_meta_obj = _metadata_from_options(options)
+                vid_id = youtube_id(options.source) if youtube_source else None
+                if youtube_source and vid_id and yt_meta_obj is None and (
+                    options.highlight_mode in {"hybrid", "most_replayed"} or options.use_youtube_subtitles
+                ):
+                    try:
+                        yt_meta_obj, _ = fetch_youtube_metadata(vid_id, self.manager)
+                    except YouTubeMetadataError as meta_err:
+                        LOG.warning("YouTube metadata unavailable for %s: %s", vid_id, meta_err)
                 self._update(
                     project_id, 3,
                     "Downloading YouTube video" if youtube_source else "Importing local video (download skipped)",
@@ -78,6 +91,8 @@ class Pipeline:
                 )
                 dimensions = source_dimensions(source, self.manager)
                 self.monitor.wait_if_constrained(perf, self.manager.cancel_event, self._logger(progress, 11))
+                # Transcript priority: 1) User SRT -> 2) YouTube subtitles -> 3) Local/Cloud Speech-to-Text
+                transcript = None
                 if options.srt_path:
                     self._update(project_id, 12, "Importing external SRT subtitles (transcription skipped)", progress)
                     info = probe(source, self.manager)
@@ -93,7 +108,23 @@ class Pipeline:
                         Path(options.srt_path).name, srt_result.cue_count,
                         srt_result.detected_language, srt_result.encoding,
                     )
-                else:
+                elif youtube_source and vid_id and options.use_youtube_subtitles and yt_meta_obj is not None:
+                    self._update(project_id, 12, "Checking YouTube subtitles / automatic captions", progress)
+                    info = probe(source, self.manager)
+                    vid_dur = float(info.get("format", {}).get("duration") or yt_meta_obj.duration or 0.0)
+                    yt_sub = fetch_youtube_transcript(
+                        vid_id,
+                        self.manager,
+                        metadata=yt_meta_obj,
+                        preferred_language=options.youtube_subtitle_language or options.language or "",
+                        video_duration=vid_dur,
+                        cache_enabled=options.cache_enabled,
+                        log=self._logger(progress, 12),
+                    )
+                    if yt_sub is not None:
+                        transcript, sub_label = yt_sub
+                        self._update(project_id, 28, f"Using {sub_label} (transcription skipped)", progress)
+                if transcript is None:
                     self._update(project_id, 12, "Generating timestamped transcript", progress)
                     transcript = transcribe(
                         source, options.whisper_model, options.whisper_device, options.language,
@@ -103,6 +134,17 @@ class Pipeline:
                 self._update(project_id, 40, "Selecting the strongest highlights", progress)
             self.manager.check_cancelled()
             self.monitor.wait_if_constrained(perf, self.manager.cancel_event, self._logger(progress, 40))
+            heatmap_points: list[HeatmapPoint] = (
+                parse_heatmap(yt_meta_obj.heatmap, duration=transcript.duration)
+                if yt_meta_obj is not None and yt_meta_obj.heatmap else []
+            )
+            effective_mode = options.highlight_mode
+            if not is_youtube_url(options.source) and effective_mode in {"hybrid", "most_replayed"}:
+                self._logger(progress, 40)("Local video selected; using AI Analysis (YouTube heatmap unavailable).")
+                effective_mode = "ai"
+            elif effective_mode in {"hybrid", "most_replayed"} and not heatmap_points:
+                self._logger(progress, 40)("No YouTube heatmap data available; falling back to AI Analysis.")
+                effective_mode = "ai"
             try:
                 provider = self._provider(options.provider, options.model, warning)
                 if resume_analysis:
@@ -117,6 +159,7 @@ class Pipeline:
                     transcript, options.clip_count, options.min_duration, options.max_duration,
                     provider, self._logger(progress, 40), source, options.multimodal,
                     manager=self.manager, cache_enabled=options.cache_enabled,
+                    mode=effective_mode, heatmap_points=heatmap_points, ai_weight=options.ai_weight,
                 )
             except ProviderError as error:
                 self.manager.check_cancelled()
@@ -173,6 +216,8 @@ class Pipeline:
                     highlight.description, highlight.score, duration,
                     thumbnail_path=thumb_path, thumbnail_raw_path=thumb_raw,
                     thumbnail_timestamp=thumb_ts, thumbnail_cache_key=thumb_key,
+                    ai_score=highlight.ai_score, replay_score=highlight.replay_score,
+                    reason=highlight.reason, detection_mode=highlight.detection_mode,
                 )
             manifest = {
                 "project_id": project_id,
@@ -239,6 +284,28 @@ class Pipeline:
                 LOG.info("%s", message)
             callback(value, message)
         return emit
+
+
+def _metadata_from_options(options: ProjectOptions) -> YouTubeMetadata | None:
+    raw = options.youtube_metadata
+    if not isinstance(raw, dict) or not raw.get("video_id"):
+        return None
+    try:
+        return YouTubeMetadata(
+            video_id=str(raw["video_id"]),
+            title=str(raw.get("title") or ""),
+            channel=str(raw.get("channel") or ""),
+            duration=int(raw["duration"]) if raw.get("duration") is not None else None,
+            resolution=str(raw.get("resolution") or ""),
+            view_count=int(raw["view_count"]) if raw.get("view_count") is not None else None,
+            upload_date=str(raw["upload_date"]) if raw.get("upload_date") else None,
+            heatmap=tuple(raw.get("heatmap") or ()),
+            subtitle_languages=tuple(raw.get("subtitle_languages") or ()),
+            auto_caption_languages=tuple(raw.get("auto_caption_languages") or ()),
+            language=str(raw.get("language") or ""),
+        )
+    except (TypeError, ValueError, KeyError):
+        return None
 
 
 def _slug(value: str) -> str:

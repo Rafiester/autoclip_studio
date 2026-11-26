@@ -655,12 +655,26 @@ class ClipDetailPlayerPanel(QFrame):
         self.score_bar.setTextVisible(False)
         info_box.addWidget(self.score_bar)
 
+        score_breakdown = QHBoxLayout()
+        score_breakdown.setSpacing(6)
+        self.ai_score_chip = QLabel("AI: —", objectName="statusChip")
+        self.replay_score_chip = QLabel("Replay: —", objectName="statusChip")
+        self.mode_chip = QLabel("Mode: —", objectName="statusChip")
+        for chip in (self.ai_score_chip, self.replay_score_chip, self.mode_chip):
+            score_breakdown.addWidget(chip)
+        score_breakdown.addStretch()
+        info_box.addLayout(score_breakdown)
+
         self.specs_label = QLabel("—", objectName="muted")
         self.specs_label.setWordWrap(True)
         self.desc_label = QLabel("Select a clip from the library to inspect and play.", objectName="muted")
         self.desc_label.setWordWrap(True)
+        self.reason_label = QLabel("", objectName="muted")
+        self.reason_label.setWordWrap(True)
+        self.reason_label.hide()
         info_box.addWidget(self.specs_label)
         info_box.addWidget(self.desc_label)
+        info_box.addWidget(self.reason_label)
         root.addLayout(info_box)
 
         # Simplified action bar: 1 primary CTA + 1 overflow menu
@@ -719,8 +733,12 @@ class ClipDetailPlayerPanel(QFrame):
             self.title_label.setText("Select a clip")
             self.score_badge.setText("—")
             self.score_bar.setValue(0)
+            self.ai_score_chip.setText("AI: —")
+            self.replay_score_chip.setText("Replay: —")
+            self.mode_chip.setText("Mode: —")
             self.specs_label.setText("—")
             self.desc_label.setText("Select a clip from the library to inspect and play.")
+            self.reason_label.hide()
             self.time_current.setText("00:00")
             self.time_total.setText("00:00")
             self.seek_slider.setRange(0, 0)
@@ -733,8 +751,21 @@ class ClipDetailPlayerPanel(QFrame):
         score = int(self._current_clip.get("score") or 0)
 
         self.title_label.setText(str(self._current_clip["title"]))
-        self.score_badge.setText(f"Score {score}/100")
+        ai_score = self._current_clip.get("ai_score")
+        replay_score = self._current_clip.get("replay_score")
+        mode_raw = str(self._current_clip.get("detection_mode") or "ai")
+        mode_names = {"hybrid": "Hybrid", "most_replayed": "Most Replayed", "ai": "AI Analysis"}
+        self.score_badge.setText(f"Combined {score}/100" if replay_score is not None else f"Score {score}/100")
         self.score_bar.setValue(max(0, min(100, score)))
+        self.ai_score_chip.setText(f"AI: {int(ai_score)}/100" if ai_score is not None else f"AI: {score}/100")
+        self.replay_score_chip.setText(f"Replay: {int(replay_score)}/100" if replay_score is not None else "Replay: N/A")
+        self.mode_chip.setText(f"Mode: {mode_names.get(mode_raw, mode_raw)}")
+        reason_text = str(self._current_clip.get("reason") or "").strip()
+        if reason_text:
+            self.reason_label.setText(f"Why selected: {reason_text}")
+            self.reason_label.show()
+        else:
+            self.reason_label.hide()
         self.time_current.setText("00:00")
         self.time_total.setText(_format_duration(duration))
 

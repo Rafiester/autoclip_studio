@@ -57,6 +57,10 @@ class Database:
                 ("thumbnail_raw_path", "TEXT NOT NULL DEFAULT ''"),
                 ("thumbnail_timestamp", "REAL"),
                 ("thumbnail_cache_key", "TEXT NOT NULL DEFAULT ''"),
+                ("ai_score", "INTEGER"),
+                ("replay_score", "INTEGER"),
+                ("reason", "TEXT NOT NULL DEFAULT ''"),
+                ("detection_mode", "TEXT NOT NULL DEFAULT 'ai'"),
             )
             for column, definition in migrations:
                 if column not in existing:
@@ -131,16 +135,21 @@ class Database:
                  description: str, score: int, duration: float, *,
                  thumbnail_path: str = "", thumbnail_raw_path: str = "",
                  thumbnail_timestamp: float | None = None,
-                 thumbnail_cache_key: str = "") -> str:
+                 thumbnail_cache_key: str = "",
+                 ai_score: int | None = None,
+                 replay_score: int | None = None,
+                 reason: str = "",
+                 detection_mode: str = "ai") -> str:
         clip_id = uuid.uuid4().hex
         with self._lock, closing(self._connect()) as db, db:
             db.execute(
                 "INSERT INTO clips (id, project_id, path, title, hook, description, score, duration, created_at, "
-                "thumbnail_path, thumbnail_raw_path, thumbnail_timestamp, thumbnail_cache_key) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "thumbnail_path, thumbnail_raw_path, thumbnail_timestamp, thumbnail_cache_key, "
+                "ai_score, replay_score, reason, detection_mode) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (clip_id, project_id, path, title, hook, description, score, duration,
                  datetime.now(timezone.utc).isoformat(), thumbnail_path, thumbnail_raw_path,
-                 thumbnail_timestamp, thumbnail_cache_key),
+                 thumbnail_timestamp, thumbnail_cache_key, ai_score, replay_score, reason, detection_mode),
             )
         return clip_id
 

@@ -57,17 +57,28 @@ class Highlight:
     description: str
     score: int
     reason: str = ""
+    ai_score: int | None = None
+    replay_score: int | None = None
+    detection_mode: str = "ai"
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "Highlight":
+        score_val = max(0, min(100, int(float(value.get("score", 50)))))
+        raw_ai = value.get("ai_score")
+        raw_replay = value.get("replay_score")
+        ai_val = max(0, min(100, int(float(raw_ai)))) if raw_ai is not None else None
+        replay_val = max(0, min(100, int(float(raw_replay)))) if raw_replay is not None else None
         return cls(
             float(value.get("start", value.get("start_time", 0))),
             float(value.get("end", value.get("end_time", 0))),
             str(value.get("title", "Untitled clip")),
             str(value.get("hook", value.get("hook_sentence", ""))),
             str(value.get("description", "")),
-            max(0, min(100, int(float(value.get("score", 50))))),
+            score_val,
             str(value.get("reason", value.get("virality_reason", ""))),
+            ai_score=ai_val,
+            replay_score=replay_val,
+            detection_mode=str(value.get("detection_mode") or "ai"),
         )
 
 
@@ -91,9 +102,13 @@ class ProjectOptions:
     language: str | None = None
     output_dir: str = "output"
     project_name: str = ""
-    youtube_metadata: dict[str, str | int | None] | None = None
+    youtube_metadata: dict[str, Any] | None = None
     srt_path: str = ""
     srt_offset_seconds: float = 0.0
+    highlight_mode: str = "ai"
+    ai_weight: float = 0.6
+    use_youtube_subtitles: bool = False
+    youtube_subtitle_language: str = ""
 
     @property
     def output_size(self) -> tuple[int, int]:
