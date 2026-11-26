@@ -29,7 +29,7 @@ class ClipThumbnailPreview(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumSize(180, 235)
+        self.setMinimumSize(0, 0)
         self._image = QImage()
         self._duration_text = ""
         self._loading = False
@@ -67,7 +67,7 @@ class ClipThumbnailPreview(QWidget):
         else:
             painter.setPen(QColor("#A3A8B5"))
             label = "Generating thumbnail…" if self._loading else (self._status or "Select a clip")
-            painter.drawText(bounds, Qt.AlignmentFlag.AlignCenter, label)
+            painter.drawText(bounds.adjusted(8, 8, -8, -8), Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, label)
 
         if self._duration_text:
             import sys

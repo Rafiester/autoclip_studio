@@ -949,14 +949,48 @@ QLabel#statusChip[tone="info"] {{
 QPushButton#viewToggle {{
     background: {t["bg_elevated"]};
     border: 1px solid {t["border_subtle"]};
-    padding: 0 10px;
-    min-height: 30px;
+    padding: 0;
+    min-width: 28px;
+    min-height: 28px;
     color: {t["text_secondary"]};
 }}
 QPushButton#viewToggle:checked {{
     background: {t["brand_tint"]};
     border-color: {t["brand_primary"]};
     color: {t["text_primary"]};
+}}
+QFrame#selectionToolbar {{
+    background: {t["bg_elevated"]};
+    border: 1px solid {t["border_strong"]};
+    border-radius: 10px;
+}}
+QFrame#clipLibraryCard[checked="true"], QFrame#queueRowCard[checked="true"] {{
+    background: {t["brand_tint"]};
+    border: 1.5px solid {t["brand_accent"]};
+}}
+QPushButton#cardOverflowButton {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 0;
+    min-width: 24px;
+    min-height: 24px;
+}}
+QPushButton#cardOverflowButton:hover {{
+    background: {t["bg_hover"]};
+    border-color: {t["border_subtle"]};
+}}
+QPushButton#cardOverflowButton::menu-indicator, QPushButton#iconButton::menu-indicator {{
+    image: none;
+    width: 0px;
+}}
+QFrame#selectionToolbar QPushButton,
+QWidget#clipFooterRow QPushButton {{
+    padding: 0 9px;
+}}
+QPushButton#compactButton {{
+    padding: 0 8px;
+    font-size: 12px;
 }}
 QPushButton#sourceTab {{
     background: {t["bg_elevated"]};

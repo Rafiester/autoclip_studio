@@ -1,11 +1,27 @@
 # AutoClip Studio — Agent Handoff & Progress
 
 **Last Updated:** 2026-11-26  
-**Current Phase:** Adjustable Caption Positioning & Face-Safe Placement Complete
+**Current Phase:** Generated Clips Bulk Management & Quick Actions Complete
 
 ## Execution Status
 
 ### Completed Tasks
+- **Generated Clips Bulk Management & Quick Actions:** (Pre-modification checkpoint: `6e521bb`)
+  - **Safe Deletion, OS Trash & Cross-Platform Reveal ([`autoclip_studio/clip_cleanup.py`](autoclip_studio/clip_cleanup.py), [`autoclip_studio/database.py`](autoclip_studio/database.py)):**
+    - Added `get_clip()`, `delete_clips()`, and `other_clips_asset_refs()` in `database.py` so cleanup transactions preserve any media, thumbnail, raw preview, or local project source still referenced elsewhere.
+    - Implemented `open_clip_file()`, `reveal_in_file_manager()` (`explorer.exe /select,<path>` on Windows, `open -R` on macOS, falling back to the containing folder when the clip file is missing), `move_path_to_trash()` (`QFile.moveToTrash` with `gio trash` Linux fallback), `is_protected_asset()` (guarding `CACHE_DIR`, `DATA_ROOT / "jobs"`, `LOG_DIR`, directories, `project.json`, and shared `protected_refs`), `_prune_manifest_clips()`, and `delete_clips_transaction()` (`ClipDeletionReport`) verifying deletion before committing SQLite row removals and reporting partial failures.
+  - **Bulk Selection Mode, Card Overflow Menus, Missing-File Detection & Quick Footer ([`autoclip_studio/ui/clips_workspace.py`](autoclip_studio/ui/clips_workspace.py), [`autoclip_studio/ui/clips_view.py`](autoclip_studio/ui/clips_view.py), [`autoclip_studio/ui/theme.py`](autoclip_studio/ui/theme.py), [`autoclip_studio/gui.py`](autoclip_studio/gui.py)):**
+    - Added `Select Clips` selection mode in `ClipLibraryPanel` with hidden-when-browsing card checkboxes (`ClipLibraryCard`) across list and grid views, check state independent of active player preview, `Select All` / `Select Visible (N)`, selected count indicator (`N selected`), `Clear Selection`, `Done`, and bulk `bulk_more_btn` menu (`Select Missing Files`, `Select All in Entire Library`, `Delete Selected Clips…`, `Clear Selection`).
+    - Added per-card three-dot `overflow_btn` (`Open File`, `Open Folder`, `Delete Clip…`) and disk availability checks (`"File missing"` chip, `_CroppedThumb` + `ClipThumbnailPreview` placeholders, disabling playback and `Open File` while keeping `Open Folder` enabled when the parent directory exists, and refreshing on `show_page(3)`).
+    - Replaced the footer `Actions` button with direct `Open File` (`#primary`), `Open Folder`, and icon-only `more_btn`, plus `ClipDeleteDialog` separating `Remove from Library` vs `Delete Clip Files` (and `Clean Up Records` when only missing-file entries are selected).
+    - Fixed compact `920x680` layout bugs (`_rebuild_cards` synchronous grid container height calculation preventing card overlap, compact QSS rules for `#compactButton` / `#viewToggle` preventing toolbar text clipping, and `ClipThumbnailPreview.setMinimumSize(0, 0)` preventing right-edge clipping inside `AspectVideoStage`), and ensured `show_page()` / `refresh_all()` keep `ClipDetailPlayerPanel.release_media()` inactive off-page so background refreshes do not re-lock clip files on Windows.
+  - **Verification & Native Runtime Scope:**
+    - Added [`tests/test_generated_clips_bulk.py`](tests/test_generated_clips_bulk.py) covering selection mode list/grid/filter scoping, external deletion detection & Windows handle release, quick actions, `920x680` dark/light geometry, `ClipDeleteDialog` modes, protected assets/shared thumbnails, and partial trash failures.
+    - Verified visually in Dark (`1280x820` list browse & selection mode) and Light (`920x680` compact grid mode) captures (`verify_clips_bulk_ui.py`), plus native Windows Qt (`windows` QPA) launch smoke check (`task-1601`).
+    - Targeted UI & regression suite (`test_generated_clips_bulk`, `test_thumbnails`, `test_player_audio`, `test_heatmap_and_hybrid`, `test_ui_refinement_and_telemetry`, `test_ui_stabilization`, `test_floating_sidebar_navigation`, `test_theme_system`, `test_cross_platform`, `test_caption_positioning`, `test_captions`, `test_persistent_settings`, `test_pipeline_regressions`, `test_media`, `test_local_and_srt`): **65 passed**.
+    - Full `pytest` run (`.\.venv\Scripts\python.exe -m pytest`): **189 passed, 1 skipped**, with **2** pre-existing unrelated failures (`test_download_card_metrics_activity_and_cancellation` tabular font width check and `test_new_project_smart_reframe_selector_ui` unisolated host `settings.json` returning `'split_screen'`).
+    - macOS Apple Silicon caveat: `reveal_in_file_manager()` (`open -R`) and Trash paths were verified via mocks/tests on Windows 11 x64 only; native macOS Finder and Trash UI runtime execution remains untested on Apple Silicon hardware.
+
 - **Adjustable Caption Positioning & Face-Safe Placement:** (Pre-modification checkpoint: `05149e4`)
   - **Default Placement & Coordinate Model ([`autoclip_studio/captions.py`](autoclip_studio/captions.py)):**
     - Replaced fixed bottom `0.14` margin (`86%` bottom edge, overlapping bottom TikTok/Shorts UI overlays) with normalized vertical center anchor **`DEFAULT_CAPTION_Y_RATIO = 0.73`** (`73%` frame height — lower-chest zone cleanly below speaker chins/mics and above bottom platform UI chrome) across portrait resolutions while keeping stacked `split_screen` defaulting safely onto the `50%` seam.

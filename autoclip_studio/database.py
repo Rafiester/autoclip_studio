@@ -256,6 +256,11 @@ class Database:
         with self._lock, closing(self._connect()) as db, db:
             return db.execute("UPDATE clips SET title = ? WHERE id = ?", (cleaned, clip_id)).rowcount == 1
 
+    def get_clip(self, clip_id: str) -> dict[str, Any] | None:
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT * FROM clips WHERE id = ?", (clip_id,)).fetchone()
+            return dict(row) if row else None
+
     def delete_clip(self, clip_id: str) -> dict[str, Any] | None:
         with self._lock, closing(self._connect()) as db, db:
             row = db.execute("SELECT * FROM clips WHERE id = ?", (clip_id,)).fetchone()
@@ -263,6 +268,38 @@ class Database:
                 return None
             db.execute("DELETE FROM clips WHERE id = ?", (clip_id,))
             return dict(row)
+
+    def delete_clips(self, clip_ids: list[str]) -> list[dict[str, Any]]:
+        """Atomically delete multiple clip records and return the removed rows."""
+        unique_ids = [cid for cid in dict.fromkeys(str(c) for c in clip_ids) if cid]
+        if not unique_ids:
+            return []
+        placeholders = ",".join("?" for _ in unique_ids)
+        with self._lock, closing(self._connect()) as db, db:
+            rows = [
+                dict(r)
+                for r in db.execute(f"SELECT * FROM clips WHERE id IN ({placeholders})", unique_ids)
+            ]
+            if rows:
+                db.execute(f"DELETE FROM clips WHERE id IN ({placeholders})", unique_ids)
+            return rows
+
+    def other_clips_asset_refs(self, exclude_clip_ids: set[str]) -> set[Path]:
+        """Collect all resolved media, thumbnail, and project source paths referenced outside `exclude_clip_ids`."""
+        refs: set[Path] = set()
+        with closing(self._connect()) as db:
+            for row in db.execute("SELECT id, path, thumbnail_path, thumbnail_raw_path FROM clips"):
+                if str(row["id"]) in exclude_clip_ids:
+                    continue
+                for col in ("path", "thumbnail_path", "thumbnail_raw_path"):
+                    raw = str(row[col] or "").strip()
+                    if raw:
+                        refs.add(Path(raw).resolve())
+            for row in db.execute("SELECT source FROM projects"):
+                raw_src = str(row["source"] or "").strip()
+                if raw_src and not raw_src.lower().startswith(("http://", "https://")):
+                    refs.add(Path(raw_src).resolve())
+        return refs
 
     def projects(self, limit: int = 100) -> list[dict[str, Any]]:
         with closing(self._connect()) as db:

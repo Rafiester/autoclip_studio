@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from .captions import TEMPLATE_DEFAULT, TEMPLATES
+from .clip_cleanup import delete_clips_transaction, open_clip_file, reveal_in_file_manager
 from .config import SettingsStore, credential_store_name
 from .database import Database
 from .diagnostics import LOG, SUCCESS, log_error, redact
@@ -38,7 +39,7 @@ from .thumbnails import export_thumbnail
 from .transcription import SpeechProgress
 from .ui.caption_library import CaptionLibrary
 from .ui.clips_view import ExportThumbnailDialog, FramePickerDialog, ThumbnailTaskRunner
-from .ui.clips_workspace import ClipDetailPlayerPanel, ClipLibraryPanel
+from .ui.clips_workspace import ClipDeleteDialog, ClipDetailPlayerPanel, ClipLibraryPanel
 from .ui.dependency_view import DependencyManagerView
 from .ui.download_view import DownloadView
 from .ui.heatmap_view import AudienceHeatmapWidget
@@ -582,6 +583,9 @@ class MainWindow(QMainWindow):
         self.clips_library = ClipLibraryPanel()
         self.clips_library.clip_selected.connect(self._on_clip_selected)
         self.clips_library.export_all_requested.connect(self.export_all_clips)
+        self.clips_library.open_clip_requested.connect(self._open_clip_item)
+        self.clips_library.open_clip_folder_requested.connect(self._open_clip_folder_item)
+        self.clips_library.delete_clips_requested.connect(self._confirm_and_delete_clips)
         splitter.addWidget(self.clips_library)
 
         self.clip_detail = ClipDetailPlayerPanel()
@@ -850,7 +854,7 @@ class MainWindow(QMainWindow):
             self.show_route(index)
             return
         if self.stack.currentIndex() == 3 and index != 3 and hasattr(self, "clip_detail"):
-            self.clip_detail.stop_playback()
+            self.clip_detail.release_media()
         if self.stack.currentIndex() == 4 and index != 4:
             self.caption_library.stop()
         if hasattr(self, "performance_view"):
@@ -866,6 +870,9 @@ class MainWindow(QMainWindow):
                 button.setChecked(button_index == index)
         if index in {0, 2, 3}:
             self.refresh_all()
+            if index == 3 and hasattr(self, "clips_library"):
+                self.clips_library.refresh_file_availability()
+                self.preview_selected()
         elif index == 9:
             self._refresh_cache_footprint()
 
@@ -1595,10 +1602,15 @@ class MainWindow(QMainWindow):
                 )
             if self.thumb_runner.is_busy(clip["id"]):
                 busy_ids.add(str(clip["id"]))
-        self.clips_library.set_clips(clips, busy_ids=busy_ids)
+        on_clips_page = hasattr(self, "stack") and self.stack.currentIndex() == 3
+        with QSignalBlocker(self.clips_library):
+            self.clips_library.set_clips(clips, busy_ids=busy_ids)
         self.metric_clips.findChild(QLabel, "metricValue").setText(str(self.database.clip_count()))
         self.clip_rows = clips
-        self.preview_selected()
+        if on_clips_page:
+            self.preview_selected()
+        elif hasattr(self, "clip_detail") and not self.clip_detail.player.source().isEmpty():
+            self.clip_detail.release_media()
 
     def _fill_projects(self, table: QTableWidget, projects: list[dict], compact: bool) -> None:
         table.setRowCount(len(projects))
@@ -1721,9 +1733,15 @@ class MainWindow(QMainWindow):
     def open_selected_clip_folder(self) -> None:
         clip = self._selected_clip()
         if clip:
-            folder = Path(clip["path"]).parent
-            if folder.exists():
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+            self._open_clip_folder_item(clip)
+
+    def _open_clip_folder_item(self, clip: dict) -> None:
+        path = Path(str(clip.get("path") or ""))
+        if not reveal_in_file_manager(path):
+            QMessageBox.information(self, "Folder unavailable", "The clip folder could not be found on disk.")
+        if hasattr(self, "clips_library"):
+            self.clips_library.refresh_file_availability()
+            self.preview_selected()
 
     def export_all_clips(self) -> None:
         clips = self.clip_rows or self.database.clips()
@@ -1745,27 +1763,58 @@ class MainWindow(QMainWindow):
 
     def delete_selected_clip(self) -> None:
         clip = self._selected_clip()
-        if not clip:
+        if clip:
+            self._confirm_and_delete_clips([clip])
+
+    def _confirm_and_delete_clips(self, clips: list[dict]) -> None:
+        if not clips:
             return
-        if QMessageBox.question(
-            self, "Delete clip",
-            f"Delete '{clip['title']}' and its thumbnail files?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        ) != QMessageBox.StandardButton.Yes:
+        dialog = ClipDeleteDialog(clips, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        self.clip_detail.stop_playback()
-        self.player.setSource(QUrl())
-        removed = self.database.delete_clip(clip["id"])
-        if removed:
-            for key in ("path", "thumbnail_path", "thumbnail_raw_path"):
-                target = Path(removed.get(key) or "")
-                if target.is_file():
-                    try:
-                        target.unlink()
-                    except OSError:
-                        pass
+        self.execute_clip_deletion(clips, delete_files=dialog.delete_files)
+
+    def execute_clip_deletion(self, clips: list[dict], *, delete_files: bool = False) -> None:
+        def _release_handles(target_paths: set[Path]) -> None:
+            active_src = self.player.source().toLocalFile()
+            current_clip = self._selected_clip()
+            target_ids = {str(c.get("id") or "") for c in clips}
+            matches_current = bool(current_clip and str(current_clip.get("id") or "") in target_ids)
+            matches_src = False
+            if active_src:
+                try:
+                    matches_src = Path(active_src).resolve() in target_paths
+                except OSError:
+                    matches_src = False
+            if matches_current or matches_src:
+                self.clip_detail.release_media()
+                app = QApplication.instance()
+                if app is not None:
+                    app.processEvents()
+
+        report = delete_clips_transaction(
+            clips,
+            self.database,
+            delete_files=delete_files,
+            release_handles=_release_handles,
+        )
+        deleted_set = set(report.deleted_ids)
+        if deleted_set and hasattr(self, "clips_library"):
+            self.clips_library.sync_after_deletion(deleted_set)
         self.clip_rows = None
         self.refresh_all()
+        if report.failed_items:
+            summary_lines = [f"• {title}: {err}" for title, err in report.failed_items[:6]]
+            if len(report.failed_items) > 6:
+                summary_lines.append(f"• …and {len(report.failed_items) - 6} more.")
+            QMessageBox.warning(
+                self,
+                "Some clip files could not be removed",
+                "Removed "
+                f"{len(report.deleted_ids)} of {report.requested_count} clip(s).\n\n"
+                "The remaining items were kept in your library because their files could not be moved to Trash / Recycle Bin:\n"
+                + "\n".join(summary_lines),
+            )
 
     def toggle_play(self) -> None:
         self.clip_detail.toggle_play()
@@ -1775,7 +1824,16 @@ class MainWindow(QMainWindow):
 
     def open_selected_clip(self) -> None:
         clip = self._selected_clip()
-        if clip: QDesktopServices.openUrl(QUrl.fromLocalFile(clip["path"]))
+        if clip:
+            self._open_clip_item(clip)
+
+    def _open_clip_item(self, clip: dict) -> None:
+        path = Path(str(clip.get("path") or ""))
+        if not open_clip_file(path):
+            QMessageBox.warning(self, "Clip file missing", f"Could not open '{path.name}' because the file no longer exists on disk.")
+        if hasattr(self, "clips_library"):
+            self.clips_library.refresh_file_availability()
+            self.preview_selected()
 
     def open_output_folder(self) -> None:
         path = Path(self.settings.data.get("output_dir") or OUTPUT_DIR)

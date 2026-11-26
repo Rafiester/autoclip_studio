@@ -11,9 +11,9 @@ from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPainterPath, 
 from PySide6.QtMultimedia import QAudioDevice, QAudioOutput, QMediaDevices, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMenu, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSlider,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QButtonGroup, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout,
+    QLabel, QLineEdit, QMenu, QProgressBar, QPushButton, QRadioButton, QScrollArea,
+    QSizePolicy, QSlider, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from ..diagnostics import LOG
@@ -73,20 +73,25 @@ def format_file_size(num_bytes: int) -> str:
 
 
 class _CroppedThumb(QWidget):
-    """Lightweight cropped 9:16 thumbnail image with optional duration badge."""
+    """Lightweight cropped 9:16 thumbnail image with optional duration badge and missing-file placeholder."""
 
     def __init__(self, width: int, height: int, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setFixedSize(width, height)
         self._image = QImage()
         self._loading = False
+        self._missing = False
         self._duration = ""
 
-    def set_data(self, thumb_path: str, duration: float, *, loading: bool = False) -> None:
+    def set_data(self, thumb_path: str, duration: float, *, loading: bool = False, missing: bool = False) -> None:
         self._loading = loading
+        self._missing = missing
         self._duration = _format_duration(duration) if duration > 0 else ""
-        path = Path(thumb_path) if thumb_path else None
-        self._image = QImage(str(path)) if path and path.is_file() else QImage()
+        if missing:
+            self._image = QImage()
+        else:
+            path = Path(thumb_path) if thumb_path else None
+            self._image = QImage(str(path)) if path and path.is_file() else QImage()
         self.update()
 
     def paintEvent(self, _event) -> None:
@@ -97,9 +102,17 @@ class _CroppedThumb(QWidget):
         clip = QPainterPath()
         clip.addRoundedRect(bounds, 8, 8)
         painter.setClipPath(clip)
-        painter.fillRect(bounds, QColor(t["bg_elevated"] if self._loading else t["bg_player"]))
+        bg_hex = t["bg_elevated"] if (self._loading or self._missing) else t["bg_player"]
+        painter.fillRect(bounds, QColor(bg_hex))
 
-        if not self._image.isNull():
+        if self._missing:
+            painter.setPen(QColor(t["semantic_danger_fg"]))
+            font = painter.font()
+            font.setPixelSize(10 if bounds.width() < 90 else 12)
+            font.setBold(True)
+            painter.setFont(font)
+            painter.drawText(bounds, Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, "Missing\nfile")
+        elif not self._image.isNull():
             scaled = self._image.scaled(
                 int(bounds.width()), int(bounds.height()),
                 Qt.AspectRatioMode.KeepAspectRatioByExpanding,
@@ -127,20 +140,43 @@ class _CroppedThumb(QWidget):
 
 
 class ClipLibraryCard(QFrame):
-    """Dynamic-height SaaS clip card supporting List View and Grid View with zero horizontal overflow."""
+    """Dynamic-height SaaS clip card supporting List View, Grid View, Selection Mode, and Overflow Menu."""
 
     clicked = Signal(str)
+    checked_toggled = Signal(str, bool)
+    open_file_requested = Signal(str)
+    open_folder_requested = Signal(str)
+    delete_requested = Signal(str)
 
-    def __init__(self, clip: dict, mode: str, status_text: str, *,
-                 loading: bool = False, selected: bool = False, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        clip: dict,
+        mode: str,
+        status_text: str,
+        *,
+        loading: bool = False,
+        selected: bool = False,
+        selection_mode: bool = False,
+        checked: bool = False,
+        file_exists: bool | None = None,
+        folder_exists: bool | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("clipLibraryCard")
         self.clip_id = str(clip["id"])
+        clip_path = Path(str(clip.get("path") or ""))
+        self._file_exists = clip_path.is_file() if file_exists is None else bool(file_exists)
+        self._folder_exists = clip_path.parent.is_dir() if folder_exists is None else bool(folder_exists)
+        self._missing = not self._file_exists
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip(f"{clip['title']}\nFile: {Path(clip['path']).name}")
+        self.setToolTip(f"{clip['title']}\nFile: {clip_path.name}")
         self.setProperty("selected", "true" if selected else "false")
+        self.setProperty("checked", "true" if (selection_mode and checked) else "false")
 
         t = theme_manager().tokens
+        fg = t["text_primary"]
+        danger = t["semantic_danger_fg"]
         thumb_path = str(clip.get("thumbnail_path") or "")
         duration = float(clip.get("duration") or 0.0)
         score = int(clip.get("score") or 0)
@@ -148,20 +184,61 @@ class ClipLibraryCard(QFrame):
         desc = str(clip.get("description") or "").strip()
         status_tone = "success" if status_text == "Ready" else ("danger" if status_text == "File missing" else "warning")
 
+        self.select_checkbox = QCheckBox(self)
+        self.select_checkbox.setAccessibleName(f"Select {title}")
+        self.select_checkbox.setChecked(checked)
+        self.select_checkbox.setVisible(selection_mode)
+        self.select_checkbox.toggled.connect(self._on_checkbox_toggled)
+
+        self.overflow_btn = QPushButton(objectName="cardOverflowButton")
+        self.overflow_btn.setFixedSize(24, 24)
+        self.overflow_btn.setIcon(lucide_icon("more-horizontal", fg, 14))
+        self.overflow_btn.setToolTip("Clip actions")
+        self.overflow_btn.setAccessibleName(f"Actions for {title}")
+        self.overflow_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        self.card_menu = QMenu(self.overflow_btn)
+        self.action_card_open = self.card_menu.addAction(
+            lucide_icon("external-link", fg, 14), "Open File",
+            lambda: self.open_file_requested.emit(self.clip_id),
+        )
+        self.action_card_folder = self.card_menu.addAction(
+            lucide_icon("folder-open", fg, 14), "Open Folder",
+            lambda: self.open_folder_requested.emit(self.clip_id),
+        )
+        self.card_menu.addSeparator()
+        self.action_card_delete = self.card_menu.addAction(
+            lucide_icon("trash-2", danger, 14), "Delete Clip…",
+            lambda: self.delete_requested.emit(self.clip_id),
+        )
+        self.action_card_open.setEnabled(self._file_exists)
+        self.action_card_folder.setEnabled(self._folder_exists)
+        self.overflow_btn.setMenu(self.card_menu)
+
         if mode == "grid":
-            self.setMinimumWidth(168)
+            self.setMinimumWidth(156)
             self.setMaximumWidth(230)
-            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             root = QVBoxLayout(self)
             root.setContentsMargins(10, 10, 10, 10)
-            root.setSpacing(8)
-            thumb = _CroppedThumb(148, 220, self)
-            thumb.set_data(thumb_path, duration, loading=loading)
+            root.setSpacing(6)
+
+            top_ctrl = QHBoxLayout()
+            top_ctrl.setContentsMargins(0, 0, 0, 0)
+            top_ctrl.setSpacing(4)
+            top_ctrl.addWidget(self.select_checkbox)
+            top_ctrl.addStretch()
+            top_ctrl.addWidget(self.overflow_btn)
+            root.addLayout(top_ctrl)
+
+            thumb = _CroppedThumb(136, 188, self)
+            thumb.set_data(thumb_path, duration, loading=loading, missing=self._missing)
             root.addWidget(thumb, alignment=Qt.AlignmentFlag.AlignCenter)
 
             title_lbl = QLabel(title)
             title_lbl.setWordWrap(True)
             title_lbl.setMinimumWidth(0)
+            title_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
             title_lbl.setStyleSheet(f"font-weight: 600; font-size: 13px; color: {t['text_primary']};")
             root.addWidget(title_lbl)
 
@@ -174,25 +251,26 @@ class ClipLibraryCard(QFrame):
             badges.addStretch()
             badges.addWidget(status_lbl)
             root.addLayout(badges)
+            self.setMinimumHeight(root.sizeHint().height())
         else:
             self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
             self.setMinimumWidth(0)
             root = QHBoxLayout(self)
-            root.setContentsMargins(12, 11, 12, 11)
-            root.setSpacing(12)
+            root.setContentsMargins(12, 11, 10, 11)
+            root.setSpacing(10)
 
+            root.addWidget(self.select_checkbox, 0, Qt.AlignmentFlag.AlignTop)
             thumb = _CroppedThumb(56, 100, self)
-            thumb.set_data(thumb_path, duration, loading=loading)
+            thumb.set_data(thumb_path, duration, loading=loading, missing=self._missing)
             root.addWidget(thumb, 0, Qt.AlignmentFlag.AlignTop)
 
             info = QVBoxLayout()
             info.setContentsMargins(0, 0, 0, 0)
             info.setSpacing(5)
 
-            # Upper row: full-width naturally wrapping title on left, compact score + duration + status in upper-right!
             top_row = QHBoxLayout()
             top_row.setContentsMargins(0, 0, 0, 0)
-            top_row.setSpacing(10)
+            top_row.setSpacing(8)
             title_lbl = QLabel(title)
             title_lbl.setWordWrap(True)
             title_lbl.setMinimumWidth(0)
@@ -225,6 +303,7 @@ class ClipLibraryCard(QFrame):
 
             top_row.addWidget(title_lbl, 1)
             top_row.addLayout(meta_col)
+            top_row.addWidget(self.overflow_btn, 0, Qt.AlignmentFlag.AlignTop)
             top_row.setAlignment(meta_col, Qt.AlignmentFlag.AlignTop)
             info.addLayout(top_row)
 
@@ -238,10 +317,34 @@ class ClipLibraryCard(QFrame):
 
             root.addLayout(info, 1)
 
+    def _on_checkbox_toggled(self, checked: bool) -> None:
+        self.set_checked(checked)
+        self.checked_toggled.emit(self.clip_id, checked)
+
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            child = self.childAt(event.position().toPoint())
+            if child is self.select_checkbox or child is self.overflow_btn:
+                super().mousePressEvent(event)
+                return
             self.clicked.emit(self.clip_id)
         super().mousePressEvent(event)
+
+    def set_selection_mode(self, enabled: bool) -> None:
+        self.select_checkbox.setVisible(enabled)
+        self.set_checked(self.select_checkbox.isChecked() if enabled else False)
+
+    def set_checked(self, checked: bool) -> None:
+        show_checked = bool(checked and self.select_checkbox.isVisible())
+        if self.select_checkbox.isChecked() != bool(checked):
+            with QSignalBlocker(self.select_checkbox):
+                self.select_checkbox.setChecked(bool(checked))
+        val = "true" if show_checked else "false"
+        if self.property("checked") != val:
+            self.setProperty("checked", val)
+            self.style().unpolish(self)
+            self.style().polish(self)
+            self.update()
 
     def set_selected(self, selected: bool) -> None:
         val = "true" if selected else "false"
@@ -252,11 +355,110 @@ class ClipLibraryCard(QFrame):
             self.update()
 
 
+class ClipDeleteDialog(QDialog):
+    """Safety-first confirmation dialog separating Record-Only Removal from OS Trash Deletion."""
+
+    def __init__(self, clips: list[dict], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setModal(True)
+        self.delete_files = False
+        self.clips = clips
+
+        existing_count = sum(1 for c in clips if Path(str(c.get("path") or "")).is_file())
+        missing_count = len(clips) - existing_count
+        plural = "clip" if len(clips) == 1 else "clips"
+        self.setWindowTitle(f"Remove {len(clips)} {plural}?")
+        self.setMinimumWidth(420)
+        self.setMaximumWidth(520)
+
+        t = theme_manager().tokens
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        heading = QLabel(
+            f"Confirm removal of {len(clips)} selected {plural}",
+            objectName="sectionTitle",
+        )
+        heading.setWordWrap(True)
+        layout.addWidget(heading)
+
+        stats_box = QFrame(objectName="summaryPill")
+        stats_lay = QVBoxLayout(stats_box)
+        stats_lay.setContentsMargins(12, 10, 12, 10)
+        stats_lay.setSpacing(4)
+        stats_lay.addWidget(QLabel(f"Selected clips: {len(clips)}"))
+        stats_lay.addWidget(QLabel(f"Existing exported media files: {existing_count}"))
+        stats_lay.addWidget(QLabel(f"Missing-file records: {missing_count}"))
+        layout.addWidget(stats_box)
+
+        if existing_count > 0:
+            group = QButtonGroup(self)
+            self.radio_library_only = QRadioButton("Remove from Library only (keep .mp4 files on disk)")
+            self.radio_delete_files = QRadioButton("Delete Clip Files (move generated .mp4 & clip thumbnails to Trash / Recycle Bin)")
+            self.radio_library_only.setChecked(True)
+            group.addButton(self.radio_library_only)
+            group.addButton(self.radio_delete_files)
+            layout.addWidget(self.radio_library_only)
+            layout.addWidget(self.radio_delete_files)
+            self.radio_library_only.toggled.connect(self._sync_confirm_style)
+        else:
+            self.radio_library_only = None
+            self.radio_delete_files = None
+            clean_note = QLabel(
+                "All selected entries are missing on disk. Confirm to remove their stale records "
+                "and any unused clip-specific thumbnails from your library.",
+                objectName="muted",
+            )
+            clean_note.setWordWrap(True)
+            layout.addWidget(clean_note)
+
+        guard_note = QLabel(
+            "Protected files never deleted: original source videos, shared downloads, "
+            "shared transcripts, other clips, and project folders.",
+            objectName="muted",
+        )
+        guard_note.setWordWrap(True)
+        guard_note.setStyleSheet(f"color: {t['text_secondary']}; font-size: 12px;")
+        layout.addWidget(guard_note)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        buttons.addStretch(1)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+        self.confirm_btn = QPushButton(
+            "Clean Up Records" if existing_count == 0 else "Remove from Library",
+            objectName="primary" if existing_count == 0 else "danger",
+        )
+        self.confirm_btn.clicked.connect(self._on_confirm)
+        buttons.addWidget(self.cancel_btn)
+        buttons.addWidget(self.confirm_btn)
+        layout.addLayout(buttons)
+
+        if existing_count > 0:
+            self._sync_confirm_style()
+
+    def _sync_confirm_style(self) -> None:
+        deleting_files = bool(self.radio_delete_files and self.radio_delete_files.isChecked())
+        self.confirm_btn.setText("Delete Clip Files" if deleting_files else "Remove from Library")
+        self.confirm_btn.setObjectName("danger" if deleting_files else "primary")
+        self.confirm_btn.style().unpolish(self.confirm_btn)
+        self.confirm_btn.style().polish(self.confirm_btn)
+
+    def _on_confirm(self) -> None:
+        self.delete_files = True if self.radio_delete_files is None else self.radio_delete_files.isChecked()
+        self.accept()
+
+
 class ClipLibraryPanel(QWidget):
-    """Master pane with summary metrics, search/sort/view toolbar, project filter, and vertical-only clip cards."""
+    """Master pane with summary metrics, search/sort/view toolbar, bulk selection mode, and vertical-only clip cards."""
 
     clip_selected = Signal(dict)
     export_all_requested = Signal()
+    open_clip_requested = Signal(dict)
+    open_clip_folder_requested = Signal(dict)
+    delete_clips_requested = Signal(list)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -265,6 +467,8 @@ class ClipLibraryPanel(QWidget):
         self._all_clips: list[dict] = []
         self._filtered_clips: list[dict] = []
         self._busy_ids: set[str] = set()
+        self._checked_ids: set[str] = set()
+        self._selection_mode = False
         self._selected_id: str | None = None
         self._project_filter_id: str | None = None
         self._project_filter_title: str = ""
@@ -318,6 +522,8 @@ class ClipLibraryPanel(QWidget):
         self.sort_combo.currentIndexChanged.connect(self._rebuild_cards)
 
         self.list_view_btn = QPushButton(objectName="viewToggle")
+        self.list_view_btn.setFixedSize(30, 32)
+        self.list_view_btn.setIconSize(QSize(14, 14))
         self.list_view_btn.setToolTip("List View")
         self.list_view_btn.setAccessibleName("List View")
         self.list_view_btn.setCheckable(True)
@@ -325,27 +531,84 @@ class ClipLibraryPanel(QWidget):
         self.list_view_btn.clicked.connect(lambda: self.set_view_mode("list"))
 
         self.grid_view_btn = QPushButton(objectName="viewToggle")
+        self.grid_view_btn.setFixedSize(30, 32)
+        self.grid_view_btn.setIconSize(QSize(14, 14))
         self.grid_view_btn.setToolTip("Grid View")
         self.grid_view_btn.setAccessibleName("Grid View")
         self.grid_view_btn.setCheckable(True)
         self.grid_view_btn.clicked.connect(lambda: self.set_view_mode("grid"))
 
-        self.export_all_btn = QPushButton("Export All")
+        self.select_clips_btn = QPushButton("Select Clips", objectName="compactButton")
+        self.select_clips_btn.setIconSize(QSize(13, 13))
+        self.select_clips_btn.setCheckable(True)
+        self.select_clips_btn.setAccessibleName("Toggle clip selection mode")
+        self.select_clips_btn.toggled.connect(self.set_selection_mode)
+        self.select_clips_btn.setEnabled(False)
+
+        self.export_all_btn = QPushButton("Export All", objectName="compactButton")
+        self.export_all_btn.setIconSize(QSize(13, 13))
         self.export_all_btn.clicked.connect(self.export_all_requested.emit)
         self.export_all_btn.setEnabled(False)
-        self.apply_theme()
 
         toolbar.addWidget(self.search_input, 2)
         toolbar.addWidget(self.sort_combo, 1)
         root.addLayout(toolbar)
 
         controls_row = QHBoxLayout()
-        controls_row.setSpacing(8)
+        controls_row.setSpacing(5)
         controls_row.addWidget(self.list_view_btn)
         controls_row.addWidget(self.grid_view_btn)
         controls_row.addStretch()
+        controls_row.addWidget(self.select_clips_btn)
         controls_row.addWidget(self.export_all_btn)
         root.addLayout(controls_row)
+
+        # Compact bulk selection action bar (shown only while selection mode is active)
+        self.selection_bar = QFrame(objectName="selectionToolbar")
+        sel_outer = QVBoxLayout(self.selection_bar)
+        sel_outer.setContentsMargins(10, 8, 10, 8)
+        sel_outer.setSpacing(6)
+
+        sel_top = QHBoxLayout()
+        sel_top.setSpacing(6)
+        self.selection_count_label = QLabel("0 selected")
+        self.selection_count_label.setStyleSheet("font-weight: 600;")
+        self.clear_selection_btn = QPushButton("Clear Selection")
+        self.clear_selection_btn.clicked.connect(self.clear_checked)
+        self.done_selection_btn = QPushButton("Done", objectName="primary")
+        self.done_selection_btn.clicked.connect(lambda: self.set_selection_mode(False))
+        sel_top.addWidget(self.selection_count_label)
+        sel_top.addStretch()
+        sel_top.addWidget(self.clear_selection_btn)
+        sel_top.addWidget(self.done_selection_btn)
+        sel_outer.addLayout(sel_top)
+
+        sel_bot = QHBoxLayout()
+        sel_bot.setSpacing(6)
+        self.select_all_btn = QPushButton("Select All")
+        self.select_all_btn.clicked.connect(self.select_all_visible)
+        self.bulk_more_btn = QPushButton(objectName="iconButton")
+        self.bulk_more_btn.setFixedSize(30, 28)
+        self.bulk_more_btn.setToolTip("Bulk actions")
+        self.bulk_more_btn.setAccessibleName("Bulk clip actions")
+
+        self.bulk_menu = QMenu(self.bulk_more_btn)
+        self.action_select_missing = self.bulk_menu.addAction("Select Missing Files", self.select_missing_files)
+        self.action_select_entire = self.bulk_menu.addAction("Select All in Entire Library", self.select_all_in_library)
+        self.bulk_menu.addSeparator()
+        self.action_bulk_delete = self.bulk_menu.addAction("Delete Selected Clips…", self._emit_bulk_delete)
+        self.action_bulk_clear = self.bulk_menu.addAction("Clear Selection", self.clear_checked)
+        self.bulk_more_btn.setMenu(self.bulk_menu)
+
+        sel_bot.addWidget(self.select_all_btn)
+        sel_bot.addStretch()
+        sel_bot.addWidget(self.bulk_more_btn)
+        sel_outer.addLayout(sel_bot)
+
+        self.selection_bar.hide()
+        root.addWidget(self.selection_bar)
+
+        self.apply_theme()
 
         # Independently scrollable vertical-only library (ZERO horizontal scrollbar!)
         self.scroll = QScrollArea()
@@ -374,13 +637,20 @@ class ClipLibraryPanel(QWidget):
     def apply_theme(self, _resolved: str = "") -> None:
         t = theme_manager().tokens
         fg = t["text_primary"]
+        danger = t["semantic_danger_fg"]
         self.list_view_btn.setIcon(lucide_icon("list", fg, 15))
         self.grid_view_btn.setIcon(lucide_icon("grid", fg, 15))
+        self.select_clips_btn.setIcon(lucide_icon("check", fg, 14))
         self.export_all_btn.setIcon(lucide_icon("download", fg, 15))
+        self.bulk_more_btn.setIcon(lucide_icon("more-horizontal", fg, 15))
+        self.action_select_missing.setIcon(lucide_icon("alert-circle", fg, 14))
+        self.action_select_entire.setIcon(lucide_icon("check", fg, 14))
+        self.action_bulk_delete.setIcon(lucide_icon("trash-2", danger, 14))
+        self.action_bulk_clear.setIcon(lucide_icon("x", fg, 14))
         if hasattr(self, "_search_action"):
             self._search_action.setIcon(lucide_icon("search", t["text_secondary"], 14))
         if self._all_clips:
-            self._rebuild_cards()
+            self._rebuild_cards(emit_selected=False)
 
     def filter_by_project(self, project_id: str, project_title: str = "") -> None:
         self._project_filter_id = str(project_id) if project_id else None
@@ -404,21 +674,43 @@ class ClipLibraryPanel(QWidget):
         self.grid_view_btn.setChecked(normalized == "grid")
         if self._view_mode != normalized:
             self._view_mode = normalized
-            self._rebuild_cards()
+            self._rebuild_cards(emit_selected=False)
+
+    def set_selection_mode(self, enabled: bool) -> None:
+        flag = bool(enabled)
+        if self._selection_mode == flag:
+            return
+        self._selection_mode = flag
+        if not flag:
+            self._checked_ids.clear()
+        with QSignalBlocker(self.select_clips_btn):
+            self.select_clips_btn.setChecked(flag)
+        self.selection_bar.setVisible(flag)
+        for cid, card in self._cards.items():
+            card.set_selection_mode(flag)
+            card.set_checked(flag and cid in self._checked_ids)
+        self._sync_selection_controls()
 
     def set_clips(self, clips: list[dict], *, busy_ids: set[str] | None = None) -> None:
         self._all_clips = list(clips)
+        valid = {str(c["id"]) for c in self._all_clips}
+        self._checked_ids &= valid
         if busy_ids is not None:
             self._busy_ids = set(busy_ids)
         self._update_summary()
         self._rebuild_cards()
+
+    def refresh_file_availability(self) -> None:
+        """Re-check actual filesystem state for clips and thumbnails without altering DB rows."""
+        _PROBE_CACHE.clear()
+        self._rebuild_cards(emit_selected=False)
 
     def set_clip_busy(self, clip_id: str, busy: bool) -> None:
         if busy:
             self._busy_ids.add(clip_id)
         else:
             self._busy_ids.discard(clip_id)
-        self._rebuild_cards()
+        self._rebuild_cards(emit_selected=False)
 
     def _update_summary(self) -> None:
         source = [
@@ -431,7 +723,11 @@ class ClipLibraryPanel(QWidget):
         self.summary_count.findChild(QLabel, "summaryValue").setText(str(total))
         self.summary_duration.findChild(QLabel, "summaryValue").setText(_format_duration(total_dur))
         self.summary_score.findChild(QLabel, "summaryValue").setText(f"{avg_score}/100" if total else "—")
-        self.export_all_btn.setEnabled(len(self._all_clips) > 0)
+        has_any = len(self._all_clips) > 0
+        self.export_all_btn.setEnabled(has_any)
+        self.select_clips_btn.setEnabled(has_any)
+        if not has_any and self._selection_mode:
+            self.set_selection_mode(False)
 
     def _sorted_filtered(self) -> list[dict]:
         query = self.search_input.text().strip().lower()
@@ -455,15 +751,18 @@ class ClipLibraryPanel(QWidget):
             items.sort(key=lambda c: str(c.get("created_at") or ""), reverse=True)
         return items
 
-    def _clip_status(self, clip: dict) -> tuple[str, bool]:
-        if not Path(clip["path"]).is_file():
-            return "File missing", False
+    def _clip_status(self, clip: dict) -> tuple[str, bool, bool, bool]:
+        clip_path = Path(str(clip.get("path") or ""))
+        file_exists = clip_path.is_file()
+        folder_exists = clip_path.parent.is_dir()
+        if not file_exists:
+            return "File missing", False, False, folder_exists
         if clip["id"] in self._busy_ids:
-            return "Generating…", True
+            return "Generating…", True, True, folder_exists
         thumb_path = Path(clip.get("thumbnail_path") or "")
         if thumb_path.is_file():
-            return "Ready", False
-        return "Thumbnail pending", True
+            return "Ready", False, True, folder_exists
+        return "Thumbnail pending", True, True, folder_exists
 
     def _clear_container(self) -> None:
         self._cards.clear()
@@ -489,8 +788,9 @@ class ClipLibraryPanel(QWidget):
             elif child.layout():
                 ClipLibraryPanel._clear_sublayout(child.layout())
 
-    def _rebuild_cards(self) -> None:
+    def _rebuild_cards(self, *, emit_selected: bool = True) -> None:
         self._clear_container()
+        self._container.setMinimumHeight(0)
         self._update_summary()
         self._filtered_clips = self._sorted_filtered()
 
@@ -510,54 +810,195 @@ class ClipLibraryPanel(QWidget):
             self._container_layout.addWidget(empty)
             self._container_layout.addStretch()
             self._selected_id = None
+            self._sync_selection_controls()
             self.clip_selected.emit({})
             return
 
         valid_ids = {str(c["id"]) for c in self._filtered_clips}
         if self._selected_id not in valid_ids:
             self._selected_id = str(self._filtered_clips[0]["id"])
+            emit_selected = True
+
+        def _wire_card(card: ClipLibraryCard) -> None:
+            card.clicked.connect(self.select_clip_by_id)
+            card.checked_toggled.connect(self._on_card_checked)
+            card.open_file_requested.connect(self._on_card_open_file)
+            card.open_folder_requested.connect(self._on_card_open_folder)
+            card.delete_requested.connect(self._on_card_delete)
 
         if self._view_mode == "grid":
             grid_host = QWidget()
+            grid_host.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
             grid = QGridLayout(grid_host)
             grid.setContentsMargins(0, 0, 0, 0)
             grid.setSpacing(10)
-            cols = max(1, (self.scroll.viewport().width() - 8) // 184)
+            cols = max(1, (self.scroll.viewport().width() - 8) // 170)
             for idx, clip in enumerate(self._filtered_clips):
-                status, loading = self._clip_status(clip)
+                cid = str(clip["id"])
+                status, loading, f_exists, d_exists = self._clip_status(clip)
                 card = ClipLibraryCard(
                     clip, "grid", status, loading=loading,
-                    selected=(str(clip["id"]) == self._selected_id),
+                    selected=(cid == self._selected_id),
+                    selection_mode=self._selection_mode,
+                    checked=(cid in self._checked_ids),
+                    file_exists=f_exists,
+                    folder_exists=d_exists,
                 )
-                card.clicked.connect(self.select_clip_by_id)
-                self._cards[str(clip["id"])] = card
+                _wire_card(card)
+                self._cards[cid] = card
                 r, c = divmod(idx, cols)
                 grid.addWidget(card, r, c)
             for col_i in range(cols):
                 grid.setColumnStretch(col_i, 1)
+            grid.activate()
+            grid_min_h = max(0, grid.minimumSize().height())
+            if grid_min_h > 0:
+                grid_host.setMinimumHeight(grid_min_h)
             self._container_layout.addWidget(grid_host)
         else:
             for clip in self._filtered_clips:
-                status, loading = self._clip_status(clip)
+                cid = str(clip["id"])
+                status, loading, f_exists, d_exists = self._clip_status(clip)
                 card = ClipLibraryCard(
                     clip, "list", status, loading=loading,
-                    selected=(str(clip["id"]) == self._selected_id),
+                    selected=(cid == self._selected_id),
+                    selection_mode=self._selection_mode,
+                    checked=(cid in self._checked_ids),
+                    file_exists=f_exists,
+                    folder_exists=d_exists,
                 )
-                card.clicked.connect(self.select_clip_by_id)
-                self._cards[str(clip["id"])] = card
+                _wire_card(card)
+                self._cards[cid] = card
                 self._container_layout.addWidget(card)
 
         self._container_layout.addStretch(1)
+        self._container_layout.activate()
+        target_h = max(0, self._container_layout.minimumSize().height())
+        if target_h > 0:
+            self._container.setMinimumHeight(target_h)
+        self._container.resize(
+            max(1, self.scroll.viewport().width()),
+            max(self.scroll.viewport().height(), target_h),
+        )
         self._container.adjustSize()
         self._container.updateGeometry()
-        current = self.selected_clip()
-        if current:
-            self.clip_selected.emit(current)
+        self._sync_selection_controls()
+        if emit_selected:
+            current = self.selected_clip()
+            if current:
+                self.clip_selected.emit(current)
+
+    def _on_card_checked(self, clip_id: str, checked: bool) -> None:
+        if checked:
+            self._checked_ids.add(clip_id)
+        else:
+            self._checked_ids.discard(clip_id)
+        self._sync_selection_controls()
+
+    def _clip_by_id(self, clip_id: str) -> dict | None:
+        return next((c for c in self._all_clips if str(c.get("id")) == clip_id), None)
+
+    def _on_card_open_file(self, clip_id: str) -> None:
+        clip = self._clip_by_id(clip_id)
+        if clip:
+            self.open_clip_requested.emit(clip)
+
+    def _on_card_open_folder(self, clip_id: str) -> None:
+        clip = self._clip_by_id(clip_id)
+        if clip:
+            self.open_clip_folder_requested.emit(clip)
+
+    def _on_card_delete(self, clip_id: str) -> None:
+        clip = self._clip_by_id(clip_id)
+        if clip:
+            self.delete_clips_requested.emit([clip])
+
+    def _emit_bulk_delete(self) -> None:
+        selected = self.checked_clips()
+        if selected:
+            self.delete_clips_requested.emit(selected)
+
+    def _sync_selection_controls(self) -> None:
+        visible_count = len(self._filtered_clips)
+        all_count = len(self._all_clips)
+        filtered_active = bool(self.search_input.text().strip() or self._project_filter_id) and (visible_count != all_count)
+        checked_count = len(self._checked_ids)
+        missing_visible = sum(
+            1 for c in self._filtered_clips
+            if not Path(str(c.get("path") or "")).is_file()
+        )
+        self.selection_count_label.setText(f"{checked_count} selected")
+        self.select_all_btn.setText(f"Select Visible ({visible_count})" if filtered_active else "Select All")
+        self.select_all_btn.setToolTip(
+            "Select only clips matching the active search/project filter." if filtered_active
+            else "Select every clip in the library."
+        )
+        self.select_all_btn.setEnabled(visible_count > 0)
+        self.clear_selection_btn.setEnabled(checked_count > 0)
+        self.action_select_missing.setText(
+            f"Select Missing Files ({missing_visible})" if missing_visible else "Select Missing Files"
+        )
+        self.action_select_missing.setEnabled(missing_visible > 0)
+        self.action_select_entire.setVisible(filtered_active)
+        self.action_select_entire.setText(f"Select All in Library ({all_count})")
+        self.action_bulk_delete.setEnabled(checked_count > 0)
+        self.action_bulk_clear.setEnabled(checked_count > 0)
+
+    def select_all_visible(self) -> None:
+        if not self._selection_mode:
+            self.set_selection_mode(True)
+        for clip in self._filtered_clips:
+            cid = str(clip["id"])
+            self._checked_ids.add(cid)
+            if cid in self._cards:
+                self._cards[cid].set_checked(True)
+        self._sync_selection_controls()
+
+    def select_all_in_library(self) -> None:
+        if not self._selection_mode:
+            self.set_selection_mode(True)
+        for clip in self._all_clips:
+            cid = str(clip["id"])
+            self._checked_ids.add(cid)
+            if cid in self._cards:
+                self._cards[cid].set_checked(True)
+        self._sync_selection_controls()
+
+    def select_missing_files(self) -> None:
+        if not self._selection_mode:
+            self.set_selection_mode(True)
+        for clip in self._filtered_clips:
+            cid = str(clip["id"])
+            if not Path(str(clip.get("path") or "")).is_file():
+                self._checked_ids.add(cid)
+                if cid in self._cards:
+                    self._cards[cid].set_checked(True)
+        self._sync_selection_controls()
+
+    def clear_checked(self) -> None:
+        self._checked_ids.clear()
+        for card in self._cards.values():
+            card.set_checked(False)
+        self._sync_selection_controls()
+
+    def checked_clip_ids(self) -> list[str]:
+        return [str(c["id"]) for c in self._all_clips if str(c["id"]) in self._checked_ids]
+
+    def checked_clips(self) -> list[dict]:
+        return [c for c in self._all_clips if str(c["id"]) in self._checked_ids]
+
+    def sync_after_deletion(self, deleted_ids: set[str]) -> None:
+        self._checked_ids -= deleted_ids
+        if self._selected_id in deleted_ids:
+            self._selected_id = None
+        if not self._checked_ids and not self._all_clips:
+            self.set_selection_mode(False)
+        self._sync_selection_controls()
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)
         if self._view_mode == "grid" and self._filtered_clips:
-            self._rebuild_cards()
+            self._rebuild_cards(emit_selected=False)
 
     def select_clip(self, clip_id: str) -> None:
         self.select_clip_by_id(clip_id)
@@ -975,36 +1416,43 @@ class ClipDetailPlayerPanel(QFrame):
         self.detail_scroll.setWidget(detail_host)
         root.addWidget(self.detail_scroll, 2)
 
-        # 7. Separated sticky footer actions
+        # 7. Separated sticky footer quick actions
         divider = QFrame(objectName="divider")
         root.addWidget(divider)
 
-        actions_row = QHBoxLayout()
-        actions_row.setSpacing(8)
+        footer_host = QWidget(objectName="clipFooterRow")
+        actions_row = QHBoxLayout(footer_host)
+        actions_row.setContentsMargins(0, 0, 0, 0)
+        actions_row.setSpacing(6)
         self.primary_btn = QPushButton("Open File", objectName="primary")
+        self.primary_btn.setMinimumWidth(0)
         self.primary_btn.clicked.connect(self.open_file_requested.emit)
         self.primary_btn.setEnabled(False)
 
+        self.open_folder_btn = QPushButton("Open Folder")
+        self.open_folder_btn.setMinimumWidth(0)
+        self.open_folder_btn.clicked.connect(self.open_folder_requested.emit)
+        self.open_folder_btn.setEnabled(False)
+
         self.more_btn = QPushButton(objectName="iconButton")
-        self.more_btn.setText(" Actions")
+        self.more_btn.setFixedSize(36, 34)
+        self.more_btn.setToolTip("More actions")
         self.more_btn.setAccessibleName("Clip actions menu")
         self.more_btn.setEnabled(False)
 
         self.actions_menu = QMenu(self)
-        self.action_open_file = self.actions_menu.addAction("Open File", self.open_file_requested.emit)
-        self.action_open_folder = self.actions_menu.addAction("Open Containing Folder", self.open_folder_requested.emit)
-        self.actions_menu.addSeparator()
         self.action_regen_thumb = self.actions_menu.addAction("Regenerate Thumbnail", self.regenerate_thumb_requested.emit)
         self.action_pick_frame = self.actions_menu.addAction("Select Thumbnail Frame…", self.select_frame_requested.emit)
         self.action_export_thumb = self.actions_menu.addAction("Export Thumbnail…", self.export_thumb_requested.emit)
         self.action_rename_clip = self.actions_menu.addAction("Rename Clip…", self.rename_clip_requested.emit)
         self.actions_menu.addSeparator()
-        self.action_delete_clip = self.actions_menu.addAction("Delete Clip", self.delete_clip_requested.emit)
+        self.action_delete_clip = self.actions_menu.addAction("Delete Clip…", self.delete_clip_requested.emit)
         self.more_btn.setMenu(self.actions_menu)
 
         actions_row.addWidget(self.primary_btn, 1)
+        actions_row.addWidget(self.open_folder_btn, 1)
         actions_row.addWidget(self.more_btn)
-        root.addLayout(actions_row)
+        root.addWidget(footer_host)
 
         self.apply_theme()
 
@@ -1171,6 +1619,7 @@ class ClipDetailPlayerPanel(QFrame):
 
         clip_path = Path(self._current_clip["path"])
         exists = clip_path.is_file()
+        folder_exists = clip_path.parent.is_dir()
         duration = float(self._current_clip.get("duration") or 0.0)
         score = int(self._current_clip.get("score") or 0)
 
@@ -1205,7 +1654,7 @@ class ClipDetailPlayerPanel(QFrame):
             self.stage.thumb_preview.set_thumbnail(None, duration, status="Clip file missing")
             self.specs_label.setText(f"Duration {_format_duration(duration)} • Missing file ({clip_path.name})")
             self.desc_label.setText("The exported clip file could not be found on disk.")
-            self._set_controls_enabled(True, file_exists=False)
+            self._set_controls_enabled(True, file_exists=False, folder_exists=folder_exists)
             return
 
         width, height, size_bytes = probe_clip_metrics(str(clip_path))
@@ -1230,19 +1679,19 @@ class ClipDetailPlayerPanel(QFrame):
         self._ensure_audio_ready()
         if source != self.player.source():
             self.player.setSource(source)
-        self._set_controls_enabled(True, file_exists=True)
+        self._set_controls_enabled(True, file_exists=True, folder_exists=folder_exists)
 
-    def _set_controls_enabled(self, has_clip: bool, *, file_exists: bool) -> None:
+    def _set_controls_enabled(self, has_clip: bool, *, file_exists: bool, folder_exists: bool = False) -> None:
         for b in (
             self.skip_back_btn, self.play_btn, self.skip_fwd_btn,
             self.mute_btn, self.fullscreen_btn, self.primary_btn,
         ):
             b.setEnabled(has_clip and file_exists)
+        self.open_folder_btn.setEnabled(has_clip and (file_exists or folder_exists))
         self.prev_clip_btn.setEnabled(has_clip)
         self.next_clip_btn.setEnabled(has_clip)
         self.more_btn.setEnabled(has_clip)
-        for act in (self.action_open_file, self.action_open_folder, self.action_regen_thumb,
-                    self.action_pick_frame, self.action_export_thumb):
+        for act in (self.action_regen_thumb, self.action_pick_frame, self.action_export_thumb):
             act.setEnabled(has_clip and file_exists)
         self.action_rename_clip.setEnabled(has_clip)
         self.action_delete_clip.setEnabled(has_clip)
@@ -1258,11 +1707,10 @@ class ClipDetailPlayerPanel(QFrame):
         self.next_clip_btn.setIcon(lucide_icon("chevron-right", fg, 15))
         self._sync_mute_icon()
         self.fullscreen_btn.setIcon(lucide_icon("maximize", fg, 14))
-        self.more_btn.setIcon(lucide_icon("more-horizontal", fg, 15))
         self.primary_btn.setIcon(lucide_icon("external-link", "#FFFFFF", 15))
+        self.open_folder_btn.setIcon(lucide_icon("folder-open", fg, 15))
+        self.more_btn.setIcon(lucide_icon("more-horizontal", fg, 16))
         # Menu action icons (theme-aware!)
-        self.action_open_file.setIcon(lucide_icon("external-link", fg, 14))
-        self.action_open_folder.setIcon(lucide_icon("folder-open", fg, 14))
         self.action_regen_thumb.setIcon(lucide_icon("refresh-cw", fg, 14))
         self.action_pick_frame.setIcon(lucide_icon("image", fg, 14))
         self.action_export_thumb.setIcon(lucide_icon("download", fg, 14))
