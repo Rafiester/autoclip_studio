@@ -50,6 +50,9 @@ from .ui.queue_workspace import (
     ActiveJobCard, CollapsibleLogsPanel, ErrorDetailsDialog, JobCompletedDialog, JobDetailsDialog,
     JobQueuePanel, QueueOverviewBar, parse_download_state, project_display_name, project_thumbnail_path,
 )
+from .ui.sidebar import (
+    ALL_ROUTES_BY_INDEX, ALL_ROUTES_BY_KEY, LEGACY_ROUTE_ALIASES, FloatingSidebar, ThemePreviewCard,
+)
 from .ui.speech_view import SpeechProgressView, SpeechSettingsView
 from .ui.style import STYLESHEET, SectionCard, configure_form_layout, configure_input, theme_manager
 from .ui.youtube_preview import YouTubePreview
@@ -58,8 +61,10 @@ from .youtube_metadata import YouTubeMetadata
 
 
 class MainWindow(QMainWindow):
-    NAV_ITEMS = ["Dashboard", "New Project", "Processing Queue", "Generated Clips", "Caption Templates",
-                 "AI Provider Settings", "Speech-to-Text", "Performance", "Dependencies"]
+    NAV_ITEMS = [
+        "Dashboard", "New Project", "Processing Queue", "Generated Clips", "Caption Templates",
+        "AI Providers", "Transcription", "Performance", "Dependencies", "General", "Appearance",
+    ]
 
     def __init__(self) -> None:
         super().__init__()
@@ -109,113 +114,74 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        sidebar = QFrame(objectName="sidebar")
-        sidebar.setFixedWidth(204)
-        side_layout = QVBoxLayout(sidebar)
-        side_layout.setContentsMargins(12, 16, 12, 16)
-        side_layout.setSpacing(4)
-        self.brand_label = self._build_brand_header(176)
-        side_layout.addWidget(self.brand_label)
-        side_layout.addSpacing(12)
-        self.nav_buttons: list[QPushButton] = []
-        for index, name in enumerate(self.NAV_ITEMS):
-            button = QPushButton(name, objectName="nav")
-            button.setCheckable(True)
-            button.clicked.connect(lambda checked=False, page=index: self.show_page(page))
-            side_layout.addWidget(button)
-            self.nav_buttons.append(button)
-        side_layout.addStretch()
 
-        # Compact Light / Dark / System appearance switcher
-        appearance_bar = QFrame(objectName="appearanceBar")
-        app_row = QHBoxLayout(appearance_bar)
-        app_row.setContentsMargins(3, 3, 3, 3)
-        app_row.setSpacing(2)
+        ui_state = self.settings.ui_state()
+        self.sidebar = FloatingSidebar(
+            collapsed=bool(ui_state.get("sidebar_collapsed", False)),
+            settings_expanded=bool(ui_state.get("settings_expanded", False)),
+            last_settings_route=str(ui_state.get("last_settings_route") or "settings.general"),
+        )
+        self.sidebar.route_selected.connect(self.show_route)
+        self.sidebar.collapsed_changed.connect(self._on_sidebar_collapsed_changed)
+        self.sidebar.settings_expanded_changed.connect(self._on_settings_expanded_changed)
+        self.brand_label = self.sidebar.brand_label
+        self.nav_buttons: list[QPushButton] = self.sidebar.ordered_nav_buttons_by_page_index()
         self.appearance_buttons: dict[str, QPushButton] = {}
-        current_appearance = str(self.settings.data.get("appearance") or "dark")
-        for mode_id, icon_name, tip in (
-            ("light", "sun", "Light mode"),
-            ("dark", "moon", "Dark mode"),
-            ("system", "monitor", "Follow system appearance"),
-        ):
-            btn = QPushButton(objectName="appearanceBtn")
-            btn.setCheckable(True)
-            btn.setChecked(current_appearance == mode_id)
-            btn.setToolTip(tip)
-            btn.setAccessibleName(tip)
-            btn.clicked.connect(lambda checked=False, m=mode_id: self.set_appearance(m))
-            app_row.addWidget(btn, 1)
-            self.appearance_buttons[mode_id] = btn
-        side_layout.addWidget(appearance_bar)
-        side_layout.addSpacing(8)
 
-        version = QLabel("Local-first • No watermarks\nv1.0.0", objectName="helperText")
-        side_layout.addWidget(version)
+        # Inset gutter giving the floating sidebar crisp outer breathing room against the app canvas
+        sidebar_gutter = QWidget()
+        sidebar_gutter.setStyleSheet("background: transparent;")
+        gutter_layout = QVBoxLayout(sidebar_gutter)
+        gutter_layout.setContentsMargins(14, 14, 4, 14)
+        gutter_layout.setSpacing(0)
+        gutter_layout.addWidget(self.sidebar)
+
         self.stack = QStackedWidget()
-        self.stack.addWidget(self._dashboard_page())
-        self.stack.addWidget(self._new_project_page())
-        self.stack.addWidget(self._queue_page())
-        self.stack.addWidget(self._clips_page())
-        self.stack.addWidget(self._templates_page())
-        self.stack.addWidget(self._scroll_page(self._settings_page()))
-        self.stack.addWidget(self._scroll_page(self._speech_settings_page()))
-        self.stack.addWidget(self._scroll_page(self._performance_page()))
-        self.stack.addWidget(self._scroll_page(self._dependencies_page()))
-        layout.addWidget(sidebar)
+        self.stack.addWidget(self._dashboard_page())                     # 0: dashboard
+        self.stack.addWidget(self._new_project_page())                   # 1: new_project
+        self.stack.addWidget(self._queue_page())                         # 2: queue
+        self.stack.addWidget(self._clips_page())                         # 3: clips
+        self.stack.addWidget(self._templates_page())                     # 4: templates
+        self.stack.addWidget(self._scroll_page(self._settings_page()))   # 5: settings.ai_providers
+        self.stack.addWidget(self._scroll_page(self._speech_settings_page()))  # 6: settings.transcription
+        self.stack.addWidget(self._scroll_page(self._performance_page()))      # 7: settings.performance
+        self.stack.addWidget(self._scroll_page(self._dependencies_page()))     # 8: settings.dependencies
+        self.stack.addWidget(self._scroll_page(self._general_settings_page())) # 9: settings.general
+        self.stack.addWidget(self._scroll_page(self._appearance_settings_page()))  # 10: settings.appearance
+
+        layout.addWidget(sidebar_gutter)
         layout.addWidget(self.stack, 1)
         self.setCentralWidget(root)
         self.show_page(0)
 
-    def _build_brand_header(self, target_width: int) -> QLabel:
-        brand = QLabel(objectName="brand")
-        brand.setAccessibleName("AutoClip Studio")
-        brand.setToolTip("AutoClip Studio")
-        brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._brand_target_width = target_width
-        self._apply_brand_pixmap(brand, self._theme.resolved)
-        return brand
+    def _on_sidebar_collapsed_changed(self, collapsed: bool) -> None:
+        if hasattr(self, "sidebar_compact_check"):
+            with QSignalBlocker(self.sidebar_compact_check):
+                self.sidebar_compact_check.setChecked(bool(collapsed))
+        if not self._hydrating_ui:
+            self.settings.update_ui_state({"sidebar_collapsed": bool(collapsed)}, debounced=False)
 
-    def _apply_brand_pixmap(self, brand: QLabel, resolved_theme: str) -> None:
-        wordmark_path = asset_path("AutoClipTrans.png")
-        image = QImage(str(wordmark_path)) if wordmark_path.is_file() else QImage()
-        if not image.isNull():
-            if resolved_theme == "light":
-                # Recolor near-white wordmark text to dark charcoal while preserving the red brand symbol.
-                image = image.convertToFormat(QImage.Format.Format_ARGB32)
-                w, h = image.width(), image.height()
-                for y in range(h):
-                    for x in range(w):
-                        c = image.pixelColor(x, y)
-                        if c.alpha() > 20 and c.red() > 160 and c.green() > 155 and c.blue() > 155 and abs(c.red() - c.blue()) < 35:
-                            image.setPixelColor(x, y, c.__class__(23, 24, 28, c.alpha()))
-            pixmap = QPixmap.fromImage(image)
-            dpr = max(1.0, self.devicePixelRatioF())
-            scaled = pixmap.scaledToWidth(
-                int(round(self._brand_target_width * dpr)),
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            scaled.setDevicePixelRatio(dpr)
-            brand.setPixmap(scaled)
-            brand.setFixedHeight(max(44, int(round(scaled.height() / dpr))))
-        else:
-            brand.setText("AutoClip Studio")
-            brand.setWordWrap(True)
+    def _on_settings_expanded_changed(self, expanded: bool) -> None:
+        if not self._hydrating_ui:
+            self.settings.update_ui_state({"settings_expanded": bool(expanded)}, debounced=False)
 
     def set_appearance(self, mode: str) -> None:
         normalized = mode if mode in {"light", "dark", "system"} else "dark"
         self.settings.data["appearance"] = normalized
         self.settings.save()
         for mode_id, btn in self.appearance_buttons.items():
-            btn.setChecked(mode_id == normalized)
+            with QSignalBlocker(btn):
+                btn.setChecked(mode_id == normalized)
+            if isinstance(btn, ThemePreviewCard):
+                btn.apply_theme(self._theme.resolved)
         self._theme.apply(normalized)
 
     def _on_theme_changed(self, resolved: str) -> None:
-        icon_color = self._theme.tokens["text_primary"]
-        for mode_id, icon_name in (("light", "sun"), ("dark", "moon"), ("system", "monitor")):
-            if mode_id in self.appearance_buttons:
-                self.appearance_buttons[mode_id].setIcon(lucide_icon(icon_name, icon_color, 14))
-        if hasattr(self, "brand_label"):
-            self._apply_brand_pixmap(self.brand_label, resolved)
+        if hasattr(self, "sidebar"):
+            self.sidebar.apply_theme(resolved)
+        for btn in self.appearance_buttons.values():
+            if isinstance(btn, ThemePreviewCard):
+                btn.apply_theme(resolved)
         if hasattr(self, "live_logs"):
             self.live_logs.apply_theme(resolved)
         if hasattr(self, "heatmap_widget"):
@@ -644,7 +610,7 @@ class MainWindow(QMainWindow):
         return outer
 
     def _settings_page(self) -> QWidget:
-        outer, page = self._page("AI Provider Settings", f"Credentials are stored in {credential_store_name()}")
+        outer, page = self._page("AI Providers", f"Credentials are stored securely in {credential_store_name()}")
         group = self.provider_group = SectionCard("Provider connection")
         form = configure_form_layout(QFormLayout())
         group.body_layout().addLayout(form)
@@ -683,31 +649,130 @@ class MainWindow(QMainWindow):
         buttons.addStretch()
         form.addRow(buttons)
         page.addWidget(group)
-        local = SectionCard("Local processing")
-        local_form = configure_form_layout(QFormLayout())
-        local.body_layout().addLayout(local_form)
-        self.output_input = configure_input(QLineEdit(self.settings.data.get("output_dir", "")))
-        self.output_input.setAccessibleName("Output folder")
-        output_row = QHBoxLayout(); output_row.setSpacing(8); output_row.addWidget(self.output_input, 1)
-        output_browse = QPushButton("Browse"); output_browse.clicked.connect(self.browse_output); output_row.addWidget(output_browse)
-        hw_label = "Use Apple VideoToolbox when available" if sys.platform == "darwin" else "Use NVENC when available"
-        self.hardware_check = QCheckBox(hw_label); self.hardware_check.setChecked(bool(self.settings.data.get("hardware_encoding", True)))
-        local_form.addRow("Output folder", output_row); local_form.addRow("Encoding", self.hardware_check)
-        local_actions = QHBoxLayout()
-        local_actions.setSpacing(10)
-        save_local = QPushButton("Save local settings"); save_local.clicked.connect(self.save_local_settings)
-        reset_settings = QPushButton("Reset to defaults"); reset_settings.clicked.connect(self.reset_all_settings)
-        local_actions.addWidget(save_local)
-        local_actions.addWidget(reset_settings)
-        local_actions.addStretch()
-        local_form.addRow(local_actions)
-        page.addWidget(local)
         self.connection_status = self._wrapping_label("", object_name="muted")
         self.connection_status.setTextFormat(Qt.TextFormat.PlainText)
         page.addWidget(self.connection_status)
         page.addStretch()
         self.load_provider_form(self.settings_provider.currentText())
         return outer
+
+    def _general_settings_page(self) -> QWidget:
+        outer, page = self._page(
+            "General",
+            "Configure default export paths, hardware encoding, caching, and application preferences",
+        )
+        local = SectionCard("Storage & encoding")
+        local_form = configure_form_layout(QFormLayout())
+        local.body_layout().addLayout(local_form)
+        self.output_input = configure_input(QLineEdit(self.settings.data.get("output_dir", "")))
+        self.output_input.setPlaceholderText(str(OUTPUT_DIR))
+        self.output_input.setAccessibleName("Output folder")
+        output_row = QHBoxLayout(); output_row.setSpacing(8); output_row.addWidget(self.output_input, 1)
+        output_browse = QPushButton("Browse"); output_browse.clicked.connect(self.browse_output); output_row.addWidget(output_browse)
+        hw_label = "Use Apple VideoToolbox when available" if sys.platform == "darwin" else "Use NVENC when available"
+        self.hardware_check = QCheckBox(hw_label)
+        self.hardware_check.setChecked(bool(self.settings.data.get("hardware_encoding", True)))
+        local_form.addRow("Output folder", output_row)
+        local_form.addRow("Encoding", self.hardware_check)
+        page.addWidget(local)
+
+        cache_card = SectionCard("Project defaults & cache")
+        cache_form = configure_form_layout(QFormLayout())
+        cache_card.body_layout().addLayout(cache_form)
+        self.general_cache_check = QCheckBox("Reuse cached downloads, transcripts, and tracking data")
+        self.general_cache_check.setChecked(bool(self.settings.project_defaults().get("cache_enabled", True)))
+        cache_form.addRow("Cache", self.general_cache_check)
+
+        cache_row = QHBoxLayout(); cache_row.setSpacing(10)
+        self.cache_size_label = QLabel("Calculating…", objectName="muted")
+        clear_cache_btn = QPushButton("Clear temporary cache")
+        clear_cache_btn.clicked.connect(self._clear_temporary_cache)
+        cache_row.addWidget(self.cache_size_label, 1)
+        cache_row.addWidget(clear_cache_btn)
+        cache_form.addRow("Cache footprint", cache_row)
+
+        actions = QHBoxLayout(); actions.setSpacing(10)
+        save_local = QPushButton("Save general settings", objectName="primary")
+        save_local.clicked.connect(self.save_local_settings)
+        reset_settings = QPushButton("Reset to defaults")
+        reset_settings.clicked.connect(self.reset_all_settings)
+        actions.addWidget(save_local)
+        actions.addWidget(reset_settings)
+        actions.addStretch()
+        cache_form.addRow(actions)
+        page.addWidget(cache_card)
+
+        self.general_status = self._wrapping_label("", object_name="muted")
+        self.general_status.setTextFormat(Qt.TextFormat.PlainText)
+        page.addWidget(self.general_status)
+        page.addStretch()
+        self._refresh_cache_footprint()
+        return outer
+
+    def _appearance_settings_page(self) -> QWidget:
+        outer, page = self._page(
+            "Appearance",
+            "Customize application theme and sidebar layout — changes apply immediately",
+        )
+        theme_card = SectionCard("Theme")
+        theme_lay = theme_card.body_layout()
+        theme_lay.addWidget(self._wrapping_label(
+            "Choose a light, dark, or OS-synchronized appearance across the entire workspace.",
+            object_name="muted",
+        ))
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 4, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+        current_appearance = str(self.settings.data.get("appearance") or "dark")
+        specs = (
+            ("light", "Light", "Bright canvas & crisp contrast"),
+            ("dark", "Dark", "Low-glare studio workspace"),
+            ("system", "System", "Match operating system"),
+        )
+        for col, (mode_id, title, sub) in enumerate(specs):
+            card = ThemePreviewCard(mode_id, title, sub)
+            card.setChecked(current_appearance == mode_id)
+            card.clicked.connect(lambda _c=False, m=mode_id: self.set_appearance(m))
+            self.appearance_buttons[mode_id] = card
+            grid.addWidget(card, 0, col)
+            grid.setColumnStretch(col, 1)
+        theme_lay.addLayout(grid)
+        page.addWidget(theme_card)
+
+        nav_card = SectionCard("Navigation")
+        nav_form = configure_form_layout(QFormLayout())
+        nav_card.body_layout().addLayout(nav_form)
+        self.sidebar_compact_check = QCheckBox("Use collapsed icon-only floating sidebar")
+        self.sidebar_compact_check.setChecked(self.sidebar.collapsed)
+        self.sidebar_compact_check.toggled.connect(lambda checked: self.sidebar.set_collapsed(checked))
+        nav_form.addRow("Sidebar mode", self.sidebar_compact_check)
+        page.addWidget(nav_card)
+        page.addStretch()
+        return outer
+
+    def _refresh_cache_footprint(self) -> None:
+        if not hasattr(self, "cache_size_label"):
+            return
+        total = 0
+        if CACHE_DIR.is_dir():
+            for path in CACHE_DIR.rglob("*"):
+                if path.is_file():
+                    try:
+                        total += path.stat().st_size
+                    except OSError:
+                        pass
+        mb = total / (1024 * 1024)
+        self.cache_size_label.setText(f"{mb:.1f} MB in local cache" if mb >= 1.0 else f"{total / 1024:.0f} KB in local cache")
+
+    def _clear_temporary_cache(self) -> None:
+        if self.worker_thread is not None:
+            self.general_status.setText("Wait for active processing to finish before clearing cache.")
+            return
+        for sub in ("jobs", "youtube-metadata", "youtube-subtitles"):
+            shutil.rmtree(CACHE_DIR / sub, ignore_errors=True)
+        self._refresh_cache_footprint()
+        self.general_status.setText("Temporary job and metadata caches cleared (saved clips and settings preserved).")
 
     @staticmethod
     def _spin(minimum: int, maximum: int, value: int, suffix: str = "") -> QSpinBox:
@@ -754,7 +819,18 @@ class MainWindow(QMainWindow):
             "player_muted": bool(muted),
         }, debounced=True)
 
-    def show_page(self, index: int) -> None:
+    def show_route(self, route: str) -> None:
+        """Navigate by canonical route key or legacy page name (e.g. 'Dependencies', 'AI Provider Settings')."""
+        normalized = str(route or "").strip()
+        key = normalized if normalized in ALL_ROUTES_BY_KEY else LEGACY_ROUTE_ALIASES.get(normalized.lower(), "")
+        spec = ALL_ROUTES_BY_KEY.get(key)
+        if spec is not None:
+            self.show_page(spec.page_index)
+
+    def show_page(self, index: int | str) -> None:
+        if isinstance(index, str):
+            self.show_route(index)
+            return
         if self.stack.currentIndex() == 3 and index != 3 and hasattr(self, "clip_detail"):
             self.clip_detail.stop_playback()
         if self.stack.currentIndex() == 4 and index != 4:
@@ -762,10 +838,18 @@ class MainWindow(QMainWindow):
         if hasattr(self, "performance_view"):
             self.performance_view.set_polling(index == 7)
         self.stack.setCurrentIndex(index)
-        for button_index, button in enumerate(self.nav_buttons):
-            button.setChecked(button_index == index)
+        spec = ALL_ROUTES_BY_INDEX.get(index)
+        if spec is not None and hasattr(self, "sidebar"):
+            self.sidebar.set_active_route(spec.key)
+            if spec.key.startswith("settings.") and not self._hydrating_ui:
+                self.settings.update_ui_state({"last_settings_route": spec.key}, debounced=True)
+        else:
+            for button_index, button in enumerate(self.nav_buttons):
+                button.setChecked(button_index == index)
         if index in {0, 2, 3}:
             self.refresh_all()
+        elif index == 9:
+            self._refresh_cache_footprint()
 
     def set_source_tab(self, index: int) -> None:
         tab = 1 if index == 1 else 0
@@ -1440,8 +1524,8 @@ class MainWindow(QMainWindow):
                 parent=self,
             )
             dlg.exec()
-            if dlg.chosen_action == "dependencies" and "Dependencies" in self.NAV_ITEMS:
-                self.show_page(self.NAV_ITEMS.index("Dependencies"))
+            if dlg.chosen_action == "dependencies":
+                self.show_route("settings.dependencies")
             elif dlg.chosen_action == "retry":
                 self._handle_queue_action("resume_download", project_id)
 
@@ -1910,7 +1994,7 @@ class MainWindow(QMainWindow):
         self._run_utility(provider, provider.list_models, done)
 
     def _speech_settings_page(self) -> QWidget:
-        outer, layout = self._page("Speech-to-Text", "Configure local models, transcription quality and acceleration")
+        outer, layout = self._page("Transcription", "Configure local models, cloud engines, language preferences, and acceleration")
         self.speech_settings = SpeechSettingsView(self.settings, self._sync_speech_defaults, self._start_speech_task)
         layout.addWidget(self.speech_settings)
         layout.addStretch()
@@ -2008,7 +2092,17 @@ class MainWindow(QMainWindow):
     def save_local_settings(self) -> None:
         self.settings.data["output_dir"] = self.output_input.text().strip()
         self.settings.data["hardware_encoding"] = self.hardware_check.isChecked()
-        self.settings.save(); self.connection_status.setText("Local settings saved.")
+        if hasattr(self, "general_cache_check"):
+            cache_on = self.general_cache_check.isChecked()
+            self.settings.data["cache_enabled"] = cache_on
+            self.settings.update_project_defaults({"cache_enabled": cache_on}, debounced=False)
+            if hasattr(self, "cache_check"):
+                with QSignalBlocker(self.cache_check):
+                    self.cache_check.setChecked(cache_on)
+        self.settings.save()
+        if hasattr(self, "general_status"):
+            self.general_status.setText("General settings saved.")
+        self.connection_status.setText("Local settings saved.")
 
     def reset_all_settings(self) -> None:
         answer = QMessageBox.question(
@@ -2028,11 +2122,24 @@ class MainWindow(QMainWindow):
             self.project_model.setText(self.settings.provider().get("model", ""))
             self.output_input.setText(self.settings.data.get("output_dir", ""))
             self.hardware_check.setChecked(bool(self.settings.data.get("hardware_encoding", True)))
-            self._theme.apply(str(self.settings.data.get("appearance") or "dark"))
+            if hasattr(self, "general_cache_check"):
+                self.general_cache_check.setChecked(bool(self.settings.data.get("cache_enabled", True)))
+            if hasattr(self, "sidebar"):
+                self.sidebar.set_collapsed(False, emit_signal=False)
+                self.sidebar.set_settings_expanded(False, emit_signal=False)
+            if hasattr(self, "sidebar_compact_check"):
+                self.sidebar_compact_check.setChecked(False)
+            appearance = str(self.settings.data.get("appearance") or "dark")
+            for mode_id, btn in self.appearance_buttons.items():
+                with QSignalBlocker(btn):
+                    btn.setChecked(mode_id == appearance)
+            self._theme.apply(appearance)
             if hasattr(self, "clip_detail"):
                 self.clip_detail.set_audio_preferences(80, False)
         finally:
             self._hydrating_ui = False
+        if hasattr(self, "general_status"):
+            self.general_status.setText("Settings reset to defaults.")
         self.connection_status.setText("Settings reset to defaults.")
 
     def closeEvent(self, event: QCloseEvent) -> None:
@@ -2044,6 +2151,9 @@ class MainWindow(QMainWindow):
                 "window_maximized": bool(self.isMaximized()),
                 "player_volume": int(self.clip_detail.volume_slider.value()) if hasattr(self, "clip_detail") else 80,
                 "player_muted": bool(self.clip_detail.audio_output.isMuted()) if hasattr(self, "clip_detail") else False,
+                "sidebar_collapsed": bool(self.sidebar.collapsed) if hasattr(self, "sidebar") else False,
+                "settings_expanded": bool(self.sidebar.settings_expanded) if hasattr(self, "sidebar") else False,
+                "last_settings_route": self.sidebar.last_settings_route if hasattr(self, "sidebar") else "settings.general",
             }, debounced=False)
             self.settings.flush()
             if hasattr(self, "clip_detail"):

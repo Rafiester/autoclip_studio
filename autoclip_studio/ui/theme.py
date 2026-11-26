@@ -50,10 +50,11 @@ DARK_TOKENS: dict[str, str] = {
     "name": "dark",
     # Core surfaces
     "bg_app": "#101116",
-    "bg_sidebar": "#16171D",
+    "bg_sidebar": "#1A1C23",
     "bg_surface": "#1A1C23",
     "bg_elevated": "#22242C",
     "bg_hover": "#2A2D37",
+    "bg_nav_hover": "#22242C",
     "bg_pressed": "#15171E",
     "bg_alt_row": "#1E2028",
     "bg_player": "#0B0C10",
@@ -97,11 +98,12 @@ DARK_TOKENS: dict[str, str] = {
 LIGHT_TOKENS: dict[str, str] = {
     "name": "light",
     # Core surfaces
-    "bg_app": "#F5F6F8",
+    "bg_app": "#F1F3F6",
     "bg_sidebar": "#FFFFFF",
     "bg_surface": "#FFFFFF",
-    "bg_elevated": "#F0F1F4",
-    "bg_hover": "#E6E8EE",
+    "bg_elevated": "#F0F2F5",
+    "bg_hover": "#E6E9EF",
+    "bg_nav_hover": "#F5F6F8",
     "bg_pressed": "#DCE0E8",
     "bg_alt_row": "#F9FAFB",
     "bg_player": "#121318",
@@ -112,15 +114,15 @@ LIGHT_TOKENS: dict[str, str] = {
     "brand_primary_hover": "#D32F2F",
     "brand_primary_pressed": "#B71C1C",
     "brand_accent": "#D92D20",
-    "brand_tint": "#FDECEC",
-    "brand_tint_hover": "#FCD8D8",
+    "brand_tint": "#FDEBEC",
+    "brand_tint_hover": "#FCD8DA",
     "brand_border_soft": "#F3B4B3",
     "brand_disabled_bg": "#F4D4D4",
     "brand_disabled_border": "#EBC2C2",
     "brand_disabled_fg": "#A87C7C",
     # Typography
     "text_primary": "#17181C",
-    "text_secondary": "#525B6B",
+    "text_secondary": "#667085",
     "text_disabled": "#98A2B3",
     "text_on_brand": "#FFFFFF",
     # Semantic colors & tinted chip surfaces
@@ -233,9 +235,33 @@ QLabel, QCheckBox, QRadioButton {{
 QScrollArea, QScrollArea > QWidget > QWidget {{
     background: transparent;
 }}
-QFrame#sidebar {{
+QFrame#sidebar, QFrame#floatingSidebar {{
     background: {t["bg_sidebar"]};
-    border-right: 1px solid {t["border_subtle"]};
+    border: 1px solid {t["border_subtle"]};
+    border-radius: 20px;
+}}
+QFrame#floatingSidebar QScrollArea, QFrame#floatingSidebar QScrollArea > QWidget > QWidget {{
+    background: transparent;
+}}
+QPushButton#sidebarCollapseBtn {{
+    background: {t["bg_nav_hover"]};
+    border: 1px solid {t["border_subtle"]};
+    border-radius: 8px;
+    padding: 0;
+    min-height: 26px;
+    max-height: 28px;
+    min-width: 26px;
+    max-width: 28px;
+}}
+QPushButton#sidebarCollapseBtn:hover {{
+    background: {t["bg_hover"]};
+    border-color: {t["border_strong"]};
+}}
+QPushButton#sidebarCollapseBtn:pressed {{
+    background: {t["bg_pressed"]};
+}}
+QPushButton#sidebarCollapseBtn:focus {{
+    border: 1px solid {t["brand_accent"]};
 }}
 QLabel#brand {{
     background: transparent;
@@ -416,67 +442,79 @@ QPushButton#danger:disabled {{
 QPushButton#nav {{
     text-align: left;
     border: none;
-    border-left: 3px solid transparent;
+    border-radius: 10px;
+    background: transparent;
+    color: {t["text_secondary"]};
+    padding: 0 10px;
+    min-height: 42px;
+    max-height: 42px;
+    font-size: 13px;
+    font-weight: 500;
+}}
+QPushButton#nav:hover {{
+    background: {t["bg_nav_hover"]};
+    color: {t["text_primary"]};
+}}
+QPushButton#nav:checked, QPushButton#nav[parentActive="true"] {{
+    background: {t["brand_tint"]};
+    color: {t["text_primary"]};
+    font-weight: 600;
+}}
+QPushButton#navChild {{
+    text-align: left;
+    border: none;
     border-radius: 8px;
     background: transparent;
     color: {t["text_secondary"]};
     padding: 0 12px;
     min-height: 36px;
-    font-size: 13px;
+    max-height: 36px;
+    font-size: 12.5px;
     font-weight: 500;
 }}
-QPushButton#nav:hover {{
-    background: {t["bg_elevated"]};
+QPushButton#navChild:hover {{
+    background: {t["bg_nav_hover"]};
     color: {t["text_primary"]};
 }}
-QPushButton#nav:checked {{
+QPushButton#navChild:checked {{
     background: {t["brand_tint"]};
-    color: {t["text_primary"]};
+    color: {t["brand_accent"]};
     font-weight: 600;
-    border-left: 3px solid {t["brand_primary"]};
 }}
-QPushButton#appearanceBtn {{
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 6px;
-    padding: 0 6px;
-    min-height: 28px;
-    font-size: 11px;
-    font-weight: 500;
-    color: {t["text_secondary"]};
-}}
-QPushButton#appearanceBtn:hover {{
-    background: {t["bg_hover"]};
-    color: {t["text_primary"]};
-}}
-QPushButton#appearanceBtn:checked {{
+QPushButton#themePreviewCard {{
     background: {t["bg_surface"]};
-    border-color: {t["border_subtle"]};
-    color: {t["text_primary"]};
-    font-weight: 600;
+    border: 1.5px solid {t["border_subtle"]};
+    border-radius: 12px;
+    padding: 0;
+    min-height: 164px;
+    max-height: 168px;
+    text-align: left;
 }}
-QFrame#appearanceBar {{
-    background: {t["bg_elevated"]};
-    border: 1px solid {t["border_subtle"]};
-    border-radius: 8px;
+QPushButton#themePreviewCard:hover {{
+    border-color: {t["border_strong"]};
+    background: {t["bg_alt_row"]};
+}}
+QPushButton#themePreviewCard:checked {{
+    border: 2px solid {t["brand_primary"]};
+    background: {t["brand_tint"]};
 }}
 QPushButton#videoPreviewRetry {{
     padding: 0 12px;
     min-height: 30px;
 }}
 
-/* Focus indicators (never show fake active left bar on unfocused/unchecked sidebar nav items) */
+/* Focus indicators (clean subtle focus ring, zero legacy left bar) */
 QPushButton:focus, QPushButton#primary:focus, QPushButton#danger:focus,
 QTableWidget:focus {{
     border: 1px solid {t["brand_accent"]};
 }}
-QPushButton#nav:focus {{
-    border: none;
-    border-left: 3px solid transparent;
+QPushButton#nav:focus, QPushButton#navChild:focus {{
+    border: 1px solid {t["border_strong"]};
     outline: none;
 }}
-QPushButton#nav:checked:focus {{
-    border-left: 3px solid {t["brand_primary"]};
+QPushButton#nav:checked:focus, QPushButton#navChild:checked:focus {{
+    border: 1px solid {t["brand_border_soft"]};
+    outline: none;
 }}
 
 /* Text inputs, SpinBoxes, ComboBoxes — unified 36px control height across macOS & Windows */

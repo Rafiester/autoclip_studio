@@ -126,6 +126,9 @@ DEFAULTS: dict[str, Any] = {
         "last_page": 0,
         "player_volume": 80,
         "player_muted": False,
+        "sidebar_collapsed": False,
+        "settings_expanded": False,
+        "last_settings_route": "settings.general",
     },
 }
 

@@ -1,12 +1,41 @@
 # AutoClip Studio — Agent Handoff & Progress
 
 **Last Updated:** 2026-11-26  
-**Current Phase:** Embedded Video Player Audio Fix Complete
+**Current Phase:** Floating Sidebar & Unified Settings Redesign Complete
 
 ## Execution Status
 
 ### Completed Tasks
-- **Embedded Video Player Audio Fix** (Pre-modification checkpoint: `44660e2`):
+- **Floating Sidebar & Unified Settings Redesign** (Pre-modification checkpoint: `ccfae71`):
+  - **Navigation Architecture & Hierarchy ([`autoclip_studio/ui/sidebar.py`](autoclip_studio/ui/sidebar.py), [`autoclip_studio/gui.py`](autoclip_studio/gui.py)):**
+    - Replaced the flat edge-to-edge sidebar with an inset floating container (`FloatingSidebar`, `240px` expanded / `70px` collapsed, `20px` radius, `14px` outer inset gutter, subtle `border_subtle` + restrained drop shadow) keeping the scrollable nav body cleanly separated from the brand header and anchored `Version 1.0.0` footer (removed sidebar theme bar and `"Local-first • No watermarks"` tagline).
+    - Implemented the exact final hierarchy with Lucide outline icons (`layout-dashboard`, `square-plus`, `list-video`, `clapperboard`, `captions`, `settings`):
+      - Primary items: **Dashboard**, **New Project**, **Processing Queue**, **Generated Clips**, **Caption Templates**.
+      - Expandable **Settings** parent with vertical connector tree (`_SettingsTreeContainer`) and 6 children: **General**, **Appearance**, **AI Providers**, **Transcription**, **Performance**, **Dependencies**.
+    - Active state: soft red row background (`#FDEBEC` Light / `#382124` Dark), fixed `30×30` solid red rounded icon container (`#E53935`) with crisp white icon, SemiBold text, and zero thick left border or layout shift.
+    - Collapsed mode: centered standalone official brand symbol (`symbol.png`), centered expand toggle (`>`), icon-only primary items with native tooltips, and a compact anchored `QMenu` flyout for Settings categories.
+  - **Settings Relocation Mapping & Shared Components Reused:**
+    - `AI Provider Settings` (legacy index `5`) → **Settings > AI Providers** (existing provider form, Keychain/Credential Manager storage, model discovery, and persistence intact).
+    - `Speech-to-Text` (legacy index `6`) → **Settings > Transcription** (existing `SpeechSettingsView` intact).
+    - `Performance` (legacy index `7`) → **Settings > Performance** (existing `PerformanceView` intact).
+    - `Dependencies` (legacy index `8`) → **Settings > Dependencies** (existing `DependencyManagerView` intact).
+    - **Settings > General** (index `9`): consolidated existing `SectionCard` + `configure_form_layout` + `configure_input` controls for Output folder, Hardware encoding (`VideoToolbox`/`NVENC`), cache default toggle, live cache footprint, Clear Temporary Cache, Save, and Reset to Defaults.
+    - **Settings > Appearance** (index `10`): sole Light/Dark/System theme switcher built with 3 visual `ThemePreviewCard` widgets + `Use collapsed icon-only floating sidebar` toggle bidirectionally synced with `FloatingSidebar`.
+    - Added `MainWindow.show_route()` preserving all legacy route names and numeric stack indices (`0..10`) without duplicating page widgets.
+  - **Theme Integration & Persistent Preferences ([`autoclip_studio/ui/theme.py`](autoclip_studio/ui/theme.py), [`autoclip_studio/ui/icons.py`](autoclip_studio/ui/icons.py), [`autoclip_studio/config.py`](autoclip_studio/config.py)):**
+    - Updated `LIGHT_TOKENS` canvas to `#F1F3F6` with `#FFFFFF` floating sidebar, `#F5F6F8` nav hover, `#FDEBEC` active tint, `#667085` secondary text; updated `DARK_TOKENS` floating sidebar to `#1A1C23` over `#101116` canvas with `#22242C` nav hover and `#382124` active tint.
+    - Added persisted `SettingsStore` UI preferences: `ui.sidebar_collapsed`, `ui.settings_expanded`, and `ui.last_settings_route` (alongside existing `appearance`, `player_volume`, and `player_muted`).
+  - **Before & After Visual QA (`Apple M1`, `macOS 27.2.1`):**
+    - Before captures: `sidebar_before_light.png`, `sidebar_before_dark.png`.
+    - After captures verified: `sidebar_after_light_dashboard.png`, `sidebar_after_light_appearance.png`, `sidebar_after_dark_appearance.png`, `sidebar_after_dark_collapsed.png`, and `sidebar_after_small_expanded.png` (`860×620` compact window with scrollable nav + anchored `Version 1.0.0` footer).
+    - Confirmed dead-center official AutoClip Studio logo (Light/Dark) and standalone `symbol.png` in collapsed mode, zero overlap on `ThemePreviewCard` previews, zero clipped icons, and clean soft-red active pills across Light & Dark themes.
+  - **Functional Regression & Platform Validation:**
+    - Added [`tests/test_floating_sidebar_navigation.py`](tests/test_floating_sidebar_navigation.py) and updated [`tests/test_theme_system.py`](tests/test_theme_system.py) for the `#F1F3F6` Light canvas token.
+    - Full pytest suite: **159 passed, 3 skipped (Windows-only), 0 failed**.
+    - Native macOS Cocoa pass (`test_player_audio.py` + `test_floating_sidebar_navigation.py`): **4 passed, 0 failed** (verifying embedded AVFoundation audio, fullscreen playback, sidebar collapse/expand, Settings routing, and restart persistence).
+  - **Remaining Limitations:**
+    - Native Windows runtime visual inspection was not performed on this macOS machine; all shared layouts, QSS, and cross-platform automated tests remain Windows-compatible and should be spot-checked on native Windows DPI displays.
+- **Embedded Video Player Audio Fix** (`ccfae71`):
   - **Confirmed Root Causes (Apple Silicon macOS + PySide6 6.8.3 + CoreAudio):**
     1. **Qt 6.8.3 FFmpeg Backend Sample-Rate Mismatch on macOS CoreAudio Bluetooth Devices (Primary Cause):** Exported AutoClip Studio clips contain standard `48000 Hz` stereo AAC audio, while active macOS Bluetooth audio devices (confirmed live on `HUAWEI FreeBuds SE 4 ANC`: `minRate=16000`, `maxRate=44100`, `preferredFormat=44100 Hz`, `isFormatSupported(48000Hz) == False`) cap sample rate at `44100 Hz`. Qt 6.8.3's default `ffmpeg` backend (`QFFmpegResampler`) resampled `fltp 48000 Hz → flt 48000 Hz` without converting to the device's supported rate (`44100 Hz`), causing silent audio playback (and `SIGSEGV` exit `139` when opening `QAudioSink` directly at `48000 Hz`) while video frames played normally.
     2. **Missing System Audio Output Device Tracking (`clips_workspace.py`):** `ClipDetailPlayerPanel` instantiated `QAudioOutput(self)` once at startup and never subscribed to `QMediaDevices.audioOutputsChanged`, leaving audio pinned to a stale/disconnected output device after plugging/unplugging headphones or switching system audio output.

@@ -230,6 +230,47 @@ def lucide_icon(name: str, color: str = "#F5F5F7", size: int = 16) -> QIcon:
         p = QPainterPath()
         p.moveTo(6, 15); p.lineTo(12, 9); p.lineTo(18, 15)
         painter.drawPath(p)
+    elif name == "layout-dashboard":
+        painter.drawRoundedRect(QRectF(3, 3, 7, 9), 1.5, 1.5)
+        painter.drawRoundedRect(QRectF(14, 3, 7, 5), 1.5, 1.5)
+        painter.drawRoundedRect(QRectF(14, 12, 7, 9), 1.5, 1.5)
+        painter.drawRoundedRect(QRectF(3, 16, 7, 5), 1.5, 1.5)
+    elif name == "square-plus":
+        painter.drawRoundedRect(QRectF(3, 3, 18, 18), 3, 3)
+        painter.drawLine(QPointF(8, 12), QPointF(16, 12))
+        painter.drawLine(QPointF(12, 8), QPointF(12, 16))
+    elif name == "list-video":
+        painter.drawLine(QPointF(3, 6), QPointF(14, 6))
+        painter.drawLine(QPointF(3, 12), QPointF(11, 12))
+        painter.drawLine(QPointF(3, 18), QPointF(11, 18))
+        p = QPainterPath()
+        p.moveTo(15, 12)
+        p.lineTo(21, 15.5)
+        p.lineTo(15, 19)
+        p.closeSubpath()
+        painter.drawPath(p)
+    elif name == "clapperboard":
+        painter.drawRoundedRect(QRectF(3, 4, 18, 16), 2, 2)
+        painter.drawLine(QPointF(3, 10), QPointF(21, 10))
+        painter.drawLine(QPointF(7.5, 4), QPointF(10.5, 10))
+        painter.drawLine(QPointF(13.5, 4), QPointF(16.5, 10))
+    elif name == "captions":
+        painter.drawRoundedRect(QRectF(3, 5, 18, 14), 2.5, 2.5)
+        painter.drawLine(QPointF(7, 11), QPointF(11, 11))
+        painter.drawLine(QPointF(14, 11), QPointF(17, 11))
+        painter.drawLine(QPointF(7, 15), QPointF(9.5, 15))
+        painter.drawLine(QPointF(12.5, 15), QPointF(17, 15))
+    elif name == "settings":
+        painter.drawEllipse(QPointF(12, 12), 3.2, 3.2)
+        import math
+        for angle_deg in range(0, 360, 45):
+            rad = math.radians(angle_deg)
+            x1 = 12.0 + math.cos(rad) * 6.5
+            y1 = 12.0 + math.sin(rad) * 6.5
+            x2 = 12.0 + math.cos(rad) * 9.0
+            y2 = 12.0 + math.sin(rad) * 9.0
+            painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+        painter.drawEllipse(QPointF(12, 12), 6.5, 6.5)
 
     painter.end()
     pixmap.setDevicePixelRatio(dpr)

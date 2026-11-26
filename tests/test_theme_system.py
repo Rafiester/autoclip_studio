@@ -37,7 +37,7 @@ def test_theme_tokens_and_stylesheets_cover_light_and_dark() -> None:
     assert DARK_TOKENS["bg_app"] == "#101116"
     assert DARK_TOKENS["bg_surface"] == "#1A1C23"
     assert DARK_TOKENS["brand_primary"] == "#E53935"
-    assert LIGHT_TOKENS["bg_app"] == "#F5F6F8"
+    assert LIGHT_TOKENS["bg_app"] == "#F1F3F6"
     assert LIGHT_TOKENS["bg_surface"] == "#FFFFFF"
     assert LIGHT_TOKENS["text_primary"] == "#17181C"
     assert LIGHT_TOKENS["brand_primary"] == "#E53935"
@@ -45,7 +45,7 @@ def test_theme_tokens_and_stylesheets_cover_light_and_dark() -> None:
     dark_qss = build_theme_stylesheet("dark")
     light_qss = build_theme_stylesheet("light")
     assert "Poppins" in dark_qss and "Poppins" in light_qss
-    assert "#101116" in dark_qss and "#F5F6F8" in light_qss
+    assert "#101116" in dark_qss and "#F1F3F6" in light_qss
     assert "chevron-up-dark.svg" in dark_qss and "chevron-up-light.svg" in light_qss
     assert "check-white.svg" in dark_qss and "check-white.svg" in light_qss
 
