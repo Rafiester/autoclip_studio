@@ -96,7 +96,13 @@ class AIProvider:
             models = [self._preferred_model or self.model, self.model, *self.fallback_models]
         if self.kind == "gemini":
             models = [model.strip().removeprefix("models/") for model in models]
-        models = list(dict.fromkeys(model for model in models if model.strip())) or [self.model]
+        models = list(dict.fromkeys(model.strip() for model in models if model and model.strip()))
+        if not models:
+            raise ProviderError(
+                f"No model ID is configured for the '{self.kind}' provider. "
+                "Open AI Provider Settings, select or enter a model ID, and click Save settings.",
+                category="model",
+            )
         failures = []
         for index, model in enumerate(models):
             try:

@@ -259,13 +259,12 @@ class Pipeline:
                 shutil.rmtree(job_dir, ignore_errors=True)
 
     def _provider(self, name: str, model: str, warning: Callable[[str], None] | None) -> AIProvider | None:
-        values = self.settings.provider(name)
-        key = self.settings.api_key(name)
-        if not key:
+        resolved = self.settings.resolve_provider_config(name, model_override=model)
+        if not resolved["api_key"]:
             return None
         return AIProvider(
-            name, key, values.get("base_url", ""), model or values.get("model", ""),
-            fallback_models=tuple(values.get("fallback_models", [])), auto_fallback=bool(values.get("auto_fallback")),
+            resolved["provider"], resolved["api_key"], resolved["base_url"], resolved["model"],
+            fallback_models=tuple(resolved["fallback_models"]), auto_fallback=bool(resolved["auto_fallback"]),
             cancel_event=self.manager.cancel_event, notify=warning,
         )
 

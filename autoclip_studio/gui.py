@@ -73,6 +73,9 @@ class MainWindow(QMainWindow):
         self.queue_paused = False
         self._active_project_id: str | None = None
         self.closing = False
+        self._hydrating_ui = True
+        self._loading_provider_form = False
+        self._model_load_seq = 0
         self.thumb_runner = ThumbnailTaskRunner(self.settings.performance().profile, self)
         self.thumb_runner.completed.connect(self._on_thumbnail_ready)
         self.thumb_runner.failed.connect(self._on_thumbnail_failed)
@@ -81,11 +84,15 @@ class MainWindow(QMainWindow):
             self.setWindowIcon(app.windowIcon())
         elif (icon_path := asset_path("autoclip.ico")).is_file():
             self.setWindowIcon(QIcon(str(icon_path)))
-        self.resize(1280, 820)
+        ui_state = self.settings.ui_state()
+        win_w = max(760, min(2560, int(ui_state.get("window_width") or 1280)))
+        win_h = max(560, min(1600, int(ui_state.get("window_height") or 820)))
+        self.resize(win_w, win_h)
         self.setMinimumSize(760, 560)
         self._theme = theme_manager()
         self._theme.apply(str(self.settings.data.get("appearance") or "dark"))
         self._build_ui()
+        self._hydrating_ui = False
         self._theme.theme_changed.connect(self._on_theme_changed)
         self._on_theme_changed(self._theme.resolved)
 
@@ -334,6 +341,8 @@ class MainWindow(QMainWindow):
         self.heatmap_widget = AudienceHeatmapWidget()
         yt_layout.addWidget(self.heatmap_widget)
         self.use_yt_subtitles_check = QCheckBox("Use YouTube subtitles when available")
+        self.use_yt_subtitles_check.setChecked(bool(self.settings.project_defaults().get("use_youtube_subtitles", False)))
+        self.use_yt_subtitles_check.toggled.connect(self._persist_project_preferences)
         self.use_yt_subtitles_check.setToolTip(
             "Reuse manual YouTube subtitles or normalized automatic captions before running Whisper"
         )
@@ -412,17 +421,24 @@ class MainWindow(QMainWindow):
         name_row.labelForField(self.project_name).setObjectName("projectNameLabel")
         source_layout.addLayout(name_row)
         form.addWidget(source_group)
+        proj_defaults = self.settings.project_defaults()
         settings_group = SectionCard("Clip settings")
         grid = QGridLayout()
         settings_group.body_layout().addLayout(grid)
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(12)
-        self.clip_count = configure_input(self._spin(1, 10, 3))
-        self.min_duration = configure_input(self._spin(10, 120, 25, " sec"))
-        self.max_duration = configure_input(self._spin(15, 180, 60, " sec"))
+        self.clip_count = configure_input(self._spin(1, 10, int(proj_defaults.get("clip_count", 3))))
+        self.min_duration = configure_input(self._spin(10, 120, int(proj_defaults.get("min_duration", 25)), " sec"))
+        self.max_duration = configure_input(self._spin(15, 180, int(proj_defaults.get("max_duration", 60)), " sec"))
         self.aspect = configure_input(QComboBox(), min_contents_length=8); self.aspect.addItems(["9:16", "1:1", "4:5", "16:9"])
+        self.aspect.setCurrentText(str(proj_defaults.get("aspect_ratio", "9:16")))
         self.resolution = configure_input(QComboBox(), min_contents_length=12); self.resolution.addItems(["1080x1920", "720x1280", "1080x1080", "1080x1350", "1920x1080"])
+        self.resolution.setCurrentText(str(proj_defaults.get("resolution", "1080x1920")))
         self.aspect.currentTextChanged.connect(self._aspect_changed)
+        self.clip_count.valueChanged.connect(self._persist_project_preferences)
+        self.min_duration.valueChanged.connect(self._persist_project_preferences)
+        self.max_duration.valueChanged.connect(self._persist_project_preferences)
+        self.resolution.currentTextChanged.connect(self._persist_project_preferences)
         grid.addWidget(QLabel("Number of clips"), 0, 0); grid.addWidget(self.clip_count, 0, 1)
         grid.addWidget(QLabel("Minimum duration"), 0, 2); grid.addWidget(self.min_duration, 0, 3)
         grid.addWidget(QLabel("Maximum duration"), 1, 0); grid.addWidget(self.max_duration, 1, 1)
@@ -439,18 +455,21 @@ class MainWindow(QMainWindow):
         self.reframe_combo = configure_input(QComboBox())
         for code, label in REFRAME_MODES:
             self.reframe_combo.addItem(label, code)
-        self.reframe_combo.setCurrentIndex(0)  # Auto Smart Reframe (default)
+        saved_reframe = str(proj_defaults.get("reframe_mode", "auto"))
+        reframe_idx = self.reframe_combo.findData(saved_reframe)
+        self.reframe_combo.setCurrentIndex(reframe_idx if reframe_idx >= 0 else 0)
         self.face_tracking = QCheckBox("Auto face tracking")
-        self.face_tracking.setChecked(True)
+        self.face_tracking.setChecked((self.reframe_combo.currentData() or "auto") != "off")
         self.face_tracking.hide()  # Preserved for API compatibility; synchronized with Smart Reframing selector
-        self.reframe_combo.currentIndexChanged.connect(
-            lambda: self.face_tracking.setChecked((self.reframe_combo.currentData() or "auto") != "off")
-        )
-        self.captions = QCheckBox("Animated word captions"); self.captions.setChecked(True)
-        self.cache = QCheckBox("Cache downloads and transcripts"); self.cache.setChecked(True)
+        self.reframe_combo.currentIndexChanged.connect(self._on_reframe_mode_changed)
+        self.captions = QCheckBox("Animated word captions"); self.captions.setChecked(bool(proj_defaults.get("captions", True)))
+        self.cache = QCheckBox("Cache downloads and transcripts"); self.cache.setChecked(bool(proj_defaults.get("cache_enabled", self.settings.data.get("cache_enabled", True))))
+        self.captions.toggled.connect(self._persist_project_preferences)
+        self.cache.toggled.connect(self._persist_project_preferences)
         self.template_combo = configure_input(QComboBox())
         self.template_combo.addItems(TEMPLATES.keys())
         self.template_combo.setCurrentText(self.default_template())
+        self.template_combo.currentTextChanged.connect(self._on_project_template_changed)
         auto_layout.addWidget(QLabel("Smart reframing"), 0, 0)
         auto_layout.addWidget(self.reframe_combo, 0, 1)
         auto_layout.addWidget(self.captions, 1, 0)
@@ -467,20 +486,29 @@ class MainWindow(QMainWindow):
         self.highlight_mode_combo.addItem("Hybrid (AI + Most Replayed)", "hybrid")
         self.highlight_mode_combo.addItem("AI Analysis", "ai")
         self.highlight_mode_combo.addItem("Most Replayed", "most_replayed")
-        self.highlight_mode_combo.setCurrentIndex(1)  # Defaults to AI until YouTube heatmap is detected
+        saved_hl_mode = str(proj_defaults.get("highlight_mode", "ai"))
+        hl_idx = self.highlight_mode_combo.findData(saved_hl_mode)
+        self.highlight_mode_combo.setCurrentIndex(hl_idx if hl_idx >= 0 else 1)
         self.highlight_mode_combo.currentIndexChanged.connect(self._on_highlight_mode_changed)
         self.highlight_mode_note = QLabel("", objectName="muted")
         self.highlight_mode_note.setWordWrap(True)
         self.highlight_mode_note.hide()
-        self.hybrid_weight_spin = configure_input(self._spin(0, 100, 60, "% AI / 40% Replay"))
+        saved_ai_weight = max(0, min(100, int(proj_defaults.get("ai_weight_pct", 60))))
+        self.hybrid_weight_spin = configure_input(self._spin(0, 100, saved_ai_weight, f"% AI / {100 - saved_ai_weight}% Replay"))
         self.hybrid_weight_spin.setToolTip("Adjust Hybrid ranking weight between AI content score and audience replay score")
         self.hybrid_weight_spin.valueChanged.connect(self._on_hybrid_weight_changed)
         self.project_provider = configure_input(QComboBox()); self.project_provider.addItems(["gemini", "openai", "custom"])
         self.project_provider.setCurrentText(self.settings.data["active_provider"])
         self.project_model = configure_input(QLineEdit(self.settings.provider().get("model", "")))
+        self.project_model.editingFinished.connect(self._on_project_model_edited)
         self.multimodal_check = QCheckBox("Optional Gemini video analysis (uploads source)")
+        self.multimodal_check.setChecked(bool(proj_defaults.get("multimodal", False)) and self.project_provider.currentText() == "gemini")
+        self.multimodal_check.setEnabled(self.project_provider.currentText() == "gemini")
+        self.multimodal_check.toggled.connect(self._persist_project_preferences)
         self.whisper_model = configure_input(QComboBox()); self.whisper_model.addItems(MODELS); self.whisper_model.setCurrentText(self.settings.data["whisper_model"])
         self.whisper_device = configure_input(QComboBox()); self.whisper_device.addItems(["auto", "cuda", "cpu"]); self.whisper_device.setCurrentText(self.settings.data["whisper_device"])
+        self.whisper_model.currentTextChanged.connect(self._on_project_whisper_changed)
+        self.whisper_device.currentTextChanged.connect(self._on_project_whisper_changed)
         self.project_provider.currentTextChanged.connect(self._project_provider_changed)
         ai_form.addRow("Highlight detection", self.highlight_mode_combo)
         ai_form.addRow("", self.highlight_mode_note)
@@ -587,15 +615,23 @@ class MainWindow(QMainWindow):
         group.body_layout().addLayout(form)
         self.settings_provider = configure_input(QComboBox()); self.settings_provider.addItems(["gemini", "openai", "custom"])
         self.settings_provider.setCurrentText(self.settings.data["active_provider"])
+        self.provider_name_input = configure_input(QLineEdit())
+        self.provider_name_input.setPlaceholderText("Display name (e.g. OpenRouter, Local vLLM)")
         self.api_key_input = configure_input(QLineEdit()); self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.base_url_input = configure_input(QLineEdit())
         self.model_input = configure_input(QComboBox(), min_contents_length=24); self.model_input.setEditable(True)
+        self.model_input.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        if (edit := self.model_input.lineEdit()) is not None:
+            edit.setPlaceholderText("Select from list or type model ID manually")
+            edit.editingFinished.connect(self._on_settings_model_committed)
+        self.model_input.activated.connect(lambda _idx: self._on_settings_model_committed())
         self.fallback_models_input = configure_input(QLineEdit())
         self.fallback_models_input.setPlaceholderText("Comma-separated model IDs, in retry order")
         self.auto_fallback_check = QCheckBox("Automatically try fallback models")
         self.auto_fallback_check.toggled.connect(self.fallback_models_input.setEnabled)
         self.settings_provider.currentTextChanged.connect(self.load_provider_form)
         form.addRow("Provider", self.settings_provider)
+        form.addRow("Provider name", self.provider_name_input)
         form.addRow("API key", self.api_key_input)
         form.addRow("Base URL", self.base_url_input)
         form.addRow("Model", self.model_input)
@@ -625,7 +661,9 @@ class MainWindow(QMainWindow):
         local_actions = QHBoxLayout()
         local_actions.setSpacing(10)
         save_local = QPushButton("Save local settings"); save_local.clicked.connect(self.save_local_settings)
+        reset_settings = QPushButton("Reset to defaults"); reset_settings.clicked.connect(self.reset_all_settings)
         local_actions.addWidget(save_local)
+        local_actions.addWidget(reset_settings)
         local_actions.addStretch()
         local_form.addRow(local_actions)
         page.addWidget(local)
@@ -773,6 +811,7 @@ class MainWindow(QMainWindow):
     def _on_hybrid_weight_changed(self, ai_pct: int) -> None:
         replay_pct = max(0, 100 - int(ai_pct))
         self.hybrid_weight_spin.setSuffix(f"% AI / {replay_pct}% Replay")
+        self._persist_project_preferences()
 
     def _on_highlight_mode_changed(self) -> None:
         mode = self.highlight_mode_combo.currentData() or "ai"
@@ -780,6 +819,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "heatmap_widget"):
             self.heatmap_widget.set_mode_label(self.highlight_mode_combo.currentText())
         self._sync_highlight_mode_availability()
+        self._persist_project_preferences()
 
     def _sync_highlight_mode_availability(self) -> None:
         using_local = self.source_stack.currentIndex() == 1
@@ -882,13 +922,23 @@ class MainWindow(QMainWindow):
         local_meta = self.local_preview.result if using_local else None
         default_name = (metadata.title if metadata else (local_meta.path.stem if local_meta else (Path(source).stem if not youtube else "")))
         reframe_mode = str(self.reframe_combo.currentData() or "auto")
+        provider_name = self.project_provider.currentText()
+        resolved_cfg = self.settings.resolve_provider_config(provider_name, model_override=self.project_model.text().strip())
+        if resolved_cfg["api_key"] and not resolved_cfg["model"]:
+            QMessageBox.warning(
+                self, "AI model required",
+                f"No model ID is selected for the '{provider_name}' provider.\n\n"
+                "Open AI Provider Settings, select or type a model ID, and click Save settings.",
+            )
+            return
+        self.settings.flush()
         options = ProjectOptions(
             source=source, clip_count=self.clip_count.value(), min_duration=self.min_duration.value(),
             max_duration=self.max_duration.value(), aspect_ratio=self.aspect.currentText(),
             resolution=self.resolution.currentText(), face_tracking=(reframe_mode != "off"),
             reframe_mode=reframe_mode,
             captions=self.captions.isChecked(), caption_template=self.template_combo.currentText(),
-            provider=self.project_provider.currentText(), model=self.project_model.text().strip(),
+            provider=provider_name, model=resolved_cfg["model"],
             multimodal=self.multimodal_check.isChecked(),
             cache_enabled=self.cache.isChecked(), whisper_model=self.whisper_model.currentText(),
             whisper_device=self.whisper_device.currentText(), language=self.settings.speech().language or None,
@@ -968,7 +1018,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Cannot retry AI analysis", "This project's saved settings could not be read.")
             return
         options.provider = self.settings.data["active_provider"]
-        options.model = self.settings.provider(options.provider).get("model", "")
+        resolved_cfg = self.settings.resolve_provider_config(options.provider)
+        if resolved_cfg["api_key"] and not resolved_cfg["model"]:
+            QMessageBox.warning(
+                self, "AI model required",
+                f"No model ID is selected for the '{options.provider}' provider.\n\n"
+                "Open AI Provider Settings, select or type a model ID, and save before retrying.",
+            )
+            return
+        options.model = resolved_cfg["model"]
         options.multimodal = options.multimodal and options.provider == "gemini"
         self._start_worker(project["id"], options, resume_analysis=True)
 
@@ -1440,24 +1498,124 @@ class MainWindow(QMainWindow):
         if self.template_combo.currentText() == previous:
             self.template_combo.setCurrentText(name)
 
+    def _on_reframe_mode_changed(self) -> None:
+        self.face_tracking.setChecked((self.reframe_combo.currentData() or "auto") != "off")
+        self._persist_project_preferences()
+
+    def _on_project_template_changed(self, name: str) -> None:
+        if self._hydrating_ui or not name or name not in TEMPLATES:
+            return
+        self.settings.data["caption_template"] = name
+        self.settings.save_debounced()
+
+    def _on_project_whisper_changed(self) -> None:
+        if self._hydrating_ui:
+            return
+        self.settings.data["whisper_model"] = self.whisper_model.currentText()
+        self.settings.data["whisper_device"] = self.whisper_device.currentText()
+        self.settings.save_debounced()
+
+    def _on_project_model_edited(self) -> None:
+        if self._hydrating_ui:
+            return
+        model = self.project_model.text().strip()
+        if not model:
+            return
+        provider = self.project_provider.currentText()
+        self.settings.set_provider_model(provider, model, persist=False)
+        self.settings.save_debounced()
+        if hasattr(self, "settings_provider") and self.settings_provider.currentText() == provider:
+            with QSignalBlocker(self.model_input):
+                if self.model_input.findText(model) < 0:
+                    self.model_input.insertItem(0, model)
+                self.model_input.setEditText(model)
+
+    def _persist_project_preferences(self) -> None:
+        if self._hydrating_ui:
+            return
+        if not hasattr(self, "clip_count") or not hasattr(self, "reframe_combo") or not hasattr(self, "highlight_mode_combo"):
+            return
+        self.settings.update_project_defaults({
+            "clip_count": int(self.clip_count.value()),
+            "min_duration": int(self.min_duration.value()),
+            "max_duration": int(self.max_duration.value()),
+            "aspect_ratio": self.aspect.currentText(),
+            "resolution": self.resolution.currentText(),
+            "reframe_mode": str(self.reframe_combo.currentData() or "auto"),
+            "captions": bool(self.captions.isChecked()),
+            "cache_enabled": bool(self.cache.isChecked()),
+            "highlight_mode": str(self.highlight_mode_combo.currentData() or "ai"),
+            "ai_weight_pct": int(self.hybrid_weight_spin.value()),
+            "multimodal": bool(self.multimodal_check.isChecked()),
+            "use_youtube_subtitles": bool(self.use_yt_subtitles_check.isChecked()),
+        }, debounced=True)
+
     def _project_provider_changed(self, name: str) -> None:
-        self.project_model.setText(self.settings.provider(name).get("model", ""))
+        with QSignalBlocker(self.project_model):
+            self.project_model.setText(self.settings.provider(name).get("model", ""))
         self.multimodal_check.setEnabled(name == "gemini")
-        if name != "gemini": self.multimodal_check.setChecked(False)
+        if name != "gemini":
+            with QSignalBlocker(self.multimodal_check):
+                self.multimodal_check.setChecked(False)
+        if not self._hydrating_ui:
+            self.settings.data["active_provider"] = name
+            self.settings.save_debounced()
 
     def _aspect_changed(self, ratio: str) -> None:
         recommended = {"9:16": "1080x1920", "1:1": "1080x1080", "4:5": "1080x1350", "16:9": "1920x1080"}
         self.resolution.setCurrentText(recommended.get(ratio, "1080x1920"))
+        self._persist_project_preferences()
+
+    def _populate_model_combo(self, saved_model: str, cached_models: list[str]) -> None:
+        """Populate model_input cleanly without firing spurious signals or losing manual/saved model IDs."""
+        items: list[str] = []
+        cleaned_saved = saved_model.strip()
+        if cleaned_saved:
+            items.append(cleaned_saved)
+        for item in cached_models:
+            text = str(item).strip()
+            if text and text not in items:
+                items.append(text)
+        with QSignalBlocker(self.model_input):
+            self.model_input.clear()
+            if items:
+                self.model_input.addItems(items)
+            self.model_input.setEditText(cleaned_saved)
 
     def load_provider_form(self, name: str) -> None:
-        values = self.settings.provider(name)
-        self.api_key_input.setText(self.settings.api_key(name))
-        self.base_url_input.setText(values.get("base_url", ""))
-        self.model_input.clear(); self.model_input.addItem(values.get("model", ""))
-        self.fallback_models_input.setText(", ".join(values.get("fallback_models", [])))
-        enabled = bool(values.get("auto_fallback"))
-        self.auto_fallback_check.setChecked(enabled)
-        self.fallback_models_input.setEnabled(enabled)
+        self._loading_provider_form = True
+        try:
+            values = self.settings.provider(name)
+            with QSignalBlocker(self.provider_name_input):
+                self.provider_name_input.setText(str(values.get("display_name") or name))
+                self.provider_name_input.setReadOnly(name != "custom")
+            with QSignalBlocker(self.api_key_input):
+                self.api_key_input.setText(self.settings.api_key(name))
+            with QSignalBlocker(self.base_url_input):
+                self.base_url_input.setText(values.get("base_url", ""))
+            saved_model = str(values.get("model") or "").strip()
+            cached_models = list(values.get("cached_models") or [])
+            self._populate_model_combo(saved_model, cached_models)
+            with QSignalBlocker(self.fallback_models_input):
+                self.fallback_models_input.setText(", ".join(values.get("fallback_models", [])))
+            enabled = bool(values.get("auto_fallback"))
+            with QSignalBlocker(self.auto_fallback_check):
+                self.auto_fallback_check.setChecked(enabled)
+            self.fallback_models_input.setEnabled(enabled)
+        finally:
+            self._loading_provider_form = False
+
+    def _on_settings_model_committed(self) -> None:
+        if self._hydrating_ui or self._loading_provider_form:
+            return
+        name = self.settings_provider.currentText()
+        model = self.model_input.currentText().strip()
+        if not model:
+            return
+        self.settings.set_provider_model(name, model, persist=True)
+        if self.project_provider.currentText() == name:
+            with QSignalBlocker(self.project_model):
+                self.project_model.setText(model)
 
     def _fallback_models(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(
@@ -1466,19 +1624,32 @@ class MainWindow(QMainWindow):
 
     def save_provider(self) -> None:
         name = self.settings_provider.currentText()
-        self.settings.data["active_provider"] = name
-        self.settings.data["providers"][name] = {
-            "provider": name, "base_url": self.base_url_input.text().strip(),
-            "model": self.model_input.currentText().strip(),
-            "fallback_models": list(self._fallback_models()),
-            "auto_fallback": self.auto_fallback_check.isChecked(),
-        }
+        model = self.model_input.currentText().strip()
+        base_url = self.base_url_input.text().strip()
+        display_name = self.provider_name_input.text().strip() if hasattr(self, "provider_name_input") else name
+        self.settings.set_provider(
+            name,
+            base_url=base_url,
+            model=model,
+            display_name=display_name,
+            fallback_models=list(self._fallback_models()),
+            auto_fallback=self.auto_fallback_check.isChecked(),
+            set_active=True,
+            persist=False,
+        )
         try:
-            self.settings.set_api_key(name, self.api_key_input.text().strip()); self.settings.save()
+            self.settings.set_api_key(name, self.api_key_input.text().strip())
+            self.settings.save()
         except Exception as error:
-            QMessageBox.critical(self, "Credential error", redact(str(error), self.api_key_input.text())); return
-        self.project_provider.setCurrentText(name); self._project_provider_changed(name)
-        self.connection_status.setText("Settings saved securely.")
+            QMessageBox.critical(self, "Credential error", redact(str(error), self.api_key_input.text()))
+            return
+        with QSignalBlocker(self.project_provider):
+            self.project_provider.setCurrentText(name)
+        self._project_provider_changed(name)
+        if model:
+            self.connection_status.setText(f"Settings saved securely ({name} • {model}).")
+        else:
+            self.connection_status.setText("Connection saved securely. Load models or enter a model ID before running AI analysis.")
 
     def _form_provider(self) -> AIProvider:
         return AIProvider(
@@ -1489,15 +1660,52 @@ class MainWindow(QMainWindow):
         )
 
     def test_provider(self) -> None:
-        provider = self._form_provider(); self.connection_status.setText("Testing connection…")
+        provider = self._form_provider()
+        if not provider.model.strip():
+            self.connection_status.setText("Select or enter a model ID before testing the connection.")
+            return
+        self.connection_status.setText("Testing connection…")
         self._run_utility(provider, provider.test, lambda result: self.connection_status.setText(f"Connected: {result}"))
 
     def load_models(self) -> None:
-        provider = self._form_provider(); self.connection_status.setText("Loading models…")
+        target_provider = self.settings_provider.currentText()
+        typed_before = self.model_input.currentText().strip()
+        self._model_load_seq += 1
+        req_seq = self._model_load_seq
+        provider = self._form_provider()
+        self.connection_status.setText(f"Loading models for {target_provider}…")
+
         def done(models: object) -> None:
-            values = list(models); current = self.model_input.currentText(); self.model_input.clear(); self.model_input.addItems(values)
-            if current in values: self.model_input.setCurrentText(current)
-            self.connection_status.setText(f"Loaded {len(values)} models.")
+            # Ignore stale responses from an earlier request.
+            if req_seq != self._model_load_seq:
+                return
+            values = [str(m).strip() for m in list(models) if str(m).strip()]  # type: ignore[arg-type]
+            # Cache discovered model list separately without ever wiping the user's selected model.
+            self.settings.set_cached_models(target_provider, values, persist=True)
+            if self.settings_provider.currentText() != target_provider:
+                self.connection_status.setText(f"Cached {len(values)} models for {target_provider}.")
+                return
+
+            saved_model = str(self.settings.provider(target_provider).get("model") or "").strip()
+            live_text = self.model_input.currentText().strip()
+            preserved = live_text or saved_model or typed_before
+            if preserved:
+                selected = preserved
+            elif values:
+                selected = values[0]
+            else:
+                selected = ""
+
+            self._populate_model_combo(selected, values)
+            if selected:
+                self.settings.set_provider_model(target_provider, selected, persist=True)
+                if self.project_provider.currentText() == target_provider:
+                    with QSignalBlocker(self.project_model):
+                        self.project_model.setText(selected)
+                self.connection_status.setText(f"Loaded {len(values)} models (selected: {selected}).")
+            else:
+                self.connection_status.setText(f"Loaded {len(values)} models.")
+
         self._run_utility(provider, provider.list_models, done)
 
     def _speech_settings_page(self) -> QWidget:
@@ -1601,9 +1809,38 @@ class MainWindow(QMainWindow):
         self.settings.data["hardware_encoding"] = self.hardware_check.isChecked()
         self.settings.save(); self.connection_status.setText("Local settings saved.")
 
+    def reset_all_settings(self) -> None:
+        answer = QMessageBox.question(
+            self, "Reset application settings",
+            "Reset all non-credential application preferences to their default values?\n\n"
+            f"Saved API keys in {credential_store_name()} and existing projects/clips will be preserved.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.settings.reset_to_defaults(clear_credentials=False)
+        self._hydrating_ui = True
+        try:
+            self.settings_provider.setCurrentText(self.settings.data["active_provider"])
+            self.load_provider_form(self.settings_provider.currentText())
+            self.project_provider.setCurrentText(self.settings.data["active_provider"])
+            self.project_model.setText(self.settings.provider().get("model", ""))
+            self.output_input.setText(self.settings.data.get("output_dir", ""))
+            self.hardware_check.setChecked(bool(self.settings.data.get("hardware_encoding", True)))
+            self._theme.apply(str(self.settings.data.get("appearance") or "dark"))
+        finally:
+            self._hydrating_ui = False
+        self.connection_status.setText("Settings reset to defaults.")
+
     def closeEvent(self, event: QCloseEvent) -> None:
         if not self.closing:
             self.closing = True
+            self.settings.update_ui_state({
+                "window_width": int(self.width()),
+                "window_height": int(self.height()),
+                "window_maximized": bool(self.isMaximized()),
+            }, debounced=False)
+            self.settings.flush()
             self.player.stop()
             self.caption_library.stop()
             if hasattr(self, "performance_view"):

@@ -116,7 +116,7 @@
 
 ## Test Results
 - **macOS 27.2.1 (`arm64`, Apple Silicon):**
-  - `.venv/bin/python3 -m pytest -q`: **125 passed, 3 skipped, 0 failed** (includes `tests/test_startup_and_downloader.py`, `tests/test_smart_reframe.py`, `tests/test_apple_silicon_perf.py`, `tests/test_theme_system.py`, `tests/test_heatmap_and_hybrid.py`; 3 Windows-only/environment skips).
+  - `.venv/bin/python3 -m pytest -q`: **132 passed, 3 skipped, 0 failed** (includes `tests/test_persistent_settings.py`, `tests/test_startup_and_downloader.py`, `tests/test_smart_reframe.py`, `tests/test_apple_silicon_perf.py`, `tests/test_theme_system.py`, `tests/test_heatmap_and_hybrid.py`; 3 Windows-only/environment skips).
   - `.venv/bin/python3 -m tests.integration_smoke`: **Passed** (`Smart Reframing (auto, opencv-haar-multi)`, `h264_videotoolbox`, `1,264,264 bytes`, `6.30s`).
   - `.venv/bin/python3 scripts/setup.py --check`: **Passed** (exit code 0).
 - **Windows 11 x64 Host (previous session):**
@@ -220,3 +220,31 @@ Validated on real multi-person Indonesian podcast footage from `https://www.yout
 ### Remaining Limitations & Launcher Notes
 - `dist/AutoClipStudio.app` was rebuilt locally for this launcher-level fix (unsigned/ad-hoc for local macOS use); re-run `.venv/bin/python3 packaging/build_macos.py --dmg` if an updated `.dmg` installer image is also needed.
 - On systems without any JavaScript runtime (`node`, `deno`, `bun`, or `quickjs`), YouTube may still restrict certain SABR streams; the downloader now reports a clear `js_runtime_error` / `http_403` diagnostic guiding installation of Node.js or Deno.
+
+---
+
+## Persistent Settings & Provider State Management
+
+### Confirmed Root Cause of Custom Provider HTTP 400 (Missing Model ID)
+Auditing `autoclip_studio/gui.py`, `autoclip_studio/providers.py`, and `autoclip_studio/config.py` confirmed four interacting defects:
+1. **Empty model saved before discovery:** Selecting `custom` and clicking **Save settings** before **Load models** persisted `"model": ""`.
+2. **`load_models()` neither persisted the selected model nor synced New Project:** Clicking **Load models** populated `self.model_input` only in-memory without saving the chosen model or updating `self.project_model`, leaving New Project sending `"model": ""` unless the user clicked **Save settings** a second time.
+3. **Destructive refresh & race condition:** `load_models()` called `self.model_input.clear()` and only restored `current` if it literally appeared in the refreshed list (dropping manual model IDs), discarded cached lists on every provider switch/restart, and lacked request-sequence/provider guards against stale async responses.
+4. **No pre-request empty-model guard:** `AIProvider._with_models()` fell back to `or [self.model]`, sending `{"model": ""}` to `/chat/completions` and triggering HTTP 400.
+
+### Storage Architecture & Migration Strategy
+- **Single Source of Truth (`autoclip_studio/config.py` — `SettingsStore` / `SettingsManager`):**
+  - Stored in platform-appropriate app data directory (`~/Library/Application Support/AutoClip Studio/settings.json` on macOS; `%LOCALAPPDATA%\AutoClip\AutoClip Studio\settings.json` on Windows — preserving full backward compatibility with existing Windows installs and `Launcher.cs`).
+  - **Credentials isolated:** API keys remain strictly in **macOS Keychain** / **Windows Credential Manager** via `keyring`; `_strip_secrets()` recursively strips forbidden secret keys (`api_key`, `token`, `password`, `secret`) before writing JSON so credentials can never leak to `settings.json`.
+  - **Schema v2 & Migrations (`SCHEMA_VERSION = 2`):** Automatic `_migrate_settings()` upgrades legacy v0/v1 files cleanly while preserving every user field (`active_provider`, per-provider `base_url`/`model`/`fallback_models`, `caption_template`, `speech`, `performance`, `appearance`, `hardware_encoding`, `output_dir`) and adds structured `project`, `asd`, `downloader`, `dependencies`, `ui`, plus per-provider `display_name` and `cached_models` (stored separately from `model`).
+  - **Storage Reliability:** Thread-safe `RLock`, atomic temp-file + `os.fsync` + `os.replace`, `save_debounced()` + shutdown `flush()`, corruption recovery backing up unreadable files to `settings.corrupt-<timestamp>.bak`, and explicit user-only `Reset to defaults` button (First-Time Setup and dependency validation never reset settings).
+- **Provider State & Queue Integration (`autoclip_studio/gui.py`, `autoclip_studio/providers.py`, `autoclip_studio/pipeline.py`):**
+  - `MainWindow` guards UI hydration (`_hydrating_ui`) and provider form loading (`_loading_provider_form` + `QSignalBlocker`) so startup/switching never overwrites saved values with empty defaults.
+  - `load_models()` uses monotonic `_model_load_seq` + target-provider checks, caches model lists separately without clearing the selected/manual model, auto-persists & syncs `project_model` when selecting a model on first load, and preserves existing state when model discovery fails.
+  - Persists all user preferences automatically (Smart Reframing mode, clip settings, captions, cache, highlight detection mode, hybrid AI weight, YouTube subtitles toggle, multimodal toggle, Whisper model/device, theme, window dimensions).
+  - Pre-request validation in both `gui.py` and `AIProvider._with_models()` refuses empty model IDs with an actionable `ProviderError(..., category="model")` before sending HTTP requests; failed AI Highlights jobs retry via `resume_analysis=True` from the cached transcript without repeating download/transcription or mutating active job snapshots.
+
+### Regression Test Results
+- **Unit & UI Suite (`.venv/bin/python3 -m pytest -q`):** **132 passed, 3 skipped, 0 failed** (including 7 new tests in `tests/test_persistent_settings.py` verifying v1→v2 migration & secret stripping, corrupted JSON backup/recovery, concurrent atomic + debounced saves, empty-model HTTP refusal, custom provider single Save+Load & double relaunch persistence, per-provider switching + manual model preservation + failed discovery resilience, and stale async response rejection).
+- **Live macOS Validation:** Verified `macOS Keychain` backend, verified v1→v2 migration on a copy of real `~/Library/Application Support/AutoClip Studio/settings.json` with 100% preference preservation and zero plaintext credentials, visually inspected the updated AI Provider Settings UI, and confirmed `scripts/setup.py --check` leaves settings intact.
+- **Windows Compatibility:** Preserved Windows Credential Manager, `%LOCALAPPDATA%` path compatibility, and shared PySide6 codebase; live Windows host execution was not re-run on this macOS machine.
