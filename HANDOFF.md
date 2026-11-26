@@ -1,11 +1,33 @@
 # AutoClip Studio — Agent Handoff & Progress
 
 **Last Updated:** 2026-11-26  
-**Current Phase:** Floating Sidebar & Unified Settings Redesign Complete
+**Current Phase:** Detailed Native Setup Wizard & Bootstrap Progress Complete (Windows Validated; Native macOS Compile Pending Apple Silicon Hardware)
 
 ## Execution Status
 
 ### Completed Tasks
+- **Detailed Native Setup Wizard & Bootstrap Progress (Windows x86-64 & macOS Apple Silicon ARM64):** (Pre-modification checkpoint: `f3c85de`)
+  - **Bootstrap Architecture & Shared Event Protocol ([`scripts/setup.py`](scripts/setup.py), [`scripts/dependencies.json`](scripts/dependencies.json), [`autoclip_studio/dependencies.py`](autoclip_studio/dependencies.py)):**
+    - Upgraded stdlib-only `scripts/setup.py` to execute and emit an explicit dynamic **8-Stage Setup Pipeline** (`system_compatibility` → `python_runtime` → `virtual_env` → `core_packages` → `media_tools` → `hardware_accel` → `transcription_models` → `final_validation`) with JSON-lines telemetry (`system_info`, `plan`, `stage`, `progress`, `log`, `complete`) requiring zero `PySide6` or app-venv dependencies before setup begins.
+    - Enforced canonical component status reporting (`Pending`, `Checking`, `Downloading`, `Installing`, `Configuring`, `Verifying`, `Ready`, `Reused Existing Installation`, `Skipped`, `Failed`), credential/token/cookie redaction across persisted `setup.log` (`%LOCALAPPDATA%\AutoClip\AutoClip Studio\logs\setup.log` on Windows; `~/Library/Application Support/AutoClip Studio/logs/setup.log` on macOS), pre-download disk space checks, HTTP `Range` partial `.part` resumption, SHA-256 verification, and `dependency_state.json` completion summary persistence.
+    - Added live `uv`/`pip`/`brew` subprocess stdout/stderr line parsing (`_parse_pkg_line`) for package-level progress descriptions without downgrading user-updated `yt-dlp` / `yt-dlp-ejs` / `mlx-whisper` versions or auto-downloading oversized optional Whisper/YuNet models without opt-in.
+  - **Progress Calculation Methodology:**
+    - Stage boundaries define monotonic percentage slices (`0→5→16→26→56→80→88→95→100`). Real byte-counted transfers report `measured`; validated/package-step progress reports `estimated`; unmeasured installers (`brew`, `uv venv`) report `stage` with real elapsed seconds. `overall_percent` never decreases and reaches `100%` only after Stage 8 Final Validation passes.
+  - **Native Platform Wizards ([`packaging/launcher/Launcher.cs`](packaging/launcher/Launcher.cs), [`packaging/launcher/SetupWizard.cs`](packaging/launcher/SetupWizard.cs), [`packaging/macos/Launcher.m`](packaging/macos/Launcher.m)):**
+    - **Windows x86-64 (`AutoClipStudio.exe` rebuilt via `packaging/build.py`):** Replaced legacy generic marquee bar and pre-wizard MessageBox prompt with a DPI-aware WinForms wizard auto-detecting Windows Light/Dark theme (`#F5F6F8`/`#FFFFFF` vs `#101116`/`#1A1C23`, `#E53935` accent), loading bundled `Poppins` fonts via `PrivateFontCollection`, showing live OS/CPU/RAM/GPU/disk compatibility, `Cloud-only transcription` toggle, 8-stage stepper, scrollable component checklist with progress bars, collapsible redacted logs (`Show Logs`, `Copy Diagnostics`, `Open Log`), child-tree termination (`taskkill /F /T /PID`) on Cancel, selective `--repair-only` retry, and Setup Complete summary gating `Launch Application`.
+    - **macOS Apple Silicon ARM64 (`packaging/macos/Launcher.m`, staged to `build/macos_stage/AutoClipStudio.app`):** Upgraded Cocoa wizard with adaptive Light/Dark Aqua tokens, bundled `fonts/poppins` `CTFontManager` registration, `sysctl` Apple Silicon CPU/RAM + VideoToolbox/MLX telemetry, 8-stage stepper, component checklist cards, collapsible logs + `Open Log` + `Copy Diagnostics`, `NSTask` termination on Cancel, selective retry, and Setup Complete summary before `Launch Application`.
+  - **Dependency Reuse Strategy & Existing Installation Protection:**
+    - Valid checkouts launch `main.py` directly without opening setup (`--check == 0`). Existing valid `.venv`, cached tools (`uv`, `ffmpeg`, `ffprobe`, `yt-dlp`, JS runtimes `deno`/`node`/`bun`/`quickjs`), user settings, keys, and cached Whisper/YuNet models are reused cleanly (`Reused Existing Installation`).
+  - **Validation & Screenshots (`Windows 11 x86-64`):**
+    - Targeted setup, launcher, dependency, and cross-platform suites (`tests/test_setup_wizard.py`, `tests/test_native_launcher.py`, `tests/test_dependencies.py`, `tests/test_cross_platform.py`, `tests/test_queue_workspace.py`): **23 passed**.
+    - Full pytest run (`.\.venv\Scripts\python.exe -m pytest -q`): **168 passed, 2 pre-existing unrelated failures from base `f3c85de`** (`test_download_progress.py::test_download_card_metrics_activity_and_cancellation` Poppins vs monospace metric and `test_smart_reframe.py::test_new_project_smart_reframe_selector_ui` host user setting).
+    - Rebuilt Windows launcher `AutoClipStudio.exe` via `.\.venv\Scripts\python.exe packaging\build.py` (clean exit `0`, verified live `IMPORTS_OK`).
+    - Staged macOS bundle via `.\.venv\Scripts\python.exe packaging\build_macos.py --output-dir build\macos_stage`.
+    - Before/After Windows Setup Wizard captures verified in conversation scratch artifacts (`before_windows_setup.png`, `after_windows_setup_progress.png`, `after_windows_setup_complete.png`).
+  - **Remaining Platform Limitations & Rebuild Instructions:**
+    - Native Mach-O `arm64` compilation and runtime UI launch of `AutoClipStudio.app` were not executed on this Windows 11 host and remain pending Apple Silicon macOS hardware (`python3 packaging/build_macos.py --dmg` with Xcode CLT `clang` and `hdiutil`).
+    - To rebuild Windows launcher cleanly: `.\.venv\Scripts\python.exe packaging\build.py`.
+
 - **Floating Sidebar & Unified Settings Redesign** (Pre-modification checkpoint: `ccfae71`):
   - **Navigation Architecture & Hierarchy ([`autoclip_studio/ui/sidebar.py`](autoclip_studio/ui/sidebar.py), [`autoclip_studio/gui.py`](autoclip_studio/gui.py)):**
     - Replaced the flat edge-to-edge sidebar with an inset floating container (`FloatingSidebar`, `240px` expanded / `70px` collapsed, `20px` radius, `14px` outer inset gutter, subtle `border_subtle` + restrained drop shadow) keeping the scrollable nav body cleanly separated from the brand header and anchored `Version 1.0.0` footer (removed sidebar theme bar and `"Local-first • No watermarks"` tagline).

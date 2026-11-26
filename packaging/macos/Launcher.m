@@ -5,31 +5,86 @@
 #include <signal.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <unistd.h>
 
 @interface SetupWizardDelegate : NSObject <NSApplicationDelegate>
 @property (strong) NSWindow *window;
-@property (strong) NSTextField *headingLabel;
-@property (strong) NSTextField *statusLabel;
-@property (strong) NSTextField *detailLabel;
+@property (strong) NSImageView *logoView;
+@property (strong) NSTextField *titleLabel;
+@property (strong) NSTextField *subtitleLabel;
+@property (strong) NSTextField *archBadge;
+@property (strong) NSTextField *sysInfoLabel;
+@property (strong) NSTextField *spaceInfoLabel;
+@property (strong) NSTextField *activityLabel;
+@property (strong) NSTextField *overallPctLabel;
 @property (strong) NSTextField *metricsLabel;
 @property (strong) NSProgressIndicator *progressBar;
 @property (strong) NSButton *cloudOnlyCheck;
+@property (strong) NSScrollView *stageScrollView;
+@property (strong) NSView *stageListDoc;
+@property (strong) NSScrollView *compScrollView;
+@property (strong) NSView *compListDoc;
+@property (strong) NSView *summaryCard;
+@property (strong) NSTextField *summaryLabel;
 @property (strong) NSButton *detailsToggleButton;
-@property (strong) NSButton *exportLogsButton;
+@property (strong) NSButton *copyLogsButton;
+@property (strong) NSButton *openLogButton;
 @property (strong) NSButton *retryButton;
 @property (strong) NSButton *cancelButton;
 @property (strong) NSButton *launchButton;
 @property (strong) NSScrollView *logScrollView;
 @property (strong) NSTextView *logTextView;
 @property (strong) NSTask *activeTask;
+@property (strong) NSMutableDictionary<NSString *, NSTextField *> *stageStateLabels;
+@property (strong) NSMutableDictionary<NSString *, NSDictionary<NSString *, id> *> *compRowWidgets;
 @property (copy) NSString *checkoutRoot;
 @property (assign) BOOL cancelled;
+@property (assign) BOOL running;
+@property (assign) BOOL completedOk;
 @property (assign) BOOL detailsExpanded;
+@property (assign) BOOL isDarkMode;
+@property (assign) double lastOverall;
 @property (assign) int lockFd;
 @end
 
 @implementation SetupWizardDelegate
+
+static BOOL DetectDarkAppearance(void) {
+    NSAppearance *app = [NSApp effectiveAppearance];
+    NSAppearanceName best = [app bestMatchFromAppearancesWithNames:@[NSAppearanceNameDarkAqua, NSAppearanceNameAqua]];
+    return [best isEqualToString:NSAppearanceNameDarkAqua];
+}
+
+static NSColor *ColCanvas(BOOL dark) {
+    return dark ? [NSColor colorWithRed:0.063 green:0.067 blue:0.086 alpha:1.0]
+                : [NSColor colorWithRed:0.961 green:0.965 blue:0.973 alpha:1.0];
+}
+static NSColor *ColCard(BOOL dark) {
+    return dark ? [NSColor colorWithRed:0.102 green:0.110 blue:0.137 alpha:1.0]
+                : [NSColor whiteColor];
+}
+static NSColor *ColBorder(BOOL dark) {
+    return dark ? [NSColor colorWithRed:0.169 green:0.180 blue:0.220 alpha:1.0]
+                : [NSColor colorWithRed:0.855 green:0.867 blue:0.894 alpha:1.0];
+}
+static NSColor *ColText(BOOL dark) {
+    return dark ? [NSColor colorWithRed:0.961 green:0.961 blue:0.969 alpha:1.0]
+                : [NSColor colorWithRed:0.094 green:0.102 blue:0.125 alpha:1.0];
+}
+static NSColor *ColMuted(BOOL dark) {
+    return dark ? [NSColor colorWithRed:0.639 green:0.659 blue:0.710 alpha:1.0]
+                : [NSColor colorWithRed:0.361 green:0.384 blue:0.439 alpha:1.0];
+}
+static NSColor *ColRed(void) {
+    return [NSColor colorWithRed:0.898 green:0.224 blue:0.208 alpha:1.0];
+}
+static NSColor *ColGreen(void) {
+    return [NSColor colorWithRed:0.180 green:0.800 blue:0.443 alpha:1.0];
+}
+static NSColor *ColRose(void) {
+    return [NSColor colorWithRed:1.000 green:0.420 blue:0.478 alpha:1.0];
+}
 
 static NSString *ResolveCheckoutRoot(void) {
     NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
@@ -52,10 +107,21 @@ static NSString *ResolveCheckoutRoot(void) {
 }
 
 static NSString *AppSupportDir(void) {
+    NSString *configured = [[[NSProcessInfo processInfo] environment] objectForKey:@"AUTOCLIP_DATA_DIR"];
+    if (configured.length > 0) {
+        [[NSFileManager defaultManager] createDirectoryAtPath:configured withIntermediateDirectories:YES attributes:nil error:nil];
+        return configured;
+    }
     NSString *appSupport = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
     NSString *dir = [appSupport stringByAppendingPathComponent:@"AutoClip Studio"];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
     return dir;
+}
+
+static NSString *SetupLogPath(void) {
+    NSString *logDir = [AppSupportDir() stringByAppendingPathComponent:@"logs"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:logDir withIntermediateDirectories:YES attributes:nil error:nil];
+    return [logDir stringByAppendingPathComponent:@"setup.log"];
 }
 
 static NSString *LauncherLogPath(void) {
@@ -64,27 +130,52 @@ static NSString *LauncherLogPath(void) {
     return [logDir stringByAppendingPathComponent:@"launcher.log"];
 }
 
-static void AppendLauncherLog(NSString *line) {
-    if (line.length == 0) return;
-    NSString *logPath = LauncherLogPath();
-    if (![[NSFileManager defaultManager] fileExistsAtPath:logPath]) {
-        [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
+static NSString *RedactSecrets(NSString *input) {
+    if (input.length == 0) return @"";
+    NSError *err = nil;
+    NSRegularExpression *rx = [NSRegularExpression regularExpressionWithPattern:
+        @"(?:AIza[\\w-]{35}|sk-[A-Za-z0-9_-]{20,}|((?:authorization|cookie|api[-_ ]?key|access_token|refresh_token|password)\\s*[:=]\\s*)[^\\s,;\"'<>]+)"
+        options:NSRegularExpressionCaseInsensitive error:&err];
+    if (!rx) return input;
+    NSMutableString *out = [input mutableCopy];
+    NSArray<NSTextCheckingResult *> *matches = [rx matchesInString:input options:0 range:NSMakeRange(0, input.length)];
+    for (NSTextCheckingResult *m in [matches reverseObjectEnumerator]) {
+        if ([m rangeAtIndex:1].location != NSNotFound) {
+            NSString *prefix = [input substringWithRange:[m rangeAtIndex:1]];
+            [out replaceCharactersInRange:m.range withString:[prefix stringByAppendingString:@"[REDACTED]"]];
+        } else {
+            [out replaceCharactersInRange:m.range withString:@"[REDACTED]"];
+        }
     }
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:logPath];
+    return out;
+}
+
+static void AppendLogFile(NSString *path, NSString *line) {
+    NSString *cleaned = RedactSecrets(line);
+    if (cleaned.length == 0) return;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
+    }
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
     if (!fh) return;
     [fh seekToEndOfFile];
-    NSString *entry = [line hasSuffix:@"\n"] ? line : [line stringByAppendingString:@"\n"];
+    NSString *entry = [cleaned hasSuffix:@"\n"] ? cleaned : [cleaned stringByAppendingString:@"\n"];
     [fh writeData:[entry dataUsingEncoding:NSUTF8StringEncoding]];
     [fh closeFile];
 }
 
 static void RegisterBundledPoppinsFonts(NSString *checkoutRoot) {
-    NSString *fontsDir = [checkoutRoot stringByAppendingPathComponent:@"autoclip_studio/assets/fonts"];
-    NSArray<NSString *> *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:fontsDir error:nil];
-    for (NSString *name in files) {
-        if ([[name pathExtension].lowercaseString isEqualToString:@"ttf"]) {
-            NSURL *url = [NSURL fileURLWithPath:[fontsDir stringByAppendingPathComponent:name]];
-            CTFontManagerRegisterFontsForURL((__bridge CFURLRef)url, kCTFontManagerScopeProcess, NULL);
+    NSArray<NSString *> *dirs = @[
+        [checkoutRoot stringByAppendingPathComponent:@"autoclip_studio/assets/fonts/poppins"],
+        [checkoutRoot stringByAppendingPathComponent:@"autoclip_studio/assets/fonts"]
+    ];
+    for (NSString *fontsDir in dirs) {
+        NSArray<NSString *> *files = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:fontsDir error:nil];
+        for (NSString *name in files) {
+            if ([[name pathExtension].lowercaseString isEqualToString:@"ttf"]) {
+                NSURL *url = [NSURL fileURLWithPath:[fontsDir stringByAppendingPathComponent:name]];
+                CTFontManagerRegisterFontsForURL((__bridge CFURLRef)url, kCTFontManagerScopeProcess, NULL);
+            }
         }
     }
 }
@@ -111,6 +202,27 @@ static NSString *FormatBytes(double bytes) {
     if (bytes < 1024.0 * 1024.0) return [NSString stringWithFormat:@"%.0f KB", bytes / 1024.0];
     if (bytes < 1024.0 * 1024.0 * 1024.0) return [NSString stringWithFormat:@"%.1f MB", bytes / (1024.0 * 1024.0)];
     return [NSString stringWithFormat:@"%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0)];
+}
+
+static NSString *SysctlString(const char *key) {
+    size_t len = 0;
+    if (sysctlbyname(key, NULL, &len, NULL, 0) != 0 || len == 0) return @"Apple Silicon";
+    char *buf = (char *)malloc(len + 1);
+    if (!buf) return @"Apple Silicon";
+    NSString *res = @"Apple Silicon";
+    if (sysctlbyname(key, buf, &len, NULL, 0) == 0) {
+        buf[len] = '\0';
+        res = [NSString stringWithUTF8String:buf] ?: @"Apple Silicon";
+    }
+    free(buf);
+    return res;
+}
+
+static uint64_t SysctlUInt64(const char *key) {
+    uint64_t val = 0;
+    size_t len = sizeof(val);
+    if (sysctlbyname(key, &val, &len, NULL, 0) == 0) return val;
+    return 0;
 }
 
 static int RunCheckWithTimeout(NSString *exe, NSArray<NSString *> *args, NSString *cwd, NSTimeInterval timeoutSec, NSString **capturedOut) {
@@ -186,12 +298,14 @@ static NSString *Sha256File(NSString *path) {
     self.lockFd = -1;
     self.checkoutRoot = ResolveCheckoutRoot();
     RegisterBundledPoppinsFonts(self.checkoutRoot);
+    self.isDarkMode = DetectDarkAppearance();
 
     NSString *venvPy = [self.checkoutRoot stringByAppendingPathComponent:@".venv/bin/python3"];
     NSString *setupPy = [self.checkoutRoot stringByAppendingPathComponent:@"scripts/setup.py"];
     NSString *mainPy = [self.checkoutRoot stringByAppendingPathComponent:@"main.py"];
+    BOOL forceSetup = [[[NSProcessInfo processInfo] arguments] containsObject:@"--setup"];
 
-    if ([[NSFileManager defaultManager] fileExistsAtPath:venvPy]) {
+    if (!forceSetup && [[NSFileManager defaultManager] fileExistsAtPath:venvPy]) {
         NSString *checkOut = nil;
         int rc = RunCheckWithTimeout(venvPy, @[setupPy, @"--check"], self.checkoutRoot, 20.0, &checkOut);
         if (rc == 0) {
@@ -199,9 +313,9 @@ static NSString *Sha256File(NSString *path) {
             [NSApp terminate:nil];
             return;
         }
-        AppendLauncherLog([NSString stringWithFormat:@"[launcher] startup validation exited %d:\n%@", rc, checkOut ?: @""]);
-    } else {
-        AppendLauncherLog(@"[launcher] .venv/bin/python3 missing; opening First-Time Setup.");
+        AppendLogFile(LauncherLogPath(), [NSString stringWithFormat:@"[launcher] startup validation exited %d:\n%@", rc, checkOut ?: @""]);
+    } else if (!forceSetup) {
+        AppendLogFile(LauncherLogPath(), @"[launcher] .venv/bin/python3 missing; opening First-Time Setup.");
     }
 
     if (![self acquireSetupLock]) {
@@ -214,7 +328,8 @@ static NSString *Sha256File(NSString *path) {
     }
 
     [self buildSetupWindow];
-    [self startBootstrapAsync];
+    [self populateDefaultPlan];
+    [self startBootstrapAsync:NO];
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
@@ -235,130 +350,321 @@ static NSString *Sha256File(NSString *path) {
     self.activeTask = nil;
 }
 
+- (NSView *)makeCardWithFrame:(NSRect)frame {
+    NSView *card = [[NSView alloc] initWithFrame:frame];
+    card.wantsLayer = YES;
+    card.layer.backgroundColor = ColCard(self.isDarkMode).CGColor;
+    card.layer.borderColor = ColBorder(self.isDarkMode).CGColor;
+    card.layer.borderWidth = 1.0;
+    card.layer.cornerRadius = 12.0;
+    return card;
+}
+
 - (void)styleCheckbox:(NSButton *)btn title:(NSString *)title {
     NSDictionary *attrs = @{
-        NSForegroundColorAttributeName: [NSColor colorWithRed:0.96 green:0.96 blue:0.97 alpha:1.0],
-        NSFontAttributeName: AppFont(12.5, NO),
+        NSForegroundColorAttributeName: ColText(self.isDarkMode),
+        NSFontAttributeName: AppFont(12.0, NO),
     };
     btn.attributedTitle = [[NSAttributedString alloc] initWithString:title attributes:attrs];
 }
 
 - (void)buildSetupWindow {
-    NSRect frame = NSMakeRect(0, 0, 620, 320);
+    NSRect frame = NSMakeRect(0, 0, 880, 650);
     self.window = [[NSWindow alloc] initWithContentRect:frame
-                                              styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
+                                              styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable)
                                                 backing:NSBackingStoreBuffered
                                                   defer:NO];
-    self.window.title = @"AutoClip Studio — First-Time Setup";
-    // Force DarkAqua appearance so native checkboxes, buttons, and disabled states keep crisp contrast on dark surface.
-    self.window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
-    self.window.backgroundColor = [NSColor colorWithRed:0.063 green:0.067 blue:0.086 alpha:1.0];
+    self.window.title = @"AutoClip Studio Setup";
+    self.window.minSize = NSMakeSize(780, 580);
+    self.window.backgroundColor = ColCanvas(self.isDarkMode);
     [self.window center];
 
     NSView *content = self.window.contentView;
     content.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-    self.headingLabel = [NSTextField labelWithString:@"AutoClip Studio Setup (Apple Silicon)"];
-    self.headingLabel.frame = NSMakeRect(24, 266, 572, 28);
-    self.headingLabel.font = AppFont(18, YES);
-    self.headingLabel.textColor = [NSColor colorWithRed:0.96 green:0.96 blue:0.97 alpha:1.0];
-    self.headingLabel.autoresizingMask = NSViewMinYMargin | NSViewWidthSizable;
-    [content addSubview:self.headingLabel];
+    // Header
+    NSString *logoPath = [self.checkoutRoot stringByAppendingPathComponent:@"autoclip_studio/assets/AutoClipTrans.png"];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:logoPath]) {
+        logoPath = [[NSBundle mainBundle] pathForResource:@"AutoClipTrans" ofType:@"png"];
+    }
+    int textLeft = 24;
+    if (logoPath && [[NSFileManager defaultManager] fileExistsAtPath:logoPath]) {
+        NSImage *img = [[NSImage alloc] initWithContentsOfFile:logoPath];
+        self.logoView = [[NSImageView alloc] initWithFrame:NSMakeRect(24, 584, 132, 42)];
+        self.logoView.imageScaling = NSImageScaleProportionallyUpOrDown;
+        self.logoView.image = img;
+        self.logoView.autoresizingMask = NSViewMinYMargin;
+        [content addSubview:self.logoView];
+        textLeft = 168;
+    }
 
-    self.statusLabel = [NSTextField labelWithString:@"Checking Python runtime and existing environment..."];
-    self.statusLabel.frame = NSMakeRect(24, 232, 572, 22);
-    self.statusLabel.font = AppFont(13, YES);
-    self.statusLabel.textColor = [NSColor colorWithRed:0.96 green:0.96 blue:0.97 alpha:1.0];
-    self.statusLabel.autoresizingMask = NSViewMinYMargin | NSViewWidthSizable;
-    [content addSubview:self.statusLabel];
+    self.titleLabel = [NSTextField labelWithString:@"AutoClip Studio Setup"];
+    self.titleLabel.frame = NSMakeRect(textLeft, 602, 480, 26);
+    self.titleLabel.font = AppFont(18, YES);
+    self.titleLabel.textColor = ColText(self.isDarkMode);
+    self.titleLabel.autoresizingMask = NSViewMinYMargin | NSViewWidthSizable;
+    [content addSubview:self.titleLabel];
 
-    self.progressBar = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(24, 200, 572, 18)];
+    self.subtitleLabel = [NSTextField labelWithString:@"Step 1 of 8  •  Initializing bootstrap environment"];
+    self.subtitleLabel.frame = NSMakeRect(textLeft, 580, 520, 18);
+    self.subtitleLabel.font = AppFont(12, NO);
+    self.subtitleLabel.textColor = ColMuted(self.isDarkMode);
+    self.subtitleLabel.autoresizingMask = NSViewMinYMargin | NSViewWidthSizable;
+    [content addSubview:self.subtitleLabel];
+
+    self.archBadge = [NSTextField labelWithString:@"macOS ARM64"];
+    self.archBadge.frame = NSMakeRect(746, 594, 110, 22);
+    self.archBadge.alignment = NSTextAlignmentCenter;
+    self.archBadge.font = AppFont(11, YES);
+    self.archBadge.textColor = ColMuted(self.isDarkMode);
+    self.archBadge.autoresizingMask = NSViewMinYMargin | NSViewMinXMargin;
+    [content addSubview:self.archBadge];
+
+    // System compatibility card
+    NSView *sysCard = [self makeCardWithFrame:NSMakeRect(24, 482, 832, 86)];
+    sysCard.autoresizingMask = NSViewMinYMargin | NSViewWidthSizable;
+    [content addSubview:sysCard];
+
+    NSString *cpuBrand = SysctlString("machdep.cpu.brand_string");
+    uint64_t ramBytes = SysctlUInt64("hw.memsize");
+    NSDictionary *fsAttrs = [[NSFileManager defaultManager] attributesOfFileSystemForPath:self.checkoutRoot error:nil];
+    double freeBytes = [fsAttrs[NSFileSystemFreeSize] doubleValue];
+    NSString *osVer = [[NSProcessInfo processInfo] operatingSystemVersionString];
+
+    self.sysInfoLabel = [NSTextField labelWithString:[NSString stringWithFormat:@"macOS %@ (arm64)  •  %@  •  RAM: %@",
+        osVer, cpuBrand, FormatBytes((double)ramBytes)]];
+    self.sysInfoLabel.frame = NSMakeRect(16, 56, 800, 18);
+    self.sysInfoLabel.font = AppFont(12.5, YES);
+    self.sysInfoLabel.textColor = ColText(self.isDarkMode);
+    self.sysInfoLabel.autoresizingMask = NSViewWidthSizable;
+    [sysCard addSubview:self.sysInfoLabel];
+
+    self.spaceInfoLabel = [NSTextField labelWithString:[NSString stringWithFormat:@"Acceleration: Apple Silicon Unified Memory GPU (VideoToolbox + MLX)  •  Free Disk: %@",
+        FormatBytes(freeBytes)]];
+    self.spaceInfoLabel.frame = NSMakeRect(16, 34, 800, 17);
+    self.spaceInfoLabel.font = AppFont(11.5, NO);
+    self.spaceInfoLabel.textColor = ColMuted(self.isDarkMode);
+    self.spaceInfoLabel.autoresizingMask = NSViewWidthSizable;
+    [sysCard addSubview:self.spaceInfoLabel];
+
+    self.cloudOnlyCheck = [NSButton checkboxWithTitle:@"" target:nil action:nil];
+    self.cloudOnlyCheck.frame = NSMakeRect(16, 8, 660, 20);
+    self.cloudOnlyCheck.state = NSControlStateValueOn;
+    [self styleCheckbox:self.cloudOnlyCheck title:@"Cloud-only transcription (skip optional local Whisper model downloads)"];
+    [sysCard addSubview:self.cloudOnlyCheck];
+
+    // Overall progress card
+    NSView *progCard = [self makeCardWithFrame:NSMakeRect(24, 386, 832, 86)];
+    progCard.autoresizingMask = NSViewMinYMargin | NSViewWidthSizable;
+    [content addSubview:progCard];
+
+    self.activityLabel = [NSTextField labelWithString:@"Validating system compatibility..."];
+    self.activityLabel.frame = NSMakeRect(16, 56, 600, 20);
+    self.activityLabel.font = AppFont(13, YES);
+    self.activityLabel.textColor = ColText(self.isDarkMode);
+    self.activityLabel.autoresizingMask = NSViewWidthSizable;
+    [progCard addSubview:self.activityLabel];
+
+    self.overallPctLabel = [NSTextField labelWithString:@"0%  •  Estimated"];
+    self.overallPctLabel.frame = NSMakeRect(630, 56, 186, 20);
+    self.overallPctLabel.alignment = NSTextAlignmentRight;
+    self.overallPctLabel.font = AppFont(12, YES);
+    self.overallPctLabel.textColor = ColRed();
+    self.overallPctLabel.autoresizingMask = NSViewMinXMargin;
+    [progCard addSubview:self.overallPctLabel];
+
+    self.progressBar = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(16, 30, 800, 18)];
     self.progressBar.style = NSProgressIndicatorStyleBar;
     self.progressBar.minValue = 0.0;
     self.progressBar.maxValue = 100.0;
     self.progressBar.indeterminate = YES;
-    self.progressBar.autoresizingMask = NSViewMinYMargin | NSViewWidthSizable;
+    self.progressBar.autoresizingMask = NSViewWidthSizable;
     [self.progressBar startAnimation:nil];
-    [content addSubview:self.progressBar];
+    [progCard addSubview:self.progressBar];
 
-    self.detailLabel = [NSTextField labelWithString:@"Validating existing environment before installing missing dependencies..."];
-    self.detailLabel.frame = NSMakeRect(24, 170, 572, 20);
-    self.detailLabel.font = AppFont(12, NO);
-    self.detailLabel.textColor = [NSColor colorWithRed:0.72 green:0.74 blue:0.79 alpha:1.0];
-    self.detailLabel.autoresizingMask = NSViewMinYMargin | NSViewWidthSizable;
-    [content addSubview:self.detailLabel];
+    self.metricsLabel = [NSTextField labelWithString:@"Stage telemetry initializing..."];
+    self.metricsLabel.frame = NSMakeRect(16, 8, 800, 17);
+    self.metricsLabel.font = [NSFont monospacedSystemFontOfSize:11.0 weight:NSFontWeightRegular];
+    self.metricsLabel.textColor = ColMuted(self.isDarkMode);
+    self.metricsLabel.autoresizingMask = NSViewWidthSizable;
+    [progCard addSubview:self.metricsLabel];
 
-    self.metricsLabel = [NSTextField labelWithString:@""];
-    self.metricsLabel.frame = NSMakeRect(24, 146, 572, 18);
-    self.metricsLabel.font = [NSFont monospacedSystemFontOfSize:11.5 weight:NSFontWeightRegular];
-    self.metricsLabel.textColor = [NSColor colorWithRed:0.64 green:0.66 blue:0.71 alpha:1.0];
-    self.metricsLabel.autoresizingMask = NSViewMinYMargin | NSViewWidthSizable;
-    [content addSubview:self.metricsLabel];
+    // Two-pane body: Left Stage Stepper + Right Component Checklist / Completion Summary
+    NSView *stageCard = [self makeCardWithFrame:NSMakeRect(24, 68, 250, 306)];
+    stageCard.autoresizingMask = NSViewHeightSizable;
+    [content addSubview:stageCard];
 
-    self.cloudOnlyCheck = [NSButton checkboxWithTitle:@"" target:nil action:nil];
-    self.cloudOnlyCheck.frame = NSMakeRect(24, 112, 540, 22);
-    self.cloudOnlyCheck.state = NSControlStateValueOn;
-    self.cloudOnlyCheck.autoresizingMask = NSViewMinYMargin | NSViewWidthSizable;
-    [self styleCheckbox:self.cloudOnlyCheck title:@"Skip optional local Whisper model download during setup (manage models in-app)"];
-    [content addSubview:self.cloudOnlyCheck];
+    self.stageScrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(8, 8, 234, 290)];
+    self.stageScrollView.drawsBackground = NO;
+    self.stageScrollView.hasVerticalScroller = YES;
+    self.stageScrollView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    self.stageListDoc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 234, 300)];
+    self.stageScrollView.documentView = self.stageListDoc;
+    [stageCard addSubview:self.stageScrollView];
 
-    self.detailsToggleButton = [NSButton buttonWithTitle:@"Show Diagnostics" target:self action:@selector(toggleDetailsClicked:)];
-    self.detailsToggleButton.frame = NSMakeRect(24, 70, 140, 28);
-    self.detailsToggleButton.bezelStyle = NSBezelStyleRounded;
-    self.detailsToggleButton.autoresizingMask = NSViewMinYMargin;
-    [content addSubview:self.detailsToggleButton];
+    self.compScrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(286, 68, 570, 306)];
+    self.compScrollView.drawsBackground = NO;
+    self.compScrollView.hasVerticalScroller = YES;
+    self.compScrollView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    self.compListDoc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 570, 420)];
+    self.compScrollView.documentView = self.compListDoc;
+    [content addSubview:self.compScrollView];
 
-    self.exportLogsButton = [NSButton buttonWithTitle:@"Copy Logs" target:self action:@selector(copyLogsClicked:)];
-    self.exportLogsButton.frame = NSMakeRect(172, 70, 102, 28);
-    self.exportLogsButton.bezelStyle = NSBezelStyleRounded;
-    self.exportLogsButton.autoresizingMask = NSViewMinYMargin;
-    [content addSubview:self.exportLogsButton];
+    self.summaryCard = [self makeCardWithFrame:NSMakeRect(286, 68, 570, 306)];
+    self.summaryCard.hidden = YES;
+    self.summaryCard.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    self.summaryLabel = [NSTextField wrappingLabelWithString:@""];
+    self.summaryLabel.frame = NSMakeRect(20, 20, 530, 266);
+    self.summaryLabel.font = AppFont(13, NO);
+    self.summaryLabel.textColor = ColText(self.isDarkMode);
+    self.summaryLabel.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [self.summaryCard addSubview:self.summaryLabel];
+    [content addSubview:self.summaryCard];
 
-    self.logScrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(24, 64, 572, 160)];
+    // Expandable installation logs drawer
+    self.logScrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(24, 64, 832, 160)];
     self.logScrollView.hasVerticalScroller = YES;
     self.logScrollView.borderType = NSBezelBorder;
     self.logScrollView.hidden = YES;
-    self.logScrollView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    self.logTextView = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 572, 160)];
+    self.logScrollView.autoresizingMask = NSViewWidthSizable;
+    self.logTextView = [[NSTextView alloc] initWithFrame:NSMakeRect(0, 0, 832, 160)];
     self.logTextView.editable = NO;
     self.logTextView.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
-    self.logTextView.backgroundColor = [NSColor colorWithRed:0.09 green:0.10 blue:0.13 alpha:1.0];
-    self.logTextView.textColor = [NSColor colorWithRed:0.86 green:0.88 blue:0.92 alpha:1.0];
+    self.logTextView.backgroundColor = ColCanvas(self.isDarkMode);
+    self.logTextView.textColor = ColText(self.isDarkMode);
     self.logScrollView.documentView = self.logTextView;
     [content addSubview:self.logScrollView];
 
-    self.retryButton = [NSButton buttonWithTitle:@"Retry" target:self action:@selector(retryClicked:)];
-    self.retryButton.frame = NSMakeRect(248, 20, 96, 32);
+    // Footer buttons
+    self.detailsToggleButton = [NSButton buttonWithTitle:@"Show Logs" target:self action:@selector(toggleDetailsClicked:)];
+    self.detailsToggleButton.frame = NSMakeRect(24, 20, 108, 32);
+    self.detailsToggleButton.bezelStyle = NSBezelStyleRounded;
+    self.detailsToggleButton.autoresizingMask = NSViewMaxYMargin;
+    [content addSubview:self.detailsToggleButton];
+
+    self.copyLogsButton = [NSButton buttonWithTitle:@"Copy Diagnostics" target:self action:@selector(copyLogsClicked:)];
+    self.copyLogsButton.frame = NSMakeRect(138, 20, 138, 32);
+    self.copyLogsButton.bezelStyle = NSBezelStyleRounded;
+    self.copyLogsButton.autoresizingMask = NSViewMaxYMargin;
+    [content addSubview:self.copyLogsButton];
+
+    self.openLogButton = [NSButton buttonWithTitle:@"Open Log" target:self action:@selector(openLogClicked:)];
+    self.openLogButton.frame = NSMakeRect(282, 20, 96, 32);
+    self.openLogButton.bezelStyle = NSBezelStyleRounded;
+    self.openLogButton.autoresizingMask = NSViewMaxYMargin;
+    [content addSubview:self.openLogButton];
+
+    self.retryButton = [NSButton buttonWithTitle:@"Retry Failed" target:self action:@selector(retryClicked:)];
+    self.retryButton.frame = NSMakeRect(472, 20, 110, 32);
     self.retryButton.bezelStyle = NSBezelStyleRounded;
-    self.retryButton.hidden = YES;
-    self.retryButton.autoresizingMask = NSViewMaxYMargin;
+    self.retryButton.enabled = NO;
+    self.retryButton.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
     [content addSubview:self.retryButton];
 
-    self.cancelButton = [NSButton buttonWithTitle:@"Cancel" target:self action:@selector(cancelClicked:)];
-    self.cancelButton.frame = NSMakeRect(352, 20, 96, 32);
+    self.cancelButton = [NSButton buttonWithTitle:@"Cancel Setup" target:self action:@selector(cancelClicked:)];
+    self.cancelButton.frame = NSMakeRect(590, 20, 114, 32);
     self.cancelButton.bezelStyle = NSBezelStyleRounded;
-    self.cancelButton.autoresizingMask = NSViewMaxYMargin;
+    self.cancelButton.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
     [content addSubview:self.cancelButton];
 
-    self.launchButton = [NSButton buttonWithTitle:@"Launch App" target:self action:@selector(launchClicked:)];
-    self.launchButton.frame = NSMakeRect(456, 20, 140, 32);
+    self.launchButton = [NSButton buttonWithTitle:@"Launch Application" target:self action:@selector(launchClicked:)];
+    self.launchButton.frame = NSMakeRect(712, 20, 144, 32);
     self.launchButton.bezelStyle = NSBezelStyleRounded;
-    self.launchButton.bezelColor = [NSColor colorWithRed:0.898 green:0.224 blue:0.208 alpha:1.0];
+    self.launchButton.bezelColor = ColRed();
     self.launchButton.enabled = NO;
-    self.launchButton.autoresizingMask = NSViewMaxYMargin;
+    self.launchButton.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
     [content addSubview:self.launchButton];
 
     [self.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
 }
 
+- (void)populateDefaultPlan {
+    self.stageStateLabels = [NSMutableDictionary dictionary];
+    self.compRowWidgets = [NSMutableDictionary dictionary];
+
+    NSArray<NSArray<NSString *> *> *stages = @[
+        @[@"system_compatibility", @"1. System Compatibility"],
+        @[@"python_runtime", @"2. Python Runtime"],
+        @[@"virtual_env", @"3. Virtual Environment"],
+        @[@"core_packages", @"4. Core Dependencies"],
+        @[@"media_tools", @"5. Media Tools"],
+        @[@"hardware_accel", @"6. Hardware Accel"],
+        @[@"transcription_models", @"7. Transcription & Models"],
+        @[@"final_validation", @"8. Final Validation"],
+    ];
+    CGFloat y = 260;
+    for (NSArray<NSString *> *pair in stages) {
+        NSTextField *nameLbl = [NSTextField labelWithString:pair[1]];
+        nameLbl.frame = NSMakeRect(8, y + 14, 218, 16);
+        nameLbl.font = AppFont(11.5, YES);
+        nameLbl.textColor = ColText(self.isDarkMode);
+        [self.stageListDoc addSubview:nameLbl];
+
+        NSTextField *stLbl = [NSTextField labelWithString:@"Pending"];
+        stLbl.frame = NSMakeRect(22, y, 204, 14);
+        stLbl.font = AppFont(10.5, NO);
+        stLbl.textColor = ColMuted(self.isDarkMode);
+        [self.stageListDoc addSubview:stLbl];
+        self.stageStateLabels[pair[0]] = stLbl;
+        y -= 34;
+    }
+
+    NSString *manifestPath = [self.checkoutRoot stringByAppendingPathComponent:@"scripts/dependencies.json"];
+    NSData *data = [NSData dataWithContentsOfFile:manifestPath];
+    NSDictionary *doc = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    NSArray *comps = [doc isKindOfClass:[NSDictionary class]] ? doc[@"components"] : nil;
+    NSMutableArray<NSDictionary *> *applicable = [NSMutableArray array];
+    for (NSDictionary *item in comps) {
+        NSArray *plats = item[@"platforms"];
+        if (plats && ![plats containsObject:@"macos"]) continue;
+        [applicable addObject:item];
+    }
+
+    CGFloat rowH = 48.0;
+    CGFloat totalH = MAX(306.0, applicable.count * (rowH + 6.0) + 8.0);
+    self.compListDoc.frame = NSMakeRect(0, 0, 560, totalH);
+    CGFloat cy = totalH - rowH - 6.0;
+    for (NSDictionary *item in applicable) {
+        NSString *cid = item[@"id"] ?: @"";
+        NSString *name = item[@"name"] ?: cid;
+        BOOL mandatory = [item[@"mandatory"] boolValue];
+        NSView *card = [self makeCardWithFrame:NSMakeRect(0, cy, 550, rowH)];
+        card.autoresizingMask = NSViewWidthSizable;
+
+        NSTextField *tLbl = [NSTextField labelWithString:[NSString stringWithFormat:@"%@  •  %@", name, mandatory ? @"Required" : @"Optional"]];
+        tLbl.frame = NSMakeRect(12, 24, 340, 16);
+        tLbl.font = AppFont(11.5, YES);
+        tLbl.textColor = ColText(self.isDarkMode);
+        [card addSubview:tLbl];
+
+        NSTextField *sLbl = [NSTextField labelWithString:@"Pending"];
+        sLbl.frame = NSMakeRect(360, 24, 178, 16);
+        sLbl.alignment = NSTextAlignmentRight;
+        sLbl.font = AppFont(11, YES);
+        sLbl.textColor = ColMuted(self.isDarkMode);
+        [card addSubview:sLbl];
+
+        NSTextField *dLbl = [NSTextField labelWithString:@"Waiting"];
+        dLbl.frame = NSMakeRect(12, 6, 526, 15);
+        dLbl.font = AppFont(10.5, NO);
+        dLbl.textColor = ColMuted(self.isDarkMode);
+        [card addSubview:dLbl];
+
+        [self.compListDoc addSubview:card];
+        self.compRowWidgets[cid] = @{@"state": sLbl, @"detail": dLbl};
+        cy -= (rowH + 6.0);
+    }
+}
+
 - (void)appendDiagnosticLine:(NSString *)line {
-    if (line.length == 0) return;
-    AppendLauncherLog(line);
+    NSString *cleaned = RedactSecrets(line);
+    if (cleaned.length == 0) return;
+    AppendLogFile(SetupLogPath(), cleaned);
     dispatch_async(dispatch_get_main_queue(), ^{
-        NSString *entry = [line hasSuffix:@"\n"] ? line : [line stringByAppendingString:@"\n"];
+        NSString *entry = [cleaned hasSuffix:@"\n"] ? cleaned : [cleaned stringByAppendingString:@"\n"];
         NSAttributedString *as = [[NSAttributedString alloc] initWithString:entry attributes:@{
-            NSForegroundColorAttributeName: [NSColor colorWithRed:0.86 green:0.88 blue:0.92 alpha:1.0],
+            NSForegroundColorAttributeName: ColText(self.isDarkMode),
             NSFontAttributeName: [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular],
         }];
         [[self.logTextView textStorage] appendAttributedString:as];
@@ -375,35 +681,51 @@ static NSString *Sha256File(NSString *path) {
     [self.window setFrame:winFrame display:YES animate:YES];
     self.logScrollView.hidden = !self.detailsExpanded;
     if (self.detailsExpanded) {
-        self.logScrollView.frame = NSMakeRect(24, 62, 572, 168);
+        self.logScrollView.frame = NSMakeRect(24, 62, self.window.contentView.bounds.size.width - 48.0, 168);
     }
-    self.detailsToggleButton.title = self.detailsExpanded ? @"Hide Diagnostics" : @"Show Diagnostics";
+    self.detailsToggleButton.title = self.detailsExpanded ? @"Hide Logs" : @"Show Logs";
 }
 
 - (void)copyLogsClicked:(id)sender {
-    NSString *text = self.logTextView.string.length > 0 ? self.logTextView.string : @"No diagnostic logs yet.";
+    NSString *text = self.logTextView.string.length > 0 ? self.logTextView.string : @"No setup diagnostics yet.";
     NSPasteboard *pb = [NSPasteboard generalPasteboard];
     [pb clearContents];
     [pb setString:text forType:NSPasteboardTypeString];
 }
 
+- (void)openLogClicked:(id)sender {
+    NSString *path = SetupLogPath();
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        [@"" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+    [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:path]];
+}
+
 - (void)retryClicked:(id)sender {
     self.cancelled = NO;
-    self.retryButton.hidden = YES;
+    self.retryButton.enabled = NO;
     self.launchButton.enabled = NO;
-    self.progressBar.indeterminate = YES;
-    [self.progressBar startAnimation:nil];
-    [self startBootstrapAsync];
+    self.cancelButton.enabled = YES;
+    self.summaryCard.hidden = YES;
+    self.compScrollView.hidden = NO;
+    [self startBootstrapAsync:YES];
 }
 
 - (void)cancelClicked:(id)sender {
-    self.cancelled = YES;
-    [self terminateActiveTask];
+    if (self.running) {
+        self.cancelled = YES;
+        [self terminateActiveTask];
+        self.activityLabel.stringValue = @"Setup cancelled. Resumable partial downloads and completed items preserved.";
+        self.retryButton.enabled = YES;
+        self.cancelButton.title = @"Close";
+        return;
+    }
     [self releaseSetupLock];
     [NSApp terminate:nil];
 }
 
 - (void)launchClicked:(id)sender {
+    if (!self.completedOk) return;
     NSString *venvPy = [self.checkoutRoot stringByAppendingPathComponent:@".venv/bin/python3"];
     NSString *mainPy = [self.checkoutRoot stringByAppendingPathComponent:@"main.py"];
     [self releaseSetupLock];
@@ -415,43 +737,122 @@ static NSString *Sha256File(NSString *path) {
     if ([line hasPrefix:@"{"]) {
         NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
         NSDictionary *obj = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-        if ([obj isKindOfClass:[NSDictionary class]] && [obj[@"event"] isEqualToString:@"progress"]) {
-            NSString *compId = obj[@"id"] ?: @"";
-            NSString *state = obj[@"state"] ?: @"";
-            NSString *detail = obj[@"detail"] ?: @"";
-            NSNumber *pct = obj[@"percent"];
-            NSNumber *downloaded = obj[@"downloaded"];
-            NSNumber *total = obj[@"total"];
-            NSNumber *speed = obj[@"speed_bps"];
-            NSNumber *eta = obj[@"eta_seconds"];
+        if ([obj isKindOfClass:[NSDictionary class]] && obj[@"event"]) {
+            NSString *ev = obj[@"event"];
+            if ([ev isEqualToString:@"stage"]) {
+                NSString *sid = obj[@"stage_id"] ?: @"";
+                NSNumber *idx = obj[@"stage_index"];
+                NSNumber *tot = obj[@"stage_total"];
+                NSString *st = obj[@"state"] ?: @"";
+                NSString *detail = obj[@"detail"] ?: @"";
+                NSNumber *pct = obj[@"overall_percent"];
+                NSString *mode = obj[@"overall_mode"] ?: @"estimated";
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    self.subtitleLabel.stringValue = [NSString stringWithFormat:@"Step %@ of %@  •  %@", idx ?: @1, tot ?: @8, detail];
+                    NSTextField *stLbl = self.stageStateLabels[sid];
+                    if (stLbl) {
+                        stLbl.stringValue = st;
+                        stLbl.textColor = [st isEqualToString:@"Completed"] ? ColGreen() :
+                                          [st isEqualToString:@"Failed"] ? ColRose() :
+                                          ([st isEqualToString:@"Running"] || [st isEqualToString:@"Checking"] || [st isEqualToString:@"Verifying"]) ? ColRed() :
+                                          ColMuted(self.isDarkMode);
+                    }
+                    if (pct && ![pct isKindOfClass:[NSNull class]]) {
+                        double p = MAX(self.lastOverall, MIN(99.0, [pct doubleValue]));
+                        self.lastOverall = p;
+                        [self.progressBar stopAnimation:nil];
+                        self.progressBar.indeterminate = NO;
+                        self.progressBar.doubleValue = p;
+                        self.overallPctLabel.stringValue = [NSString stringWithFormat:@"%.0f%%  •  %@", p, [mode capitalizedString]];
+                    }
+                });
+                return;
+            }
+            if ([ev isEqualToString:@"log"]) {
+                [self appendDiagnosticLine:[NSString stringWithFormat:@"[%@] [%@] %@", obj[@"level"] ?: @"INFO", obj[@"component"] ?: @"setup", obj[@"message"] ?: @""]];
+                return;
+            }
+            if ([ev isEqualToString:@"progress"]) {
+                NSString *compId = obj[@"id"] ?: @"";
+                NSString *state = obj[@"state"] ?: @"";
+                NSString *detail = obj[@"detail"] ?: @"";
+                NSNumber *opct = obj[@"overall_percent"];
+                NSString *mode = obj[@"overall_mode"] ?: @"estimated";
+                NSNumber *downloaded = obj[@"downloaded"];
+                NSNumber *total = obj[@"total"];
+                NSNumber *speed = obj[@"speed_bps"];
+                NSNumber *eta = obj[@"eta_seconds"];
 
-            [self appendDiagnosticLine:[NSString stringWithFormat:@"[%@] %@%@", compId, state, detail.length ? [@": " stringByAppendingString:detail] : @""]];
-
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (detail.length > 0) {
-                    self.statusLabel.stringValue = detail;
-                } else if (state.length > 0) {
-                    self.statusLabel.stringValue = [NSString stringWithFormat:@"%@ (%@)...", state, compId];
-                }
-                if (pct && ![pct isKindOfClass:[NSNull class]]) {
+                [self appendDiagnosticLine:[NSString stringWithFormat:@"[%@] %@%@", compId, state, detail.length ? [@": " stringByAppendingString:detail] : @""]];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (detail.length > 0) self.activityLabel.stringValue = [NSString stringWithFormat:@"%@: %@", compId, detail];
+                    NSDictionary *widgets = self.compRowWidgets[compId];
+                    if (widgets) {
+                        NSTextField *sLbl = widgets[@"state"];
+                        NSTextField *dLbl = widgets[@"detail"];
+                        sLbl.stringValue = state;
+                        sLbl.textColor = [state isEqualToString:@"Failed"] ? ColRose() :
+                                         ([state isEqualToString:@"Ready"] || [state isEqualToString:@"Reused Existing Installation"]) ? ColGreen() :
+                                         ([state isEqualToString:@"Downloading"] || [state isEqualToString:@"Installing"] || [state isEqualToString:@"Configuring"] || [state isEqualToString:@"Verifying"] || [state isEqualToString:@"Checking"]) ? ColRed() :
+                                         ColMuted(self.isDarkMode);
+                        if (detail.length > 0) dLbl.stringValue = detail;
+                    }
+                    if (opct && ![opct isKindOfClass:[NSNull class]]) {
+                        double p = MAX(self.lastOverall, MIN(99.0, [opct doubleValue]));
+                        self.lastOverall = p;
+                        [self.progressBar stopAnimation:nil];
+                        self.progressBar.indeterminate = NO;
+                        self.progressBar.doubleValue = p;
+                        self.overallPctLabel.stringValue = [NSString stringWithFormat:@"%.0f%%  •  %@", p, [mode capitalizedString]];
+                    }
+                    if (downloaded && total && ![downloaded isKindOfClass:[NSNull class]] && ![total isKindOfClass:[NSNull class]] && [total doubleValue] > 0) {
+                        double d = [downloaded doubleValue], t = [total doubleValue];
+                        double sp = (speed && ![speed isKindOfClass:[NSNull class]]) ? [speed doubleValue] : 0.0;
+                        double etaSec = (eta && ![eta isKindOfClass:[NSNull class]]) ? [eta doubleValue] : -1.0;
+                        self.metricsLabel.stringValue = [NSString stringWithFormat:@"%@ / %@ (%.0f%%) • %@/s%@",
+                            FormatBytes(d), FormatBytes(t), (d / t) * 100.0, FormatBytes(sp),
+                            etaSec >= 0 ? [NSString stringWithFormat:@" • ETA %.0fs", etaSec] : @""];
+                    } else if (detail.length > 0) {
+                        self.metricsLabel.stringValue = detail;
+                    }
+                });
+                return;
+            }
+            if ([ev isEqualToString:@"complete"]) {
+                BOOL ok = [obj[@"ok"] boolValue];
+                dispatch_async(dispatch_get_main_queue(), ^{
                     [self.progressBar stopAnimation:nil];
                     self.progressBar.indeterminate = NO;
-                    self.progressBar.doubleValue = [pct doubleValue];
-                }
-                if (downloaded && total && ![downloaded isKindOfClass:[NSNull class]] && ![total isKindOfClass:[NSNull class]] && [total doubleValue] > 0) {
-                    double d = [downloaded doubleValue];
-                    double t = [total doubleValue];
-                    double sp = (speed && ![speed isKindOfClass:[NSNull class]]) ? [speed doubleValue] : 0.0;
-                    double etaSec = (eta && ![eta isKindOfClass:[NSNull class]]) ? [eta doubleValue] : -1.0;
-                    NSString *etaStr = etaSec >= 0 ? [NSString stringWithFormat:@" • ETA %.0fs", etaSec] : @"";
-                    NSString *spStr = sp > 0 ? [NSString stringWithFormat:@" • %@/s", FormatBytes(sp)] : @"";
-                    self.metricsLabel.stringValue = [NSString stringWithFormat:@"%@ / %@ (%.0f%%)%@%@",
-                        FormatBytes(d), FormatBytes(t), (d / t) * 100.0, spStr, etaStr];
-                } else if (pct && ![pct isKindOfClass:[NSNull class]]) {
-                    self.metricsLabel.stringValue = [NSString stringWithFormat:@"Progress: %.0f%%", [pct doubleValue]];
-                }
-            });
-            return;
+                    if (ok) {
+                        self.completedOk = YES;
+                        self.progressBar.doubleValue = 100.0;
+                        self.overallPctLabel.stringValue = @"100%  •  Verified";
+                        self.activityLabel.stringValue = @"Setup Complete — All required components verified.";
+                        self.launchButton.enabled = YES;
+                        self.cancelButton.title = @"Close";
+                        self.retryButton.enabled = NO;
+                        NSArray *notices = [obj[@"optional_notices"] isKindOfClass:[NSArray class]] ? obj[@"optional_notices"] : @[];
+                        NSString *noticeText = notices.count > 0 ? [@"\n\nOptional Notices:\n• " stringByAppendingString:[notices componentsJoinedByString:@"\n• "]] : @"";
+                        self.summaryLabel.stringValue = [NSString stringWithFormat:
+                            @"Setup Complete\n\n"
+                            @"• Validated Required Components: %@\n"
+                            @"• Newly Installed Components: %@\n"
+                            @"• Reused Existing Installations: %@\n"
+                            @"• Skipped Optional Components: %@\n"
+                            @"• Total Duration: %@s%@"\n\n"
+                            @"Click Launch Application to start AutoClip Studio.",
+                            obj[@"required_validated"] ?: @0,
+                            obj[@"installed_count"] ?: @0,
+                            obj[@"reused_count"] ?: @0,
+                            obj[@"skipped_count"] ?: @0,
+                            obj[@"duration_seconds"] ?: @0,
+                            noticeText];
+                        self.compScrollView.hidden = YES;
+                        self.summaryCard.hidden = NO;
+                    }
+                });
+                return;
+            }
         }
     }
     [self appendDiagnosticLine:line];
@@ -497,7 +898,10 @@ static NSString *Sha256File(NSString *path) {
     return status;
 }
 
-- (void)startBootstrapAsync {
+- (void)startBootstrapAsync:(BOOL)repairOnly {
+    self.running = YES;
+    self.completedOk = NO;
+    if (!repairOnly) self.lastOverall = 0.0;
     BOOL cloudOnly = (self.cloudOnlyCheck.state == NSControlStateValueOn);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *toolsDir = [self.checkoutRoot stringByAppendingPathComponent:@"tools"];
@@ -512,15 +916,10 @@ static NSString *Sha256File(NSString *path) {
             @"PYTHONIOENCODING": @"utf-8"
         };
 
-        // Prefer existing .venv Python directly for selective repair so we don't needlessly download uv if already healthy.
         int rc = -1;
-        NSString *modeFlag = cloudOnly ? @"--cloud-only" : @"--local-whisper";
+        NSString *modeFlag = cloudOnly ? @"--cloud-only" : @"--repair-only";
         if ([[NSFileManager defaultManager] fileExistsAtPath:venvPy]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                self.statusLabel.stringValue = @"Validating existing environment...";
-                self.detailLabel.stringValue = @"Repairing only missing or incompatible required components.";
-            });
-            rc = [self runStreamingProcess:venvPy args:@[setupPy, @"--json-progress", @"--repair-only", @"--no-tests", modeFlag] extraEnv:uvEnv];
+            rc = [self runStreamingProcess:venvPy args:@[setupPy, @"--json-progress", @"--no-tests", modeFlag] extraEnv:uvEnv];
         }
 
         if (rc != 0 && !self.cancelled) {
@@ -533,8 +932,7 @@ static NSString *Sha256File(NSString *path) {
                 NSString *sha = uvSpec[@"sha256"];
                 if (urlStr.length > 0) {
                     dispatch_async(dispatch_get_main_queue(), ^{
-                        self.statusLabel.stringValue = @"Downloading native ARM64 uv bootstrapper...";
-                        self.detailLabel.stringValue = urlStr;
+                        self.activityLabel.stringValue = @"Downloading native ARM64 uv bootstrapper...";
                     });
                     [self appendDiagnosticLine:[NSString stringWithFormat:@"Downloading uv from %@", urlStr]];
                     NSString *tarPath = [toolsDir stringByAppendingPathComponent:@"uv-arm64.tar.gz"];
@@ -549,28 +947,21 @@ static NSString *Sha256File(NSString *path) {
                 }
             }
             if (!self.cancelled && [[NSFileManager defaultManager] fileExistsAtPath:uvPath]) {
-                rc = [self runStreamingProcess:uvPath args:@[@"run", @"--no-project", @"--managed-python", @"--python", @"3.12", @"--", @"python3", setupPy, @"--json-progress", @"--repair-only", @"--no-tests", modeFlag] extraEnv:uvEnv];
+                rc = [self runStreamingProcess:uvPath args:@[@"run", @"--no-project", @"--managed-python", @"--python", @"3.12", @"--", @"python3", setupPy, @"--json-progress", @"--no-tests", modeFlag] extraEnv:uvEnv];
             }
         }
 
+        self.running = NO;
         if (self.cancelled) return;
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.progressBar stopAnimation:nil];
             self.progressBar.indeterminate = NO;
-            if (rc == 0) {
-                self.progressBar.doubleValue = 100.0;
-                self.statusLabel.stringValue = @"All required dependencies verified.";
-                self.detailLabel.stringValue = @"Launching AutoClip Studio...";
-                self.metricsLabel.stringValue = @"100%";
-                self.launchButton.enabled = YES;
-                [self launchClicked:nil];
-            } else {
-                self.statusLabel.stringValue = @"Setup validation failed. Review diagnostics or click Retry.";
-                self.detailLabel.stringValue = [NSString stringWithFormat:@"Log file: %@", LauncherLogPath()];
-                self.retryButton.hidden = NO;
-                if (!self.detailsExpanded) {
-                    [self toggleDetailsClicked:nil];
-                }
+            if (rc != 0 && !self.completedOk) {
+                self.activityLabel.stringValue = @"Setup failed. Review logs or click Retry Failed.";
+                self.metricsLabel.stringValue = [NSString stringWithFormat:@"Log file: %@", SetupLogPath()];
+                self.retryButton.enabled = YES;
+                self.cancelButton.title = @"Close";
+                if (!self.detailsExpanded) [self toggleDetailsClicked:nil];
             }
         });
     });

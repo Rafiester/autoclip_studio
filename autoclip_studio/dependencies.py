@@ -889,6 +889,23 @@ def inspect_all_dependencies(
                     "OpenCV missing", compatibility="Incompatible", error_detail=str(exc), can_repair=True,
                 ))
 
+        elif spec.id == "js_runtime":
+            from .media import detect_js_runtime
+            js = detect_js_runtime()
+            if js is not None:
+                kind, runtime_path = js
+                statuses.append(DependencyStatus(
+                    spec, "Reused existing", kind, runtime_path, 0, False,
+                    f"JavaScript runtime ({kind}) active for YouTube EJS", True,
+                    compatibility="Compatible",
+                ))
+            else:
+                statuses.append(DependencyStatus(
+                    spec, "Optional", "Not found", "—", 0, False,
+                    "Optional Deno or Node.js recommended for YouTube JS challenge solving",
+                    compatibility="Optional",
+                ))
+
         elif spec.id == "yunet_asd_model":
             from .smart_reframe import find_yunet_model
             yunet = find_yunet_model()

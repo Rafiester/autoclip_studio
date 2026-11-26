@@ -2,41 +2,90 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Text;
 using System.IO;
 using System.IO.Compression;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
+using Microsoft.Win32;
 
 internal sealed class SetupWizardForm : Form
 {
-    private static readonly Color BgApp = Color.FromArgb(16, 17, 22);
-    private static readonly Color BgCard = Color.FromArgb(26, 28, 35);
-    private static readonly Color BgElevated = Color.FromArgb(34, 37, 46);
-    private static readonly Color BorderSubtle = Color.FromArgb(43, 46, 56);
-    private static readonly Color RedPrimary = Color.FromArgb(229, 57, 53);
-    private static readonly Color TextPrimary = Color.FromArgb(245, 245, 247);
-    private static readonly Color TextMuted = Color.FromArgb(163, 168, 181);
-    private static readonly Color GreenOk = Color.FromArgb(46, 204, 113);
-    private static readonly Color AmberWarn = Color.FromArgb(245, 166, 35);
+    private struct Palette
+    {
+        public bool IsDark;
+        public Color Canvas;
+        public Color Card;
+        public Color Elevated;
+        public Color Border;
+        public Color TextPrimary;
+        public Color TextMuted;
+        public Color RedPrimary;
+        public Color RedAccent;
+        public Color GreenOk;
+        public Color AmberWarn;
+        public Color RoseError;
+        public Color LogBg;
+    }
+
+    private sealed class StageRow
+    {
+        public string Id;
+        public int Index;
+        public string Name;
+        public string State = "Pending";
+        public Panel Container;
+        public Label StepBadge;
+        public Label NameLabel;
+        public Label StateLabel;
+    }
 
     private sealed class ComponentRow
     {
         public string Id;
         public string Name;
+        public string StageId;
         public bool Mandatory;
         public long EstimatedBytes;
         public long? DownloadBytes;
+        public string State = "Pending";
+        public int Percent;
+        public bool Indeterminate;
         public Panel Card;
         public Label TitleLabel;
         public Label StateLabel;
         public Label DetailLabel;
-        public ProgressBar Progress;
-        public string State = "Pending";
+        public Panel BarPanel;
     }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    private struct MEMORYSTATUSEX
+    {
+        public uint dwLength;
+        public uint dwMemoryLoad;
+        public ulong ullTotalPhys;
+        public ulong ullAvailPhys;
+        public ulong ullTotalPageFile;
+        public ulong ullAvailPageFile;
+        public ulong ullTotalVirtual;
+        public ulong ullAvailVirtual;
+        public ulong ullAvailExtendedVirtual;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
+
+    private static readonly Regex SecretRegex = new Regex(
+        @"(?i)(?:AIza[\w-]{35}|sk-[A-Za-z0-9_-]{20,}|((?:authorization|cookie|api[-_ ]?key|access_token|refresh_token|password)\s*[:=]\s*)[^\s,;""'<>]+)",
+        RegexOptions.Compiled);
 
     private readonly string _root;
     private readonly string _python;
@@ -44,25 +93,50 @@ internal sealed class SetupWizardForm : Form
     private readonly WindowsJob _job;
     private readonly EventWaitHandle _stop;
     private readonly Action<string> _log;
+    private readonly string _setupLogPath;
+    private readonly Palette _pal;
+    private readonly PrivateFontCollection _fonts = new PrivateFontCollection();
+    private FontFamily _fontFamily;
 
+    private readonly List<StageRow> _stages = new List<StageRow>();
+    private readonly Dictionary<string, StageRow> _stageMap = new Dictionary<string, StageRow>();
     private readonly List<ComponentRow> _rows = new List<ComponentRow>();
     private readonly Dictionary<string, ComponentRow> _rowMap = new Dictionary<string, ComponentRow>();
-    private readonly ManualResetEventSlim _pauseGate = new ManualResetEventSlim(true);
-    private readonly CancellationTokenSource _cts = new CancellationTokenSource();
+    private readonly StringBuilder _logBuffer = new StringBuilder();
+    private readonly object _procGate = new object();
 
+    private CancellationTokenSource _cts = new CancellationTokenSource();
+    private Process _activeProc;
+    private bool _running;
+    private bool _completedOk;
+    private bool _retryRepairOnly;
+    private bool _logsExpanded;
+    private int _overallPercent;
+    private string _overallMode = "Estimated";
+    private int _currentStageIndex = 1;
+    private int _totalStages = 8;
+
+    private Label _stepSubtitleLabel;
     private Label _sysInfoLabel;
     private Label _spaceInfoLabel;
     private Label _activityLabel;
+    private Label _overallPctLabel;
     private Label _metricsLabel;
-    private Label _completedLabel;
-    private ProgressBar _overallBar;
+    private Panel _overallBar;
     private CheckBox _cloudOnlyCheck;
-    private Button _pauseBtn;
+    private FlowLayoutPanel _stageListPanel;
+    private FlowLayoutPanel _compListPanel;
+    private Panel _rightContainer;
+    private Panel _summaryPanel;
+    private Label _summaryBodyLabel;
+    private Panel _logsDrawer;
+    private TextBox _logTextBox;
+    private Button _logsToggleBtn;
+    private Button _copyLogsBtn;
+    private Button _openLogBtn;
     private Button _retryBtn;
     private Button _cancelBtn;
     private Button _launchBtn;
-    private FlowLayoutPanel _listPanel;
-    private bool _running;
 
     public SetupWizardForm(string root, string python, string setupScript, WindowsJob job, EventWaitHandle stop, Action<string> log)
     {
@@ -72,132 +146,361 @@ internal sealed class SetupWizardForm : Form
         _job = job;
         _stop = stop;
         _log = log;
+        _setupLogPath = ResolveSetupLogPath();
+        _pal = DetectPalette();
+        LoadFonts();
 
-        Text = "AutoClip Studio — First-Time Setup";
+        Text = "AutoClip Studio Setup";
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
-        BackColor = BgApp;
-        ForeColor = TextPrimary;
-        Font = new Font("Segoe UI", 9.5f);
-        FormBorderStyle = FormBorderStyle.FixedDialog;
+        BackColor = _pal.Canvas;
+        ForeColor = _pal.TextPrimary;
+        Font = MakeFont(9.5f, FontStyle.Regular);
+        MinimumSize = new Size(800, 620);
+        ClientSize = new Size(920, 690);
         StartPosition = FormStartPosition.CenterScreen;
-        MaximizeBox = false;
         AutoScaleMode = AutoScaleMode.Dpi;
-        ClientSize = new Size(740, 610);
+        DoubleBuffered = true;
 
         BuildLayout();
-        LoadManifestAndProbe();
+        LoadStaticSystemProbe();
+        PopulateDefaultPlan();
 
         var stopTimer = new System.Windows.Forms.Timer { Interval = 250 };
         stopTimer.Tick += delegate
         {
             if (_stop.WaitOne(0))
             {
-                _cts.Cancel();
+                CancelActiveWork();
                 DialogResult = DialogResult.Cancel;
             }
         };
         stopTimer.Start();
 
-        Shown += delegate { BeginInstall(); };
+        Shown += delegate { BeginInstall(false); };
         FormClosing += delegate
         {
-            _cts.Cancel();
-            _pauseGate.Set();
+            CancelActiveWork();
             stopTimer.Stop();
         };
     }
 
+    private static Palette DetectPalette()
+    {
+        bool dark = true;
+        try
+        {
+            using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
+            {
+                if (key != null)
+                {
+                    object val = key.GetValue("AppsUseLightTheme");
+                    if (val is int && (int)val == 1) dark = false;
+                }
+            }
+        }
+        catch { }
+
+        if (dark)
+        {
+            return new Palette
+            {
+                IsDark = true,
+                Canvas = Color.FromArgb(16, 17, 22),
+                Card = Color.FromArgb(26, 28, 35),
+                Elevated = Color.FromArgb(35, 38, 49),
+                Border = Color.FromArgb(43, 46, 56),
+                TextPrimary = Color.FromArgb(245, 245, 247),
+                TextMuted = Color.FromArgb(163, 168, 181),
+                RedPrimary = Color.FromArgb(229, 57, 53),
+                RedAccent = Color.FromArgb(255, 90, 79),
+                GreenOk = Color.FromArgb(46, 204, 113),
+                AmberWarn = Color.FromArgb(245, 166, 35),
+                RoseError = Color.FromArgb(255, 107, 122),
+                LogBg = Color.FromArgb(14, 15, 20)
+            };
+        }
+        return new Palette
+        {
+            IsDark = false,
+            Canvas = Color.FromArgb(245, 246, 248),
+            Card = Color.FromArgb(255, 255, 255),
+            Elevated = Color.FromArgb(236, 237, 242),
+            Border = Color.FromArgb(218, 221, 228),
+            TextPrimary = Color.FromArgb(24, 26, 32),
+            TextMuted = Color.FromArgb(92, 98, 112),
+            RedPrimary = Color.FromArgb(229, 57, 53),
+            RedAccent = Color.FromArgb(211, 47, 47),
+            GreenOk = Color.FromArgb(32, 168, 92),
+            AmberWarn = Color.FromArgb(214, 134, 10),
+            RoseError = Color.FromArgb(215, 58, 73),
+            LogBg = Color.FromArgb(248, 249, 251)
+        };
+    }
+
+    private void LoadFonts()
+    {
+        try
+        {
+            string fontsDir = Path.Combine(_root, "autoclip_studio", "assets", "fonts", "poppins");
+            if (Directory.Exists(fontsDir))
+            {
+                foreach (string ttf in Directory.GetFiles(fontsDir, "*.ttf"))
+                    _fonts.AddFontFile(ttf);
+                if (_fonts.Families.Length > 0)
+                    _fontFamily = _fonts.Families[0];
+            }
+        }
+        catch { }
+    }
+
+    private Font MakeFont(float size, FontStyle style)
+    {
+        if (_fontFamily != null && _fontFamily.IsStyleAvailable(style))
+            return new Font(_fontFamily, size, style);
+        return new Font("Segoe UI", size, style);
+    }
+
     private void BuildLayout()
     {
-        var header = new Panel { Left = 20, Top = 16, Width = 700, Height = 54, BackColor = BgApp };
+        var rootLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(20, 16, 20, 16),
+            ColumnCount = 1,
+            RowCount = 6,
+            BackColor = _pal.Canvas
+        };
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));  // 0: Header
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 90));  // 1: System card
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 96));  // 2: Overall progress
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));  // 3: Stages + Checklist
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));   // 4: Expandable logs
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));  // 5: Footer buttons
+
+        // 0: Header
+        var header = new Panel { Dock = DockStyle.Fill, BackColor = _pal.Canvas };
         string logoPath = ResolveLogoPath();
+        int textLeft = 0;
         if (logoPath != null)
         {
             try
             {
                 var pic = new PictureBox
                 {
-                    Left = 0, Top = 4, Width = 148, Height = 44,
-                    SizeMode = PictureBoxSizeMode.Zoom, BackColor = BgApp,
+                    Left = 0, Top = 4, Width = 136, Height = 44,
+                    SizeMode = PictureBoxSizeMode.Zoom, BackColor = _pal.Canvas,
                     Image = Image.FromFile(logoPath)
                 };
                 header.Controls.Add(pic);
+                textLeft = 148;
             }
             catch { }
         }
-        var title = new Label
+        var titleLbl = new Label
         {
-            Left = logoPath != null ? 160 : 0, Top = 4, Width = 520, Height = 24,
-            Text = "First-Time Setup & Dependency Verification",
-            Font = new Font("Segoe UI", 13f, FontStyle.Bold), ForeColor = TextPrimary
+            Left = textLeft, Top = 4, Width = 480, Height = 26, UseMnemonic = false,
+            Text = "AutoClip Studio Setup",
+            Font = MakeFont(14f, FontStyle.Bold), ForeColor = _pal.TextPrimary
         };
-        var subtitle = new Label
+        _stepSubtitleLabel = new Label
         {
-            Left = logoPath != null ? 160 : 0, Top = 30, Width = 520, Height = 20,
-            Text = "Verifying and preparing local components before launching AutoClip Studio.",
-            ForeColor = TextMuted
+            Left = textLeft, Top = 30, Width = 520, Height = 20, UseMnemonic = false,
+            Text = "Step 1 of 8  •  Initializing bootstrap environment",
+            Font = MakeFont(9.5f, FontStyle.Regular), ForeColor = _pal.TextMuted
         };
-        header.Controls.Add(title);
-        header.Controls.Add(subtitle);
-        Controls.Add(header);
+        var archPill = new Label
+        {
+            Text = Environment.Is64BitOperatingSystem ? "Windows x86-64" : "Windows x86",
+            Width = 128, Height = 26, Top = 12, UseMnemonic = false,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            TextAlign = ContentAlignment.MiddleCenter,
+            Font = MakeFont(8.5f, FontStyle.Bold),
+            BackColor = _pal.Card, ForeColor = _pal.TextMuted
+        };
+        archPill.Paint += DrawRoundedBorder;
+        header.Resize += delegate { archPill.Left = header.Width - archPill.Width; };
+        header.Controls.AddRange(new Control[] { titleLbl, _stepSubtitleLabel, archPill });
+        rootLayout.Controls.Add(header, 0, 0);
 
-        var infoCard = new Panel { Left = 20, Top = 78, Width = 700, Height = 74, BackColor = BgCard };
-        infoCard.Paint += DrawCardBorder;
-        _sysInfoLabel = new Label { Left = 14, Top = 10, Width = 672, Height = 20, ForeColor = TextPrimary };
-        _spaceInfoLabel = new Label { Left = 14, Top = 31, Width = 672, Height = 20, ForeColor = TextMuted };
+        // 1: System Compatibility Card
+        var sysCard = MakeCardPanel(8);
+        _sysInfoLabel = new Label
+        {
+            Left = 14, Top = 10, Width = 840, Height = 20, UseMnemonic = false,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+            Font = MakeFont(9.5f, FontStyle.Bold), ForeColor = _pal.TextPrimary
+        };
+        _spaceInfoLabel = new Label
+        {
+            Left = 14, Top = 32, Width = 840, Height = 19, UseMnemonic = false,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+            Font = MakeFont(8.8f, FontStyle.Regular), ForeColor = _pal.TextMuted
+        };
         _cloudOnlyCheck = new CheckBox
         {
-            Left = 14, Top = 50, Width = 480, Height = 20, ForeColor = TextPrimary,
-            Text = "Cloud-only transcription (skip downloading local Whisper Large v3 Turbo model)"
+            Left = 14, Top = 57, Width = 20, Height = 20,
+            Checked = false, BackColor = _pal.Card
         };
-        infoCard.Controls.AddRange(new Control[] { _sysInfoLabel, _spaceInfoLabel, _cloudOnlyCheck });
-        Controls.Add(infoCard);
+        var cloudOnlyText = new Label
+        {
+            Left = 36, Top = 57, Width = 660, Height = 20, UseMnemonic = false,
+            ForeColor = _pal.TextPrimary, BackColor = _pal.Card,
+            Font = MakeFont(9f, FontStyle.Regular), Cursor = Cursors.Hand,
+            Text = "Cloud-only transcription (skip local Whisper Large v3 Turbo model downloads)"
+        };
+        cloudOnlyText.Click += delegate { if (_cloudOnlyCheck.Enabled) _cloudOnlyCheck.Checked = !_cloudOnlyCheck.Checked; };
+        sysCard.Controls.AddRange(new Control[] { _sysInfoLabel, _spaceInfoLabel, _cloudOnlyCheck, cloudOnlyText });
+        rootLayout.Controls.Add(sysCard, 0, 1);
 
-        var overallCard = new Panel { Left = 20, Top = 160, Width = 700, Height = 92, BackColor = BgCard };
-        overallCard.Paint += DrawCardBorder;
+        // 2: Overall Progress Card
+        var progCard = MakeCardPanel(8);
+        _overallPctLabel = new Label
+        {
+            Width = 210, Height = 22, Top = 10, Left = progCard.ClientSize.Width - 224,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            UseMnemonic = false, Text = "0%  •  Estimated",
+            TextAlign = ContentAlignment.MiddleRight,
+            Font = MakeFont(9f, FontStyle.Bold), ForeColor = _pal.RedPrimary
+        };
         _activityLabel = new Label
         {
-            Left = 14, Top = 10, Width = 470, Height = 20,
-            Text = "Checking environment...", Font = new Font("Segoe UI", 9.5f, FontStyle.Bold), ForeColor = TextPrimary
+            Left = 14, Top = 10, Width = 600, Height = 22, UseMnemonic = false,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+            Text = "Preparing system validation...",
+            Font = MakeFont(10f, FontStyle.Bold), ForeColor = _pal.TextPrimary
         };
-        _completedLabel = new Label
+        progCard.Layout += delegate
         {
-            Left = 490, Top = 10, Width = 196, Height = 20,
-            TextAlign = ContentAlignment.MiddleRight, ForeColor = TextMuted
+            _overallPctLabel.Left = Math.Max(220, progCard.ClientSize.Width - _overallPctLabel.Width - 14);
+            _activityLabel.Width = Math.Max(200, _overallPctLabel.Left - 22);
         };
-        _overallBar = new ProgressBar { Left = 14, Top = 36, Width = 672, Height = 16, Maximum = 100 };
+        _overallBar = new Panel
+        {
+            Left = 14, Top = 38, Width = progCard.Width - 28, Height = 12,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+            BackColor = _pal.Elevated
+        };
+        _overallBar.Paint += PaintOverallProgressBar;
         _metricsLabel = new Label
         {
-            Left = 14, Top = 60, Width = 672, Height = 20,
-            Text = "Speed: —  •  Downloaded: —  •  ETA: —", ForeColor = TextMuted
+            Left = 14, Top = 58, Width = 840, Height = 20, UseMnemonic = false,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+            Text = "Stage telemetry initializing...",
+            Font = MakeFont(8.8f, FontStyle.Regular), ForeColor = _pal.TextMuted
         };
-        overallCard.Controls.AddRange(new Control[] { _activityLabel, _completedLabel, _overallBar, _metricsLabel });
-        Controls.Add(overallCard);
+        progCard.Controls.AddRange(new Control[] { _activityLabel, _overallPctLabel, _overallBar, _metricsLabel });
+        rootLayout.Controls.Add(progCard, 0, 2);
 
-        _listPanel = new FlowLayoutPanel
+        // 3: Two-Pane Body (Left: 8-stage stepper, Right: checklist / summary)
+        var bodySplit = new TableLayoutPanel
         {
-            Left = 20, Top = 262, Width = 700, Height = 286,
-            FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true,
-            BackColor = BgApp
+            Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1,
+            Margin = new Padding(0, 8, 0, 8), BackColor = _pal.Canvas
         };
-        Controls.Add(_listPanel);
+        bodySplit.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 250));
+        bodySplit.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        _pauseBtn = MakeButton("Pause", 20, 560, 90, false);
-        _pauseBtn.Click += TogglePause;
-        _retryBtn = MakeButton("Retry Failed", 118, 560, 110, false);
-        _retryBtn.Enabled = false;
-        _retryBtn.Click += delegate { BeginInstall(); };
-        _cancelBtn = MakeButton("Cancel", 448, 560, 100, false);
-        _cancelBtn.Click += delegate
+        var stageCard = MakeCardPanel(0);
+        stageCard.Margin = new Padding(0, 0, 10, 0);
+        var stageTitle = new Label
         {
-            _cts.Cancel();
-            _pauseGate.Set();
-            DialogResult = DialogResult.Cancel;
+            Dock = DockStyle.Top, Height = 28, Text = "Setup Stages",
+            Padding = new Padding(12, 8, 12, 0),
+            Font = MakeFont(9.5f, FontStyle.Bold), ForeColor = _pal.TextPrimary
         };
-        _launchBtn = MakeButton("Launch Application", 556, 560, 164, true);
+        _stageListPanel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown,
+            WrapContents = false, AutoScroll = true, Padding = new Padding(8, 6, 8, 8),
+            BackColor = _pal.Card
+        };
+        stageCard.Controls.Add(_stageListPanel);
+        stageCard.Controls.Add(stageTitle);
+        bodySplit.Controls.Add(stageCard, 0, 0);
+
+        _rightContainer = new Panel { Dock = DockStyle.Fill, BackColor = _pal.Canvas };
+        _compListPanel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown,
+            WrapContents = false, AutoScroll = true, Padding = new Padding(0, 0, 4, 0),
+            BackColor = _pal.Canvas
+        };
+        _compListPanel.Resize += delegate
+        {
+            int w = Math.Max(320, _compListPanel.ClientSize.Width - 22);
+            foreach (var r in _rows)
+                if (r.Card != null) r.Card.Width = w;
+        };
+
+        _summaryPanel = MakeCardPanel(0);
+        _summaryPanel.Visible = false;
+        _summaryBodyLabel = new Label
+        {
+            Dock = DockStyle.Fill, Padding = new Padding(18),
+            Font = MakeFont(10f, FontStyle.Regular), ForeColor = _pal.TextPrimary
+        };
+        _summaryPanel.Controls.Add(_summaryBodyLabel);
+        _rightContainer.Controls.Add(_compListPanel);
+        _rightContainer.Controls.Add(_summaryPanel);
+        bodySplit.Controls.Add(_rightContainer, 1, 0);
+        rootLayout.Controls.Add(bodySplit, 0, 3);
+
+        // 4: Collapsible Logs Drawer
+        _logsDrawer = MakeCardPanel(0);
+        _logsDrawer.Visible = false;
+        _logTextBox = new TextBox
+        {
+            Dock = DockStyle.Fill, Multiline = true, ReadOnly = true,
+            ScrollBars = ScrollBars.Vertical, BorderStyle = BorderStyle.None,
+            BackColor = _pal.LogBg, ForeColor = _pal.TextPrimary,
+            Font = new Font("Consolas", 8.5f)
+        };
+        _logsDrawer.Controls.Add(_logTextBox);
+        rootLayout.Controls.Add(_logsDrawer, 0, 4);
+
+        // 5: Footer Buttons
+        var footer = new Panel { Dock = DockStyle.Fill, BackColor = _pal.Canvas, Padding = new Padding(0, 8, 0, 0) };
+        _logsToggleBtn = MakeButton("Show Logs", 0, 8, 108, false);
+        _logsToggleBtn.Click += delegate { ToggleLogsDrawer(rootLayout); };
+        _copyLogsBtn = MakeButton("Copy Diagnostics", 116, 8, 134, false);
+        _copyLogsBtn.Click += CopyLogs;
+        _openLogBtn = MakeButton("Open Log", 258, 8, 96, false);
+        _openLogBtn.Click += OpenSetupLog;
+
+        _launchBtn = MakeButton("Launch Application", 710, 8, 166, true);
         _launchBtn.Enabled = false;
+        _launchBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         _launchBtn.Click += delegate { DialogResult = DialogResult.OK; };
-        Controls.AddRange(new Control[] { _pauseBtn, _retryBtn, _cancelBtn, _launchBtn });
+
+        _cancelBtn = MakeButton("Cancel Setup", 594, 8, 108, false);
+        _cancelBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        _cancelBtn.Click += OnCancelClicked;
+
+        _retryBtn = MakeButton("Retry Failed", 478, 8, 108, false);
+        _retryBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        _retryBtn.Enabled = false;
+        _retryBtn.Click += delegate { BeginInstall(true); };
+
+        footer.Resize += delegate
+        {
+            _launchBtn.Left = footer.Width - _launchBtn.Width;
+            _cancelBtn.Left = _launchBtn.Left - _cancelBtn.Width - 8;
+            _retryBtn.Left = _cancelBtn.Left - _retryBtn.Width - 8;
+        };
+        footer.Controls.AddRange(new Control[] { _logsToggleBtn, _copyLogsBtn, _openLogBtn, _retryBtn, _cancelBtn, _launchBtn });
+        rootLayout.Controls.Add(footer, 0, 5);
+        Controls.Add(rootLayout);
+    }
+
+    private Panel MakeCardPanel(int bottomMargin)
+    {
+        var panel = new Panel
+        {
+            Dock = DockStyle.Fill, BackColor = _pal.Card,
+            Margin = new Padding(0, 6, 0, bottomMargin)
+        };
+        panel.Paint += DrawRoundedBorder;
+        return panel;
     }
 
     private Button MakeButton(string text, int left, int top, int width, bool primary)
@@ -205,154 +508,274 @@ internal sealed class SetupWizardForm : Form
         var btn = new Button
         {
             Left = left, Top = top, Width = width, Height = 34, Text = text,
-            FlatStyle = FlatStyle.Flat, BackColor = primary ? RedPrimary : BgElevated,
-            ForeColor = TextPrimary, Font = new Font("Segoe UI", 9.5f, primary ? FontStyle.Bold : FontStyle.Regular)
+            FlatStyle = FlatStyle.Flat, BackColor = primary ? _pal.RedPrimary : _pal.Elevated,
+            ForeColor = primary ? Color.White : _pal.TextPrimary,
+            Font = MakeFont(9.2f, primary ? FontStyle.Bold : FontStyle.Regular),
+            Cursor = Cursors.Hand
         };
-        btn.FlatAppearance.BorderColor = primary ? RedPrimary : BorderSubtle;
+        btn.FlatAppearance.BorderColor = primary ? _pal.RedPrimary : _pal.Border;
         btn.FlatAppearance.BorderSize = 1;
+        btn.EnabledChanged += delegate
+        {
+            if (primary)
+            {
+                btn.BackColor = btn.Enabled ? _pal.RedPrimary : _pal.Elevated;
+                btn.ForeColor = btn.Enabled ? Color.White : _pal.TextMuted;
+                btn.FlatAppearance.BorderColor = btn.Enabled ? _pal.RedPrimary : _pal.Border;
+            }
+            else
+            {
+                btn.ForeColor = btn.Enabled ? _pal.TextPrimary : _pal.TextMuted;
+            }
+        };
         return btn;
     }
 
-    private void DrawCardBorder(object sender, PaintEventArgs e)
+    private void DrawRoundedBorder(object sender, PaintEventArgs e)
     {
-        var panel = (Control)sender;
-        using (var pen = new Pen(BorderSubtle, 1))
-            e.Graphics.DrawRectangle(pen, 0, 0, panel.Width - 1, panel.Height - 1);
+        var c = (Control)sender;
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        using (var path = RoundedRect(new Rectangle(0, 0, c.Width - 1, c.Height - 1), 10))
+        using (var pen = new Pen(_pal.Border, 1))
+            e.Graphics.DrawPath(pen, path);
     }
 
-    private string ResolveLogoPath()
+    private void PaintOverallProgressBar(object sender, PaintEventArgs e)
     {
-        foreach (string candidate in new[]
+        var bar = (Control)sender;
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        using (var bg = new SolidBrush(_pal.Elevated))
+        using (var bgPath = RoundedRect(new Rectangle(0, 0, bar.Width, bar.Height), 6))
+            e.Graphics.FillPath(bg, bgPath);
+        int fillW = (int)Math.Round(bar.Width * Math.Max(0, Math.Min(100, _overallPercent)) / 100.0);
+        if (fillW > 2)
         {
-            Path.Combine(_root, "autoclip_studio", "assets", "AutoClipTrans.png"),
-            Path.Combine(_root, "AutoClipTrans.png")
-        })
-        {
-            if (File.Exists(candidate)) return candidate;
+            using (var fg = new SolidBrush(_completedOk ? _pal.GreenOk : _pal.RedPrimary))
+            using (var fgPath = RoundedRect(new Rectangle(0, 0, fillW, bar.Height), 6))
+                e.Graphics.FillPath(fg, fgPath);
         }
-        return null;
     }
 
-    private void LoadManifestAndProbe()
+    private static GraphicsPath RoundedRect(Rectangle bounds, int radius)
     {
-        string osDesc = Environment.Is64BitOperatingSystem ? "Windows x64" : "Windows x86";
-        string gpuDesc = DetectNvidiaGpu() ?? "CPU mode (no NVIDIA GPU detected)";
-        _sysInfoLabel.Text = string.Format("System: {0}  •  GPU: {1}", osDesc, gpuDesc);
+        int d = radius * 2;
+        var path = new GraphicsPath();
+        path.AddArc(bounds.X, bounds.Y, d, d, 180, 90);
+        path.AddArc(bounds.Right - d, bounds.Y, d, d, 270, 90);
+        path.AddArc(bounds.Right - d, bounds.Bottom - d, d, d, 0, 90);
+        path.AddArc(bounds.X, bounds.Bottom - d, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
+    private void ToggleLogsDrawer(TableLayoutPanel rootLayout)
+    {
+        _logsExpanded = !_logsExpanded;
+        _logsDrawer.Visible = _logsExpanded;
+        rootLayout.RowStyles[4].Height = _logsExpanded ? 150 : 0;
+        _logsToggleBtn.Text = _logsExpanded ? "Hide Logs" : "Show Logs";
+    }
+
+    private void CopyLogs(object sender, EventArgs e)
+    {
+        try
+        {
+            string txt = _logBuffer.Length > 0 ? _logBuffer.ToString() : "No setup diagnostics recorded yet.";
+            Clipboard.SetText(txt);
+        }
+        catch { }
+    }
+
+    private void OpenSetupLog(object sender, EventArgs e)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(_setupLogPath));
+            if (!File.Exists(_setupLogPath))
+                File.WriteAllText(_setupLogPath, _logBuffer.ToString(), Encoding.UTF8);
+            Process.Start(new ProcessStartInfo(_setupLogPath) { UseShellExecute = true });
+        }
+        catch { }
+    }
+
+    private void LoadStaticSystemProbe()
+    {
+        string osDesc = Environment.Is64BitOperatingSystem ? "Windows x86-64" : "Windows x86";
+        string cpuName = ReadCpuName();
+        long ramBytes = ReadTotalRamBytes();
+        string gpu = DetectNvidiaGpu();
+        string hwSummary = gpu != null ? gpu + " (NVENC / CUDA)" : "CPU fallback (no NVIDIA GPU detected)";
+        _sysInfoLabel.Text = string.Format("{0}  •  {1} ({2} threads)  •  RAM: {3}", osDesc, cpuName, Environment.ProcessorCount, FormatBytes(ramBytes));
 
         long freeBytes = new DriveInfo(Path.GetPathRoot(_root)).AvailableFreeSpace;
-        long totalDownload = 0;
-        long totalInstalled = 0;
+        _spaceInfoLabel.Text = string.Format("Acceleration: {0}  •  Available Disk: {1}", hwSummary, FormatBytes(freeBytes));
+    }
+
+    private void PopulateDefaultPlan()
+    {
+        string[] stageIds = { "system_compatibility", "python_runtime", "virtual_env", "core_packages", "media_tools", "hardware_accel", "transcription_models", "final_validation" };
+        string[] stageNames = { "System Compatibility", "Python Runtime", "Virtual Environment", "Core Dependencies", "Media Tools", "Hardware Accel", "Transcription & Models", "Final Validation" };
+        for (int i = 0; i < stageIds.Length; i++)
+            AddStageItem(stageIds[i], i + 1, stageNames[i]);
 
         string manifestPath = Path.Combine(_root, "scripts", "dependencies.json");
-        if (File.Exists(manifestPath))
+        if (!File.Exists(manifestPath)) return;
+        try
         {
             var serializer = new JavaScriptSerializer();
             var doc = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(manifestPath, Encoding.UTF8));
             var comps = doc.ContainsKey("components") ? doc["components"] as System.Collections.ArrayList : null;
-            if (comps != null)
+            if (comps == null) return;
+            foreach (Dictionary<string, object> item in comps)
             {
-                foreach (Dictionary<string, object> item in comps)
+                if (item.ContainsKey("platforms"))
                 {
-                    string id = Convert.ToString(item["id"]);
-                    string name = Convert.ToString(item["name"]);
-                    bool mandatory = item.ContainsKey("mandatory") && Convert.ToBoolean(item["mandatory"]);
-                    long estInst = item.ContainsKey("estimated_installed_bytes") && item["estimated_installed_bytes"] != null
-                        ? Convert.ToInt64(item["estimated_installed_bytes"]) : 0;
-                    long? dlBytes = item.ContainsKey("download_size_bytes") && item["download_size_bytes"] != null
-                        ? (long?)Convert.ToInt64(item["download_size_bytes"]) : null;
-                    if (dlBytes.HasValue) totalDownload += dlBytes.Value;
-                    totalInstalled += estInst;
-                    AddComponentCard(id, name, mandatory, dlBytes, estInst);
+                    var plats = item["platforms"] as System.Collections.ArrayList;
+                    if (plats != null && !plats.Contains("windows")) continue;
                 }
+                string id = Convert.ToString(item["id"]);
+                string name = Convert.ToString(item["name"]);
+                string stageId = item.ContainsKey("stage_id") ? Convert.ToString(item["stage_id"]) : "";
+                bool mandatory = item.ContainsKey("mandatory") && Convert.ToBoolean(item["mandatory"]);
+                long est = item.ContainsKey("estimated_installed_bytes") && item["estimated_installed_bytes"] != null ? Convert.ToInt64(item["estimated_installed_bytes"]) : 0;
+                long? dl = item.ContainsKey("download_size_bytes") && item["download_size_bytes"] != null ? (long?)Convert.ToInt64(item["download_size_bytes"]) : null;
+                AddComponentCard(id, name, stageId, mandatory, dl, est);
             }
         }
-        _spaceInfoLabel.Text = string.Format(
-            "Required Download: ~{0} (+ packages)  •  Est. Installed: ~{1}  •  Available Disk: {2}",
-            FormatBytes(totalDownload), FormatBytes(totalInstalled), FormatBytes(freeBytes));
-        UpdateOverallProgress();
+        catch { }
     }
 
-    private void AddComponentCard(string id, string name, bool mandatory, long? dlBytes, long estBytes)
+    private void AddStageItem(string id, int index, string name)
     {
-        var card = new Panel { Width = 674, Height = 52, BackColor = BgCard, Margin = new Padding(0, 0, 0, 6) };
-        card.Paint += DrawCardBorder;
+        var panel = new Panel { Width = 224, Height = 36, BackColor = _pal.Card, Margin = new Padding(0, 0, 0, 4) };
+        var badge = new Label
+        {
+            Left = 4, Top = 7, Width = 22, Height = 22, Text = index.ToString(),
+            TextAlign = ContentAlignment.MiddleCenter, BackColor = _pal.Elevated, ForeColor = _pal.TextMuted,
+            Font = MakeFont(8.5f, FontStyle.Bold)
+        };
+        var nameLbl = new Label
+        {
+            Left = 32, Top = 2, Width = 188, Height = 17, Text = name, UseMnemonic = false,
+            Font = MakeFont(8.8f, FontStyle.Bold), ForeColor = _pal.TextPrimary
+        };
+        var stateLbl = new Label
+        {
+            Left = 32, Top = 19, Width = 188, Height = 14, Text = "Pending", UseMnemonic = false,
+            Font = MakeFont(7.8f, FontStyle.Regular), ForeColor = _pal.TextMuted
+        };
+        panel.Controls.AddRange(new Control[] { badge, nameLbl, stateLbl });
+        _stageListPanel.Controls.Add(panel);
+        var st = new StageRow { Id = id, Index = index, Name = name, Container = panel, StepBadge = badge, NameLabel = nameLbl, StateLabel = stateLbl };
+        _stages.Add(st);
+        _stageMap[id] = st;
+    }
+
+    private void AddComponentCard(string id, string name, string stageId, bool mandatory, long? dlBytes, long estBytes)
+    {
+        int cardWidth = Math.Max(460, _compListPanel.ClientSize.Width - 24);
+        var card = new Panel { Width = cardWidth, Height = 56, BackColor = _pal.Card, Margin = new Padding(0, 0, 0, 6) };
+        card.Paint += DrawRoundedBorder;
         var title = new Label
         {
-            Left = 12, Top = 7, Width = 430, Height = 18,
-            Text = name + (mandatory ? "  (Required)" : "  (Optional)"),
-            Font = new Font("Segoe UI", 9.5f, FontStyle.Bold), ForeColor = TextPrimary
+            Left = 12, Top = 7, Width = cardWidth - 236, Height = 19, UseMnemonic = false,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+            Text = name + (mandatory ? "  •  Required" : "  •  Optional"),
+            Font = MakeFont(9f, FontStyle.Bold), ForeColor = _pal.TextPrimary
         };
         var state = new Label
         {
-            Left = 450, Top = 7, Width = 210, Height = 18,
-            Text = "Pending", TextAlign = ContentAlignment.MiddleRight, ForeColor = TextMuted
+            Left = cardWidth - 224, Top = 7, Width = 212, Height = 19, UseMnemonic = false,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+            Text = "Pending", TextAlign = ContentAlignment.MiddleRight,
+            Font = MakeFont(8.5f, FontStyle.Bold), ForeColor = _pal.TextMuted
         };
-        var bar = new ProgressBar { Left = 12, Top = 30, Width = 340, Height = 10, Maximum = 100 };
-        var detail = new Label
+        var bar = new Panel
         {
-            Left = 362, Top = 27, Width = 298, Height = 18,
-            Text = dlBytes.HasValue ? FormatBytes(dlBytes.Value) : "Dynamic size",
-            TextAlign = ContentAlignment.MiddleRight, ForeColor = TextMuted
+            Left = 12, Top = 33, Width = 220, Height = 8,
+            BackColor = _pal.Elevated
         };
-        card.Controls.AddRange(new Control[] { title, state, bar, detail });
-        _listPanel.Controls.Add(card);
-
         var row = new ComponentRow
         {
-            Id = id, Name = name, Mandatory = mandatory, DownloadBytes = dlBytes,
-            EstimatedBytes = estBytes, Card = card, TitleLabel = title,
-            StateLabel = state, DetailLabel = detail, Progress = bar
+            Id = id, Name = name, StageId = stageId, Mandatory = mandatory,
+            DownloadBytes = dlBytes, EstimatedBytes = estBytes,
+            Card = card, TitleLabel = title, StateLabel = state, BarPanel = bar
         };
+        bar.Paint += delegate(object s, PaintEventArgs pe)
+        {
+            pe.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var bg = new SolidBrush(_pal.Elevated))
+            using (var bgP = RoundedRect(new Rectangle(0, 0, bar.Width, bar.Height), 4))
+                pe.Graphics.FillPath(bg, bgP);
+            int pct = row.Indeterminate ? 40 : Math.Max(0, Math.Min(100, row.Percent));
+            int w = (int)Math.Round(bar.Width * pct / 100.0);
+            if (w > 2)
+            {
+                Color c = row.State == "Failed" ? _pal.RoseError : (row.State == "Ready" || row.State == "Reused Existing Installation") ? _pal.GreenOk : _pal.RedPrimary;
+                using (var fg = new SolidBrush(c))
+                using (var fgP = RoundedRect(new Rectangle(0, 0, w, bar.Height), 4))
+                    pe.Graphics.FillPath(fg, fgP);
+            }
+        };
+        var detail = new Label
+        {
+            Left = 244, Top = 30, Width = cardWidth - 256, Height = 18, UseMnemonic = false,
+            Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+            Text = dlBytes.HasValue && dlBytes.Value > 0 ? FormatBytes(dlBytes.Value) : "Auto-detect",
+            TextAlign = ContentAlignment.MiddleRight, Font = MakeFont(8.2f, FontStyle.Regular), ForeColor = _pal.TextMuted
+        };
+        row.DetailLabel = detail;
+        card.Controls.AddRange(new Control[] { title, state, bar, detail });
+        _compListPanel.Controls.Add(card);
         _rows.Add(row);
         _rowMap[id] = row;
     }
 
-    private void TogglePause(object sender, EventArgs e)
-    {
-        if (_pauseGate.IsSet)
-        {
-            _pauseGate.Reset();
-            _pauseBtn.Text = "Resume";
-            SetActivity("Installation paused.");
-        }
-        else
-        {
-            _pauseGate.Set();
-            _pauseBtn.Text = "Pause";
-            SetActivity("Resuming installation...");
-        }
-    }
-
-    private void BeginInstall()
+    private void BeginInstall(bool repairOnly)
     {
         if (_running) return;
         _running = true;
+        _completedOk = false;
+        _retryRepairOnly = repairOnly;
+        _cts = new CancellationTokenSource();
         _retryBtn.Enabled = false;
         _launchBtn.Enabled = false;
-        bool cloudOnly = _cloudOnlyCheck.Checked;
+        _cancelBtn.Enabled = true;
         _cloudOnlyCheck.Enabled = false;
+        _summaryPanel.Visible = false;
+        _compListPanel.Visible = true;
+        if (!repairOnly)
+        {
+            _overallPercent = 0;
+            _overallBar.Invalidate();
+        }
+        bool cloudOnly = _cloudOnlyCheck.Checked;
 
         ThreadPool.QueueUserWorkItem(delegate
         {
             try
             {
-                RunInstallPipeline(cloudOnly);
+                RunInstallPipeline(cloudOnly, repairOnly);
+            }
+            catch (OperationCanceledException)
+            {
+                AppendLog("[setup] Setup cancelled by user.");
                 SafeUi(delegate
                 {
-                    SetActivity("All required dependencies verified. Launching AutoClip Studio...");
-                    _overallBar.Value = 100;
-                    _launchBtn.Enabled = true;
-                    _pauseBtn.Enabled = false;
-                    DialogResult = DialogResult.OK;
+                    _activityLabel.Text = "Setup cancelled. Valid components and partial downloads preserved.";
+                    _retryBtn.Enabled = true;
+                    _cancelBtn.Enabled = false;
+                    _cloudOnlyCheck.Enabled = true;
                 });
             }
             catch (Exception error)
             {
-                _log("Setup failed: " + error);
+                AppendLog("[error] " + error.Message);
                 SafeUi(delegate
                 {
-                    SetActivity("Setup failed: " + error.Message);
+                    _activityLabel.Text = "Setup failed: " + error.Message;
                     _retryBtn.Enabled = true;
+                    _cancelBtn.Enabled = false;
                     _cloudOnlyCheck.Enabled = true;
                 });
             }
@@ -363,19 +786,78 @@ internal sealed class SetupWizardForm : Form
         });
     }
 
-    private void RunInstallPipeline(bool cloudOnly)
+    private void OnCancelClicked(object sender, EventArgs e)
     {
+        if (_running)
+        {
+            CancelActiveWork();
+            _cancelBtn.Enabled = false;
+            _activityLabel.Text = "Cancelling active setup step...";
+        }
+        else
+        {
+            DialogResult = DialogResult.Cancel;
+        }
+    }
+
+    private void CancelActiveWork()
+    {
+        try { _cts.Cancel(); } catch { }
+        lock (_procGate)
+        {
+            if (_activeProc != null)
+            {
+                try
+                {
+                    if (!_activeProc.HasExited)
+                    {
+                        KillProcessTree(_activeProc.Id);
+                    }
+                }
+                catch { }
+            }
+        }
+    }
+
+    private static void KillProcessTree(int pid)
+    {
+        try
+        {
+            var tk = Process.Start(new ProcessStartInfo("taskkill", "/F /T /PID " + pid)
+            {
+                CreateNoWindow = true, UseShellExecute = false
+            });
+            if (tk != null) tk.WaitForExit(3000);
+        }
+        catch { }
+    }
+
+    private void RunInstallPipeline(bool cloudOnly, bool repairOnly)
+    {
+        UpdateStage("virtual_env", 3, "Running", "Preparing uv package bootstrapper", null);
         string uv = EnsureUvWithProgress();
         _cts.Token.ThrowIfCancellationRequested();
 
-        SafeUi(delegate { SetActivity("Installing Python runtime, packages, and media tools..."); });
-        string modeFlag = cloudOnly ? "--cloud-only" : "--local-whisper";
-        string[] args = File.Exists(_python) && CheckPythonVersion()
-            ? new[] { _setupScript, "--json-progress", "--no-tests", modeFlag }
-            : new[] { "run", "--no-project", "--managed-python", "--python", "3.12", "--", "python", _setupScript, "--json-progress", "--no-tests", modeFlag };
-        string exe = args[0] == _setupScript ? _python : uv;
+        string modeFlag = cloudOnly ? "--cloud-only" : (repairOnly ? "--repair-only" : "--cloud-only");
+        // Note: large optional Whisper model download stays opt-in inside Dependency Manager when cloudOnly unchecked only triggers on explicit local install or setup step.
+        var argsList = new List<string>();
+        bool useExistingPy = File.Exists(_python) && CheckPythonVersion();
+        string exe;
+        if (useExistingPy)
+        {
+            exe = _python;
+            argsList.Add(_setupScript);
+        }
+        else
+        {
+            exe = uv;
+            argsList.AddRange(new[] { "run", "--no-project", "--managed-python", "--python", "3.12", "--", "python", _setupScript });
+        }
+        argsList.Add("--json-progress");
+        argsList.Add("--no-tests");
+        argsList.Add(cloudOnly ? "--cloud-only" : "--repair-only");
 
-        var psi = new ProcessStartInfo(exe, QuoteArgs(args))
+        var psi = new ProcessStartInfo(exe, QuoteArgs(argsList.ToArray()))
         {
             WorkingDirectory = _root,
             UseShellExecute = false,
@@ -392,90 +874,179 @@ internal sealed class SetupWizardForm : Form
         var serializer = new JavaScriptSerializer();
         using (var proc = Process.Start(psi))
         {
-            proc.ErrorDataReceived += delegate(object s, DataReceivedEventArgs ev)
+            lock (_procGate) { _activeProc = proc; }
+            try
             {
-                if (!string.IsNullOrEmpty(ev.Data)) _log("[setup] " + ev.Data);
-            };
-            proc.BeginErrorReadLine();
-
-            string line;
-            while ((line = proc.StandardOutput.ReadLine()) != null)
-            {
-                _cts.Token.ThrowIfCancellationRequested();
-                _pauseGate.Wait(_cts.Token);
-                if (line.StartsWith("{"))
+                proc.ErrorDataReceived += delegate(object s, DataReceivedEventArgs ev)
                 {
-                    try
-                    {
-                        var evt = serializer.Deserialize<Dictionary<string, object>>(line);
-                        HandleJsonProgress(evt);
-                        continue;
-                    }
-                    catch { }
-                }
-                _log("[setup] " + line);
-            }
-            proc.WaitForExit();
-            if (proc.ExitCode != 0)
-                throw new InvalidOperationException("Setup exited with code " + proc.ExitCode + ". See launcher log.");
-        }
+                    if (!string.IsNullOrEmpty(ev.Data)) AppendLog("[stderr] " + ev.Data);
+                };
+                proc.BeginErrorReadLine();
 
-        // Mark remaining informational rows ready
-        SafeUi(delegate
-        {
-            foreach (var row in _rows)
-            {
-                if (row.State == "Pending" || row.State == "Checking" || row.State == "Installing")
-                    UpdateRow(row.Id, "Ready", 100, "");
+                string line;
+                while ((line = proc.StandardOutput.ReadLine()) != null)
+                {
+                    _cts.Token.ThrowIfCancellationRequested();
+                    if (line.StartsWith("{"))
+                    {
+                        try
+                        {
+                            var evt = serializer.Deserialize<Dictionary<string, object>>(line);
+                            HandleJsonEvent(evt);
+                            continue;
+                        }
+                        catch { }
+                    }
+                    AppendLog("[setup] " + line);
+                }
+                proc.WaitForExit();
+                _cts.Token.ThrowIfCancellationRequested();
+                if (proc.ExitCode != 0 && !_completedOk)
+                    throw new InvalidOperationException("Setup exited with code " + proc.ExitCode + ". Review installation logs.");
             }
-            UpdateOverallProgress();
-        });
+            finally
+            {
+                lock (_procGate) { _activeProc = null; }
+            }
+        }
     }
 
-    private void HandleJsonProgress(Dictionary<string, object> evt)
+    private void HandleJsonEvent(Dictionary<string, object> evt)
     {
-        if (!evt.ContainsKey("id") || !evt.ContainsKey("state")) return;
-        string id = Convert.ToString(evt["id"]);
-        string state = Convert.ToString(evt["state"]);
-        long? dl = evt.ContainsKey("downloaded") && evt["downloaded"] != null ? (long?)Convert.ToInt64(evt["downloaded"]) : null;
-        long? tot = evt.ContainsKey("total") && evt["total"] != null ? (long?)Convert.ToInt64(evt["total"]) : null;
-        double? speed = evt.ContainsKey("speed_bps") && evt["speed_bps"] != null ? (double?)Convert.ToDouble(evt["speed_bps"]) : null;
-        double? eta = evt.ContainsKey("eta_seconds") && evt["eta_seconds"] != null ? (double?)Convert.ToDouble(evt["eta_seconds"]) : null;
-        string detail = evt.ContainsKey("detail") && evt["detail"] != null ? Convert.ToString(evt["detail"]) : "";
-
-        SafeUi(delegate
+        if (!evt.ContainsKey("event")) return;
+        string evType = Convert.ToString(evt["event"]);
+        if (evType == "system_info")
         {
-            int pct = -1;
-            if (state == "Ready" || state == "Reused existing") pct = 100;
-            else if (dl.HasValue && tot.HasValue && tot.Value > 0) pct = (int)Math.Min(100, (dl.Value * 100) / tot.Value);
+            SafeUi(delegate
+            {
+                string os = Str(evt, "os_detail");
+                string cpu = Str(evt, "cpu");
+                string gpu = Str(evt, "gpu");
+                string accel = Str(evt, "hw_accel");
+                long ram = Lng(evt, "ram_bytes") ?? 0;
+                long free = Lng(evt, "disk_free_bytes") ?? 0;
+                _sysInfoLabel.Text = string.Format("{0}  •  {1}  •  RAM: {2}", os, cpu, FormatBytes(ram));
+                _spaceInfoLabel.Text = string.Format("GPU: {0} ({1})  •  Available Disk: {2}", gpu, accel, FormatBytes(free));
+            });
+            return;
+        }
+        if (evType == "log")
+        {
+            AppendLog(string.Format("[{0}] [{1}] {2}", Str(evt, "level"), Str(evt, "component"), Str(evt, "message")));
+            return;
+        }
+        if (evType == "stage")
+        {
+            string sid = Str(evt, "stage_id");
+            int sidx = (int)(Lng(evt, "stage_index") ?? _currentStageIndex);
+            string state = Str(evt, "state");
+            string detail = Str(evt, "detail");
+            long? pct = Lng(evt, "overall_percent");
+            string mode = Str(evt, "overall_mode");
+            UpdateStage(sid, sidx, state, detail, pct, mode);
+            return;
+        }
+        if (evType == "progress")
+        {
+            string id = Str(evt, "id");
+            string state = Str(evt, "state");
+            string ver = Str(evt, "version");
+            string detail = Str(evt, "detail");
+            long? dl = Lng(evt, "downloaded");
+            long? tot = Lng(evt, "total");
+            double? speed = Dbl(evt, "speed_bps");
+            double? eta = Dbl(evt, "eta_seconds");
+            double? cpct = Dbl(evt, "component_percent");
+            double? opct = Dbl(evt, "overall_percent");
+            string mode = Str(evt, "overall_mode");
 
-            string info = detail;
-            if (dl.HasValue)
+            AppendLog(string.Format("[{0}] {1}: {2}", id, state, detail));
+            SafeUi(delegate
             {
-                info = tot.HasValue && tot.Value > 0
-                    ? string.Format("{0} / {1}", FormatBytes(dl.Value), FormatBytes(tot.Value))
-                    : FormatBytes(dl.Value);
-            }
-            if (speed.HasValue && speed.Value > 0)
+                int rowPct = cpct.HasValue ? (int)Math.Round(cpct.Value) : (state == "Ready" || state == "Reused Existing Installation" || state == "Skipped" ? 100 : -1);
+                string rightDetail = detail;
+                if (dl.HasValue)
+                {
+                    string dlStr = tot.HasValue && tot.Value > 0 ? FormatBytes(dl.Value) + " / " + FormatBytes(tot.Value) : FormatBytes(dl.Value);
+                    rightDetail = dlStr;
+                    string spStr = speed.HasValue && speed.Value > 0 ? FormatBytes((long)speed.Value) + "/s" : "—";
+                    string etaStr = eta.HasValue ? FormatSeconds((long)Math.Round(eta.Value)) : "—";
+                    _metricsLabel.Text = string.Format("Transfer: {0}  •  Speed: {1}  •  ETA: {2}", dlStr, spStr, etaStr);
+                }
+                else if (!string.IsNullOrEmpty(detail))
+                {
+                    _metricsLabel.Text = detail;
+                }
+                if (!string.IsNullOrEmpty(ver) && !string.IsNullOrEmpty(rightDetail) && !rightDetail.Contains(ver))
+                    rightDetail = ver + "  •  " + rightDetail;
+                UpdateRow(id, state, rowPct, rightDetail);
+                if (opct.HasValue) SetOverall((int)Math.Round(opct.Value), mode);
+                _activityLabel.Text = string.Format("{0}: {1}", id, string.IsNullOrEmpty(detail) ? state : detail);
+            });
+            return;
+        }
+        if (evType == "complete")
+        {
+            bool ok = evt.ContainsKey("ok") && Convert.ToBoolean(evt["ok"]);
+            SafeUi(delegate
             {
-                string etaTxt = eta.HasValue ? string.Format("{0:0}s", eta.Value) : "—";
-                _metricsLabel.Text = string.Format("Speed: {0}/s  •  Downloaded: {1}  •  ETA: {2}",
-                    FormatBytes((long)speed.Value), info, etaTxt);
-            }
-            SetActivity(string.Format("{0}: {1}", id, state));
-            UpdateRow(id, state, pct, info);
-            UpdateOverallProgress();
-        });
+                if (ok)
+                {
+                    _completedOk = true;
+                    SetOverall(100, "Verified");
+                    _cancelBtn.Enabled = false;
+                    _retryBtn.Enabled = false;
+                    _launchBtn.Enabled = true;
+                    _cloudOnlyCheck.Enabled = true;
+                    _activityLabel.Text = "Setup Complete — All required components verified.";
+                    AcceptButton = _launchBtn;
+
+                    long validated = Lng(evt, "required_validated") ?? 0;
+                    long installed = Lng(evt, "installed_count") ?? 0;
+                    long reused = Lng(evt, "reused_count") ?? 0;
+                    long skipped = Lng(evt, "skipped_count") ?? 0;
+                    double dur = Dbl(evt, "duration_seconds") ?? 0.0;
+                    var notices = evt.ContainsKey("optional_notices") ? evt["optional_notices"] as System.Collections.ArrayList : null;
+
+                    var sb = new StringBuilder();
+                    sb.AppendLine("Setup Complete");
+                    sb.AppendLine();
+                    sb.AppendFormat("• Validated Required Components: {0}\r\n", validated);
+                    sb.AppendFormat("• Newly Installed Components: {0}\r\n", installed);
+                    sb.AppendFormat("• Reused Existing Installations: {0}\r\n", reused);
+                    sb.AppendFormat("• Skipped Optional Components: {0}\r\n", skipped);
+                    sb.AppendFormat("• Total Setup Duration: {0:0.0}s\r\n", dur);
+                    if (notices != null && notices.Count > 0)
+                    {
+                        sb.AppendLine();
+                        sb.AppendLine("Optional Notices:");
+                        foreach (object n in notices) sb.AppendLine("  - " + Convert.ToString(n));
+                    }
+                    sb.AppendLine();
+                    sb.AppendLine("Click Launch Application to start AutoClip Studio.");
+                    _summaryBodyLabel.Text = sb.ToString();
+                    _compListPanel.Visible = false;
+                    _summaryPanel.Visible = true;
+                }
+                else
+                {
+                    _retryBtn.Enabled = true;
+                    _cancelBtn.Enabled = false;
+                    _cloudOnlyCheck.Enabled = true;
+                    _activityLabel.Text = "Setup failed: " + Str(evt, "error");
+                }
+            });
+        }
     }
 
     private string EnsureUvWithProgress()
     {
         string tools = Path.Combine(_root, "tools");
         string uv = Path.Combine(tools, "uv.exe");
-        SafeUi(delegate { UpdateRow("uv", "Checking", -1, ""); });
+        SafeUi(delegate { UpdateRow("uv", "Checking", 10, "Checking uv binary"); });
         if (File.Exists(uv))
         {
-            SafeUi(delegate { UpdateRow("uv", "Reused existing", 100, "Verified"); UpdateOverallProgress(); });
+            SafeUi(delegate { UpdateRow("uv", "Reused Existing Installation", 100, "Verified"); });
             return uv;
         }
         Directory.CreateDirectory(tools);
@@ -484,7 +1055,7 @@ internal sealed class SetupWizardForm : Form
         var release = manifest["uv"];
         string archive = Path.Combine(tools, "uv-bootstrap.zip");
         DownloadResumable("uv", release["url"], archive, release["sha256"]);
-        SafeUi(delegate { UpdateRow("uv", "Extracting", -1, "Extracting uv.exe"); });
+        SafeUi(delegate { UpdateRow("uv", "Configuring", 90, "Extracting uv.exe"); });
         using (var zip = ZipFile.OpenRead(archive))
         {
             foreach (var entry in zip.Entries)
@@ -498,7 +1069,7 @@ internal sealed class SetupWizardForm : Form
             }
         }
         File.Delete(archive);
-        SafeUi(delegate { UpdateRow("uv", "Ready", 100, "Ready"); UpdateOverallProgress(); });
+        SafeUi(delegate { UpdateRow("uv", "Ready", 100, "uv ready"); });
         return uv;
     }
 
@@ -528,7 +1099,6 @@ internal sealed class SetupWizardForm : Form
                         if (free < total.Value - existing)
                             throw new IOException("Insufficient disk space for " + Path.GetFileName(target));
                     }
-
                     long downloaded = existing;
                     var sw = Stopwatch.StartNew();
                     long lastTick = 0;
@@ -540,7 +1110,6 @@ internal sealed class SetupWizardForm : Form
                         while ((read = inStream.Read(buf, 0, buf.Length)) > 0)
                         {
                             _cts.Token.ThrowIfCancellationRequested();
-                            _pauseGate.Wait(_cts.Token);
                             outStream.Write(buf, 0, read);
                             downloaded += read;
                             if (sw.ElapsedMilliseconds - lastTick >= 120)
@@ -553,9 +1122,10 @@ internal sealed class SetupWizardForm : Form
                                 {
                                     int pct = tCopy.HasValue && tCopy.Value > 0 ? (int)Math.Min(100, dCopy * 100 / tCopy.Value) : -1;
                                     string sizeTxt = tCopy.HasValue ? FormatBytes(dCopy) + " / " + FormatBytes(tCopy.Value) : FormatBytes(dCopy);
-                                    _metricsLabel.Text = string.Format("Speed: {0}/s  •  Downloaded: {1}  •  ETA: {2}",
-                                        FormatBytes((long)speed), sizeTxt, eta.HasValue ? string.Format("{0:0}s", eta.Value) : "—");
+                                    _metricsLabel.Text = string.Format("Transfer: {0}  •  Speed: {1}/s  •  ETA: {2}",
+                                        sizeTxt, FormatBytes((long)speed), eta.HasValue ? FormatSeconds((long)Math.Round(eta.Value)) : "—");
                                     UpdateRow(compId, "Downloading", pct, sizeTxt);
+                                    if (pct >= 0) SetOverall(Math.Max(_overallPercent, 16 + (pct * 6) / 100), "Measured");
                                 });
                                 lastTick = sw.ElapsedMilliseconds;
                             }
@@ -564,11 +1134,10 @@ internal sealed class SetupWizardForm : Form
                 }
                 if (!string.IsNullOrEmpty(expectedSha256))
                 {
-                    SafeUi(delegate { UpdateRow(compId, "Verifying", 100, "SHA-256"); });
+                    SafeUi(delegate { UpdateRow(compId, "Verifying", 100, "Verifying SHA-256"); });
                     using (var fs = File.OpenRead(part))
                     {
-                        string actual = Sha256Hex(fs);
-                        if (!string.Equals(actual, expectedSha256, StringComparison.OrdinalIgnoreCase))
+                        if (!string.Equals(Sha256Hex(fs), expectedSha256, StringComparison.OrdinalIgnoreCase))
                         {
                             File.Delete(part);
                             throw new IOException("SHA-256 verification failed for " + Path.GetFileName(target));
@@ -588,41 +1157,88 @@ internal sealed class SetupWizardForm : Form
         }
     }
 
+    private void UpdateStage(string id, int index, string state, string detail, long? overallPct, string mode = "Estimated")
+    {
+        SafeUi(delegate
+        {
+            _currentStageIndex = index;
+            _stepSubtitleLabel.Text = string.Format("Step {0} of {1}  •  {2}", index, _totalStages, detail);
+            StageRow row;
+            if (_stageMap.TryGetValue(id, out row))
+            {
+                row.State = state;
+                row.StateLabel.Text = state;
+                if (state == "Completed")
+                {
+                    row.StepBadge.BackColor = _pal.GreenOk;
+                    row.StepBadge.ForeColor = Color.White;
+                    row.StateLabel.ForeColor = _pal.GreenOk;
+                }
+                else if (state == "Failed")
+                {
+                    row.StepBadge.BackColor = _pal.RoseError;
+                    row.StepBadge.ForeColor = Color.White;
+                    row.StateLabel.ForeColor = _pal.RoseError;
+                }
+                else if (state == "Running" || state == "Checking" || state == "Verifying")
+                {
+                    row.StepBadge.BackColor = _pal.RedPrimary;
+                    row.StepBadge.ForeColor = Color.White;
+                    row.StateLabel.ForeColor = _pal.RedPrimary;
+                }
+                else
+                {
+                    row.StepBadge.BackColor = _pal.Elevated;
+                    row.StepBadge.ForeColor = _pal.TextMuted;
+                    row.StateLabel.ForeColor = _pal.TextMuted;
+                }
+            }
+            if (overallPct.HasValue) SetOverall((int)overallPct.Value, mode);
+        });
+    }
+
     private void UpdateRow(string id, string state, int percent, string detail)
     {
         ComponentRow row;
         if (!_rowMap.TryGetValue(id, out row)) return;
         row.State = state;
         row.StateLabel.Text = state;
-        row.StateLabel.ForeColor = state == "Failed" ? RedPrimary
-            : (state == "Ready" || state == "Reused existing") ? GreenOk
-            : (state == "Downloading" || state == "Installing" || state == "Extracting" || state == "Verifying") ? AmberWarn
-            : TextMuted;
+        row.StateLabel.ForeColor = state == "Failed" ? _pal.RoseError
+            : (state == "Ready" || state == "Reused Existing Installation") ? _pal.GreenOk
+            : (state == "Downloading" || state == "Installing" || state == "Configuring" || state == "Verifying" || state == "Checking") ? _pal.RedPrimary
+            : _pal.TextMuted;
         if (!string.IsNullOrEmpty(detail)) row.DetailLabel.Text = detail;
-        if (percent < 0)
-        {
-            row.Progress.Style = ProgressBarStyle.Marquee;
-        }
-        else
-        {
-            row.Progress.Style = ProgressBarStyle.Continuous;
-            row.Progress.Value = Math.Max(0, Math.Min(100, percent));
-        }
+        row.Indeterminate = percent < 0;
+        if (percent >= 0) row.Percent = Math.Max(0, Math.Min(100, percent));
+        row.BarPanel.Invalidate();
     }
 
-    private void UpdateOverallProgress()
+    private void SetOverall(int percent, string mode)
     {
-        if (_rows.Count == 0) return;
-        int done = 0;
-        foreach (var row in _rows)
-        {
-            if (row.State == "Ready" || row.State == "Reused existing") done++;
-        }
-        _completedLabel.Text = string.Format("{0} / {1} components ready", done, _rows.Count);
-        _overallBar.Value = Math.Min(100, (done * 100) / _rows.Count);
+        int clamped = _completedOk ? 100 : Math.Max(_overallPercent, Math.Min(99, percent));
+        _overallPercent = clamped;
+        _overallMode = string.IsNullOrEmpty(mode) ? _overallMode : char.ToUpper(mode[0]) + mode.Substring(1);
+        _overallPctLabel.Text = string.Format("{0}%  •  {1}", _overallPercent, _overallMode);
+        _overallBar.Invalidate();
     }
 
-    private void SetActivity(string text) { _activityLabel.Text = text; }
+    private void AppendLog(string message)
+    {
+        string clean = Redact(message);
+        _log(clean);
+        string line = DateTimeOffset.Now.ToString("HH:mm:ss") + " " + clean;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(_setupLogPath));
+            File.AppendAllText(_setupLogPath, line + Environment.NewLine, Encoding.UTF8);
+        }
+        catch { }
+        SafeUi(delegate
+        {
+            _logBuffer.AppendLine(line);
+            _logTextBox.AppendText(line + Environment.NewLine);
+        });
+    }
 
     private void SafeUi(Action action)
     {
@@ -635,18 +1251,56 @@ internal sealed class SetupWizardForm : Form
     {
         try
         {
-            return LauncherRunPython("-c", "import sys; sys.exit(0 if (3,11) <= sys.version_info[:2] < (3,13) else 1)") == 0;
+            using (var p = _job.Start(_python, new[] { "-c", "import sys; sys.exit(0 if (3,11) <= sys.version_info[:2] < (3,13) else 1)" }, _root, null))
+            {
+                p.Wait(uint.MaxValue);
+                return p.ExitCode() == 0;
+            }
         }
         catch { return false; }
     }
 
-    private int LauncherRunPython(params string[] args)
+    private string ResolveLogoPath()
     {
-        using (var p = _job.Start(_python, args, _root, null))
+        foreach (string candidate in new[]
         {
-            p.Wait(uint.MaxValue);
-            return p.ExitCode();
+            Path.Combine(_root, "autoclip_studio", "assets", "AutoClipTrans.png"),
+            Path.Combine(_root, "autoclip_studio", "assets", "symbol.png"),
+            Path.Combine(_root, "AutoClipTrans.png")
+        })
+        {
+            if (File.Exists(candidate)) return candidate;
         }
+        return null;
+    }
+
+    private string ResolveSetupLogPath()
+    {
+        string configured = Environment.GetEnvironmentVariable("AUTOCLIP_DATA_DIR");
+        string dataRoot = string.IsNullOrWhiteSpace(configured)
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AutoClip", "AutoClip Studio")
+            : Path.GetFullPath(Path.IsPathRooted(configured) ? configured : Path.Combine(_root, configured));
+        return Path.Combine(dataRoot, "logs", "setup.log");
+    }
+
+    private static string ReadCpuName()
+    {
+        try
+        {
+            using (var key = Registry.LocalMachine.OpenSubKey(@"HARDWARE\DESCRIPTION\System\CentralProcessor\0"))
+            {
+                object val = key != null ? key.GetValue("ProcessorNameString") : null;
+                if (val != null) return val.ToString().Trim();
+            }
+        }
+        catch { }
+        return Environment.GetEnvironmentVariable("PROCESSOR_IDENTIFIER") ?? "x86_64 CPU";
+    }
+
+    private static long ReadTotalRamBytes()
+    {
+        var st = new MEMORYSTATUSEX { dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX)) };
+        return GlobalMemoryStatusEx(ref st) ? (long)st.ullTotalPhys : 0;
     }
 
     private static string DetectNvidiaGpu()
@@ -665,6 +1319,32 @@ internal sealed class SetupWizardForm : Form
             }
         }
         catch { return null; }
+    }
+
+    private static string Redact(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        return SecretRegex.Replace(text, delegate(Match m)
+        {
+            return m.Groups[1].Success ? m.Groups[1].Value + "[REDACTED]" : "[REDACTED]";
+        });
+    }
+
+    private static string Str(Dictionary<string, object> d, string k)
+    {
+        return d.ContainsKey(k) && d[k] != null ? Convert.ToString(d[k]) : "";
+    }
+
+    private static long? Lng(Dictionary<string, object> d, string k)
+    {
+        if (!d.ContainsKey(k) || d[k] == null) return null;
+        return Convert.ToInt64(d[k]);
+    }
+
+    private static double? Dbl(Dictionary<string, object> d, string k)
+    {
+        if (!d.ContainsKey(k) || d[k] == null) return null;
+        return Convert.ToDouble(d[k]);
     }
 
     private static string QuoteArgs(string[] args)
@@ -691,5 +1371,11 @@ internal sealed class SetupWizardForm : Form
         int idx = 0;
         while (val >= 1024 && idx < units.Length - 1) { val /= 1024; idx++; }
         return idx < 2 ? string.Format("{0:0} {1}", val, units[idx]) : string.Format("{0:0.0} {1}", val, units[idx]);
+    }
+
+    private static string FormatSeconds(long sec)
+    {
+        if (sec < 60) return sec + "s";
+        return string.Format("{0}m {1:00}s", sec / 60, sec % 60);
     }
 }

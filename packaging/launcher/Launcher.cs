@@ -82,13 +82,8 @@ internal static class Launcher
         if (stop.WaitOne(0)) return 0;
         if (option == "--setup" || !ready)
         {
-            if (option != "--setup" && MessageBox.Show(
-                "Some required AutoClip Studio components need first-time setup or repair.\n\n" +
-                "Open the Setup Wizard to inspect and install missing dependencies?\n\n" +
-                "Details: " + LogPath, Title, MessageBoxButtons.YesNo, MessageBoxIcon.Information) != DialogResult.Yes)
-                return 1;
             if (!RunSetupDialog(job, stop)) return 1;
-            if (option == "--setup" || stop.WaitOne(0)) return 0;
+            if (stop.WaitOne(0)) return 0;
         }
 
         Environment.SetEnvironmentVariable("AUTOCLIP_MANAGED_LAUNCH", "1");

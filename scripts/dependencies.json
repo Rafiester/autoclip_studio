@@ -114,6 +114,7 @@
       "version": "2026.11.23",
       "version_policy": "minimum",
       "category": "youtube_downloader",
+      "stage_id": "media_tools",
       "install_path": ".venv/Lib/site-packages/yt_dlp",
       "download_url": "https://pypi.org/project/yt-dlp/",
       "sha256": "",
@@ -122,6 +123,22 @@
       "mandatory": true,
       "hardware_requirement": "any",
       "integrity_method": "package_metadata"
+    },
+    {
+      "id": "js_runtime",
+      "name": "JavaScript Runtime (Deno / Node.js for YouTube EJS)",
+      "version": "system",
+      "version_policy": "optional",
+      "category": "youtube_downloader",
+      "stage_id": "media_tools",
+      "install_path": "",
+      "download_url": "https://deno.com/",
+      "sha256": "",
+      "download_size_bytes": 0,
+      "estimated_installed_bytes": 0,
+      "mandatory": false,
+      "hardware_requirement": "any",
+      "integrity_method": "version_probe"
     },
     {
       "id": "whisper_engine",
