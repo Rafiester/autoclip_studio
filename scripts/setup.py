@@ -7,9 +7,11 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.error
@@ -21,9 +23,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
-UV = TOOLS / "uv.exe"
-PYTHON = ROOT / ".venv" / "Scripts" / "python.exe"
-PYTHONW = PYTHON.with_name("pythonw.exe")
+UV = TOOLS / ("uv.exe" if os.name == "nt" else "uv")
+PYTHON = ROOT / ".venv" / ("Scripts" if os.name == "nt" else "bin") / ("python.exe" if os.name == "nt" else "python3")
+PYTHONW = PYTHON.with_name("pythonw.exe") if os.name == "nt" else PYTHON
 FFMPEG = TOOLS / "ffmpeg"
 REQUIREMENTS = ROOT / "requirements.txt"
 MANIFEST = ROOT / "scripts" / "dependencies.json"
@@ -125,25 +127,47 @@ def ensure_uv() -> None:
     if UV.is_file():
         _emit("progress", id="uv", state="Reused existing")
         return
-    pins = json.loads(TOOLCHAIN.read_text(encoding="utf-8"))["uv"]
+    if sys.platform == "darwin" and (found := shutil.which("uv")):
+        _emit("progress", id="uv", state="Reused existing", detail=found)
+        return
+    tc = json.loads(TOOLCHAIN.read_text(encoding="utf-8"))
+    pins = tc["uv_macos_arm64"] if sys.platform == "darwin" else tc["uv"]
     TOOLS.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(dir=TOOLS, prefix="uv-") as directory:
-        archive = Path(directory) / "uv.zip"
-        download(pins["url"], archive, pins["sha256"], component="uv")
+        ext = ".tar.gz" if sys.platform == "darwin" else ".zip"
+        archive = Path(directory) / f"uv{ext}"
+        download(pins["url"], archive, pins.get("sha256") or None, component="uv")
         _emit("progress", id="uv", state="Extracting")
-        with zipfile.ZipFile(archive) as payload:
-            member = next(name for name in payload.namelist() if Path(name).name == "uv.exe")
-            executable = Path(directory) / "uv.exe"
-            with payload.open(member) as source, executable.open("wb") as target:
-                shutil.copyfileobj(source, target)
-        executable.replace(UV)
+        if ext == ".tar.gz":
+            with tarfile.open(archive, "r:gz") as tar:
+                member = next(m for m in tar.getmembers() if Path(m.name).name == "uv")
+                src = tar.extractfile(member)
+                assert src is not None
+                executable = Path(directory) / "uv"
+                with src, executable.open("wb") as target:
+                    shutil.copyfileobj(src, target)
+            os.chmod(executable, 0o755)
+            executable.replace(UV)
+        else:
+            with zipfile.ZipFile(archive) as payload:
+                member = next(name for name in payload.namelist() if Path(name).name == "uv.exe")
+                executable = Path(directory) / "uv.exe"
+                with payload.open(member) as source, executable.open("wb") as target:
+                    shutil.copyfileobj(source, target)
+            executable.replace(UV)
     _emit("progress", id="uv", state="Ready")
 
 
 def media_tool_problems() -> list[str]:
     problems = []
+    suffix = ".exe" if os.name == "nt" else ""
     for name in ("ffmpeg", "ffprobe"):
-        executable = FFMPEG / "bin" / f"{name}.exe"
+        executable = FFMPEG / "bin" / f"{name}{suffix}"
+        if not executable.is_file() and os.name != "nt":
+            for candidate in (Path("/opt/homebrew/bin") / name, Path("/usr/local/bin") / name):
+                if candidate.is_file():
+                    executable = candidate
+                    break
         if executable.is_file():
             try:
                 output = run(executable, "-version", capture=True, timeout=10)
@@ -159,16 +183,29 @@ def media_tool_problems() -> list[str]:
     return problems
 
 
+def _marker_applies(marker: str) -> bool:
+    if not marker.strip():
+        return True
+    arch = platform.machine().lower()
+    if 'sys_platform == "win32"' in marker and sys.platform != "win32":
+        return False
+    if 'sys_platform == "darwin"' in marker and sys.platform != "darwin":
+        return False
+    if 'platform_machine == "arm64"' in marker and arch not in {"arm64", "aarch64"}:
+        return False
+    return True
+
+
 def check() -> list[str]:
     problems = []
     if not ((3, 11) <= sys.version_info[:2] < (3, 13)):
         problems.append("Python 3.11 or 3.12 is required")
     if not PYTHONW.is_file():
-        problems.append("The project's windowed Python interpreter is missing")
+        problems.append("The project's Python interpreter is missing")
     for line in REQUIREMENTS.read_text(encoding="utf-8").splitlines():
         requirement, _, marker = line.partition(";")
         name, separator, expected = requirement.strip().partition("==")
-        if not separator or ('sys_platform == "win32"' in marker and sys.platform != "win32"):
+        if not separator or not _marker_applies(marker):
             continue
         try:
             installed = importlib.metadata.version(name)
@@ -185,6 +222,15 @@ def ensure_ffmpeg() -> None:
     if not media_tool_problems():
         _emit("progress", id="ffmpeg", state="Reused existing")
         return
+    if sys.platform == "darwin":
+        brew = shutil.which("brew") or ("/opt/homebrew/bin/brew" if Path("/opt/homebrew/bin/brew").is_file() else None)
+        if brew:
+            _emit("progress", id="ffmpeg", state="Installing", detail="Installing ffmpeg via Homebrew")
+            run(brew, "install", "ffmpeg")
+            if not media_tool_problems():
+                _emit("progress", id="ffmpeg", state="Ready")
+                return
+        raise RuntimeError("FFmpeg is missing on macOS. Install via Homebrew (`brew install ffmpeg`) with VideoToolbox and libass support.")
     if not _JSON_PROGRESS:
         print("Preparing FFmpeg and ffprobe...", flush=True)
     comp = _manifest_component("ffmpeg")

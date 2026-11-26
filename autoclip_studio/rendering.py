@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from tempfile import mkstemp
 from typing import Callable
@@ -78,23 +79,32 @@ def render_clip(source: Path, highlight: Highlight, transcript: Transcript,
     os.close(descriptor)
     staging = Path(staging_path)
     try:
-        can_use_nvenc = False
+        encoder = "cpu"
         if hardware:
             if encoder_support is None:
-                can_use_nvenc = nvenc_available(manager)
+                encoder = detect_hw_encoder(manager)
             else:
-                if base[0] not in encoder_support:
-                    encoder_support[base[0]] = nvenc_available(manager)
-                can_use_nvenc = encoder_support[base[0]]
+                key = f"{base[0]}:{sys.platform}"
+                if key not in encoder_support:
+                    encoder_support[key] = detect_hw_encoder(manager)
+                encoder = str(encoder_support[key])
         nvenc_preset = profile_limits.nvenc_preset if profile_limits else "p5"
         cpu_preset = profile_limits.cpu_preset if profile_limits else "medium"
-        if can_use_nvenc:
+        if encoder == "nvenc":
             command = base + ["-c:v", "h264_nvenc", "-preset", nvenc_preset, "-cq", "21", str(staging)]
             try:
                 log(f"Rendering with NVIDIA NVENC ({nvenc_preset})")
                 manager.run(command, cwd=work_dir, on_output=_ffmpeg_logger(log), output_tail=50)
             except subprocess.CalledProcessError as error:
                 log(f"NVENC failed; retrying with CPU encoder ({_last_line(error.output)})")
+                _render_cpu(base, staging, work_dir, manager, log, preset=cpu_preset)
+        elif encoder == "videotoolbox":
+            command = base + ["-c:v", "h264_videotoolbox", "-q:v", "65", str(staging)]
+            try:
+                log("Rendering with Apple VideoToolbox (h264_videotoolbox)")
+                manager.run(command, cwd=work_dir, on_output=_ffmpeg_logger(log), output_tail=50)
+            except subprocess.CalledProcessError as error:
+                log(f"VideoToolbox failed; retrying with CPU encoder ({_last_line(error.output)})")
                 _render_cpu(base, staging, work_dir, manager, log, preset=cpu_preset)
         else:
             log(f"Rendering with CPU encoder ({cpu_preset})")
@@ -116,6 +126,8 @@ def _render_cpu(base: list[str], output: Path, work_dir: Path,
 
 
 def nvenc_available(manager: ProcessManager) -> bool:
+    if sys.platform == "darwin":
+        return False
     try:
         manager.run([
             find_media_tool("ffmpeg"), "-hide_banner", "-loglevel", "error",
@@ -126,6 +138,27 @@ def nvenc_available(manager: ProcessManager) -> bool:
     except (OSError, subprocess.CalledProcessError):
         return False
     return True
+
+
+def videotoolbox_available(manager: ProcessManager) -> bool:
+    if sys.platform != "darwin":
+        return False
+    try:
+        manager.run([
+            find_media_tool("ffmpeg"), "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=size=640x480:rate=30", "-frames:v", "1",
+            "-pix_fmt", "yuv420p", "-c:v", "h264_videotoolbox",
+            "-f", "null", "-",
+        ], output_tail=20)
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    return True
+
+
+def detect_hw_encoder(manager: ProcessManager) -> str:
+    if sys.platform == "darwin":
+        return "videotoolbox" if videotoolbox_available(manager) else "cpu"
+    return "nvenc" if nvenc_available(manager) else "cpu"
 
 
 def _ffmpeg_logger(log: Callable[[str], None]) -> Callable[[str], None]:

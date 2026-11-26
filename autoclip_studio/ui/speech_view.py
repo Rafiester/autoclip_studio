@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict
+import os
 from pathlib import Path
 from typing import Callable
 
@@ -123,8 +124,9 @@ class SpeechSettingsView(QWidget):
         form = QFormLayout(self)
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.engine = QComboBox()
-        for name, value in (("Auto", "auto"), ("Purfview Faster-Whisper-XXL", "purfview"),
-                            ("Python Faster-Whisper", "python")):
+        engines = [("Auto", "auto"), ("Purfview Faster-Whisper-XXL", "purfview"),
+                   ("Python Faster-Whisper", "python"), ("MLX Whisper (Apple Silicon)", "mlx")]
+        for name, value in engines:
             self.engine.addItem(name, value)
         self.engine.setCurrentIndex(max(0, self.engine.findData(current.engine)))
         self.model = self._combo(MODELS, settings.data["whisper_model"])
@@ -186,8 +188,9 @@ class SpeechSettingsView(QWidget):
         browse = QPushButton("Browse")
 
         def choose() -> None:
+            exe_filter = "Windows executable (*.exe)" if os.name == "nt" else "All files (*)"
             path = (QFileDialog.getExistingDirectory(self, label, field.text()) if directory else
-                    QFileDialog.getOpenFileName(self, label, field.text(), "Windows executable (*.exe)")[0])
+                    QFileDialog.getOpenFileName(self, label, field.text(), exe_filter)[0])
             if path:
                 field.setText(path)
 

@@ -61,19 +61,32 @@ TEMPLATE_DEFAULT = "Impact"
 
 @lru_cache(maxsize=1)
 def _installed_fonts() -> set[str]:
-    if os.name != "nt":
-        return set()
-    import winreg
+    if os.name == "nt":
+        import winreg
+
+        fonts: set[str] = set()
+        for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+            try:
+                with winreg.OpenKey(hive, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts") as key:
+                    for index in range(winreg.QueryInfoKey(key)[1]):
+                        name = winreg.EnumValue(key, index)[0]
+                        fonts.add(name.split(" (", 1)[0].casefold())
+            except OSError:
+                continue
+        return fonts
 
     fonts: set[str] = set()
-    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
-        try:
-            with winreg.OpenKey(hive, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts") as key:
-                for index in range(winreg.QueryInfoKey(key)[1]):
-                    name = winreg.EnumValue(key, index)[0]
-                    fonts.add(name.split(" (", 1)[0].casefold())
-        except OSError:
+    for directory in (
+        Path("/System/Library/Fonts"),
+        Path("/Library/Fonts"),
+        Path.home() / "Library" / "Fonts",
+        Path("/usr/share/fonts"),
+    ):
+        if not directory.is_dir():
             continue
+        for item in directory.rglob("*"):
+            if item.suffix.lower() in {".ttf", ".otf", ".ttc"}:
+                fonts.add(item.stem.casefold())
     return fonts
 
 
@@ -81,11 +94,22 @@ def template_font(template: CaptionTemplate) -> str:
     fonts = _installed_fonts()
     if not fonts or template.font.casefold() in fonts:
         return template.font
-    fallback = {"Arial Rounded MT Bold": "Arial", "Segoe UI Black": "Segoe UI", "Georgia": "Times New Roman"}
-    for family in (fallback.get(template.font, "Arial"), "Segoe UI", "Arial"):
+    if os.name == "nt":
+        fallback = {"Arial Rounded MT Bold": "Arial", "Segoe UI Black": "Segoe UI", "Georgia": "Times New Roman"}
+        candidates = (fallback.get(template.font, "Arial"), "Segoe UI", "Arial")
+    else:
+        fallback = {
+            "Segoe UI": "Helvetica Neue",
+            "Segoe UI Black": "Arial Black",
+            "Consolas": "Menlo",
+            "Trebuchet MS": "Helvetica Neue",
+            "Arial Rounded MT Bold": "Arial",
+        }
+        candidates = (fallback.get(template.font, "Helvetica Neue"), "Helvetica Neue", "Arial")
+    for family in candidates:
         if family.casefold() in fonts:
             return family
-    return "Arial"
+    return "Helvetica Neue" if os.name != "nt" else "Arial"
 
 
 def _cs(seconds: float) -> int:

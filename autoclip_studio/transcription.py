@@ -7,6 +7,7 @@ import math
 import os
 import re
 import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from importlib.metadata import version
 from pathlib import Path
@@ -21,8 +22,19 @@ from .performance import ProfileLimits
 from .process import CancelledError, ProcessManager
 from .speech_engine import (
     GpuInfo, Purfview, SpeechSettings, choose_compute, download_speech_model, find_executable,
-    find_model, gpu_info, inspect_purfview, model_cache_root, python_cuda as _python_cuda, stage_model,
+    find_model, gpu_info, inspect_purfview, mlx_whisper_available, model_cache_root,
+    python_cuda as _python_cuda, stage_model,
 )
+
+MLX_REPOS = {
+    "tiny": "mlx-community/whisper-tiny-mlx",
+    "base": "mlx-community/whisper-base-mlx",
+    "small": "mlx-community/whisper-small-mlx",
+    "medium": "mlx-community/whisper-medium-mlx",
+    "large-v2": "mlx-community/whisper-large-v2-mlx",
+    "large-v3": "mlx-community/whisper-large-v3-mlx",
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+}
 
 
 _XXL_PROGRESS = re.compile(r"^\s*\d+%\s*\|\s*(\d+)\s*/\s*(\d+)\s*\|\s*([\d:]+)<<([\d:]+)\s*\|\s*([\d.]+)\s+audio seconds/s")
@@ -148,6 +160,34 @@ def transcribe(media_path: Path, model_name: str, device_preference: str,
     reporter = _Reporter(model_name, progress)
     reporter.emit("Checking speech engine")
     manager.check_cancelled()
+    if sys.platform == "darwin" and device_preference != "cpu" and settings.engine in {"auto", "mlx"} and mlx_whisper_available():
+        repo = MLX_REPOS.get(model_name, f"mlx-community/whisper-{model_name}-mlx")
+        reporter.engine = "MLX Whisper (Apple Silicon)"
+        reporter.device = "mlx"
+        reporter.compute = "float16"
+        try:
+            mlx_id = f"mlx-whisper:{version('mlx-whisper')}:{repo}:{(settings.vad, settings.word_timestamps)}"
+            cache_path = transcript_cache_path(media_path, model_name, language, identity=mlx_id) if cache else None
+            if cache_path is not None and (cached := _get_cache(cache_path)):
+                log(f"Using cached MLX transcript ({len(cached.segments)} segments)")
+                reporter.emit("Using cached transcript")
+                return cached
+            offset, audio_duration, video_duration = _audio_timing(media_path, manager)
+            log(f"Loading MLX Whisper {model_name} on Apple Silicon ({repo})")
+            reporter.emit("Loading model", duration=audio_duration)
+            entries, detected, duration = _run_mlx_whisper(repo, media_path, language, settings, manager, reporter)
+            transcript = _validated_transcript(entries, detected, duration, offset, video_duration, log)
+            if cache_path is not None:
+                _cache(cache_path, transcript)
+            reporter.emit("Transcription complete", processed=duration, duration=duration, reliable=True)
+            return transcript
+        except CancelledError:
+            raise
+        except Exception as error:
+            if settings.engine == "mlx" or not settings.cpu_fallback:
+                raise
+            log(f"MLX Whisper unavailable or failed ({error}); falling back to Python Faster-Whisper CPU")
+
     gpu = gpu_info() if device_preference != "cpu" else None
     executable = find_executable(settings.executable) if settings.engine != "python" else None
     model_path = find_model(model_name, settings, executable)
@@ -297,6 +337,48 @@ def _run_python(model_name: str | Path, media_path: Path, device: str, compute: 
             iterator.close()
         model.model.unload_model()
         del model
+        gc.collect()
+
+
+def _run_mlx_whisper(repo: str, media_path: Path, language: str | None, settings: SpeechSettings,
+                     manager: ProcessManager, reporter: _Reporter) -> tuple[list[dict], str, float]:
+    import mlx_whisper
+
+    reporter.emit("Transcribing speech on Apple Silicon")
+    manager.check_cancelled()
+    try:
+        kwargs: dict[str, object] = {
+            "path_or_hf_repo": repo,
+            "word_timestamps": settings.word_timestamps,
+        }
+        if language:
+            kwargs["language"] = language
+        result = mlx_whisper.transcribe(str(media_path), **kwargs)
+        manager.check_cancelled()
+        segments = result.get("segments") or []
+        entries = []
+        last_end = 0.0
+        for item in segments:
+            end = float(item.get("end") or 0.0)
+            last_end = max(last_end, end)
+            entries.append({
+                "start": item.get("start"),
+                "end": item.get("end"),
+                "text": item.get("text", ""),
+                "no_speech_prob": item.get("no_speech_prob"),
+                "avg_logprob": item.get("avg_logprob"),
+                "words": [
+                    {"start": w.get("start"), "end": w.get("end"), "word": w.get("word", "")}
+                    for w in (item.get("words") or [])
+                ],
+            })
+        return entries, str(result.get("language") or language or "unknown"), last_end
+    finally:
+        try:
+            import mlx.core as mx
+            mx.metal.clear_cache()
+        except Exception:
+            pass
         gc.collect()
 
 

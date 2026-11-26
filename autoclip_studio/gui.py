@@ -1274,7 +1274,7 @@ def run() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("AutoClip Studio")
     app.setOrganizationName("AutoClip")
-    icon_path = asset_path("autoclip.ico")
+    icon_path = asset_path("autoclip.icns" if sys.platform == "darwin" else "autoclip.ico")
     symbol_path = asset_path("symbol.png")
     launcher = APP_ROOT / "AutoClipStudio.exe"
     if icon_path.is_file():

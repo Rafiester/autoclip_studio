@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
 from typing import Callable
+
+from .platform_utils import detect_platform
 
 try:
     import psutil
@@ -56,6 +59,8 @@ class HardwareSnapshot:
     gpu_power_w: float | None = None
     cpu_temp_c: float | None = None
     gaming_active: bool = False
+    unified_memory: bool = False
+    gpu_backend: str = "none"
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +83,41 @@ def resolve_profile_limits(profile: str, snapshot: HardwareSnapshot) -> ProfileL
     vram_mib = snapshot.vram_total_mib or 0
     free_vram_mib = snapshot.vram_free_mib if snapshot.vram_free_mib is not None else vram_mib
     avail_ram_mib = snapshot.ram_available_mib if snapshot.ram_available_mib is not None else 4096
+    total_ram_mib = snapshot.ram_total_mib if snapshot.ram_total_mib is not None else 16384
+
+    if snapshot.unified_memory:
+        if selected == "eco":
+            return ProfileLimits(
+                profile="eco",
+                cpu_threads=max(2, physical // 2),
+                ffmpeg_threads=max(2, physical // 2),
+                whisper_batch_size=2,
+                tracking_sample_interval=1.0,
+                nvenc_preset="videotoolbox",
+                cpu_preset="medium",
+                subprocess_priority_flags=0,
+            )
+        if selected == "turbo":
+            return ProfileLimits(
+                profile="turbo",
+                cpu_threads=max(2, logical),
+                ffmpeg_threads=max(2, logical),
+                whisper_batch_size=6 if total_ram_mib >= 15000 and avail_ram_mib >= 4000 else 4,
+                tracking_sample_interval=0.5,
+                nvenc_preset="videotoolbox",
+                cpu_preset="fast",
+                subprocess_priority_flags=0,
+            )
+        return ProfileLimits(
+            profile="balanced",
+            cpu_threads=max(2, physical),
+            ffmpeg_threads=max(2, physical),
+            whisper_batch_size=4 if total_ram_mib >= 15000 and avail_ram_mib >= 3000 else 2,
+            tracking_sample_interval=0.75,
+            nvenc_preset="videotoolbox",
+            cpu_preset="medium",
+            subprocess_priority_flags=0,
+        )
 
     if selected == "eco":
         cpu_threads = max(2, physical // 2)
@@ -207,36 +247,43 @@ class HardwareMonitor:
         gpu_name = None
         gpu_util_percent = vram_total_mib = vram_used_mib = vram_free_mib = gpu_temp_c = None
         gpu_power_w = None
+        pinfo = detect_platform()
+        unified_memory = pinfo.is_apple_silicon
+        gpu_backend = "apple-silicon" if pinfo.is_apple_silicon else "none"
+        if pinfo.is_apple_silicon:
+            gpu_name = f"{pinfo.cpu_brand} (Apple Silicon GPU)"
 
-        with self._lock:
-            if self._ensure_nvml() and self._gpu_handle is not None:
-                try:
-                    raw_name = pynvml.nvmlDeviceGetName(self._gpu_handle)
-                    gpu_name = raw_name.decode("utf-8", "replace") if isinstance(raw_name, bytes) else str(raw_name)
-                except Exception:
-                    pass
-                try:
-                    mem = pynvml.nvmlDeviceGetMemoryInfo(self._gpu_handle)
-                    vram_total_mib = int(mem.total // (1024 * 1024))
-                    vram_used_mib = int(mem.used // (1024 * 1024))
-                    vram_free_mib = int(mem.free // (1024 * 1024))
-                except Exception:
-                    pass
-                try:
-                    util = pynvml.nvmlDeviceGetUtilizationRates(self._gpu_handle)
-                    gpu_util_percent = int(util.gpu)
-                except Exception:
-                    pass
-                try:
-                    gpu_temp_c = int(pynvml.nvmlDeviceGetTemperature(self._gpu_handle, pynvml.NVML_TEMPERATURE_GPU))
-                except Exception:
-                    pass
-                try:
-                    gpu_power_w = round(pynvml.nvmlDeviceGetPowerUsage(self._gpu_handle) / 1000.0, 1)
-                except Exception:
-                    pass
+        if not pinfo.is_macos:
+            with self._lock:
+                if self._ensure_nvml() and self._gpu_handle is not None:
+                    gpu_backend = "nvidia"
+                    try:
+                        raw_name = pynvml.nvmlDeviceGetName(self._gpu_handle)
+                        gpu_name = raw_name.decode("utf-8", "replace") if isinstance(raw_name, bytes) else str(raw_name)
+                    except Exception:
+                        pass
+                    try:
+                        mem = pynvml.nvmlDeviceGetMemoryInfo(self._gpu_handle)
+                        vram_total_mib = int(mem.total // (1024 * 1024))
+                        vram_used_mib = int(mem.used // (1024 * 1024))
+                        vram_free_mib = int(mem.free // (1024 * 1024))
+                    except Exception:
+                        pass
+                    try:
+                        util = pynvml.nvmlDeviceGetUtilizationRates(self._gpu_handle)
+                        gpu_util_percent = int(util.gpu)
+                    except Exception:
+                        pass
+                    try:
+                        gpu_temp_c = int(pynvml.nvmlDeviceGetTemperature(self._gpu_handle, pynvml.NVML_TEMPERATURE_GPU))
+                    except Exception:
+                        pass
+                    try:
+                        gpu_power_w = round(pynvml.nvmlDeviceGetPowerUsage(self._gpu_handle) / 1000.0, 1)
+                    except Exception:
+                        pass
 
-        gaming_active = is_process_running(gaming_process) if gaming_process else False
+        gaming_active = is_process_running(gaming_process) if (gaming_process and pinfo.is_windows) else False
         return HardwareSnapshot(
             cpu_percent=cpu_percent,
             cpu_physical=cpu_physical,
@@ -251,8 +298,10 @@ class HardwareMonitor:
             vram_free_mib=vram_free_mib,
             gpu_temp_c=gpu_temp_c,
             gpu_power_w=gpu_power_w,
-            cpu_temp_c=None,  # Unavailable via standard user-mode Windows APIs without fabricating
+            cpu_temp_c=None,  # Unavailable via standard user-mode APIs without fabricating
             gaming_active=gaming_active,
+            unified_memory=unified_memory,
+            gpu_backend=gpu_backend,
         )
 
     def should_pause_for_thermal(self, settings: PerformanceSettings, snap: HardwareSnapshot) -> bool:

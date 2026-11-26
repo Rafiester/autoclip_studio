@@ -140,8 +140,24 @@
       "download_size_bytes": null,
       "estimated_installed_bytes": 0,
       "mandatory": false,
+      "platforms": ["windows"],
       "hardware_requirement": "nvidia-gpu",
       "integrity_method": "version_probe"
+    },
+    {
+      "id": "mlx_whisper",
+      "name": "MLX & MLX Whisper (Apple Silicon)",
+      "version": "0.4.2",
+      "category": "speech",
+      "install_path": ".venv/lib/python3.12/site-packages/mlx_whisper",
+      "download_url": "https://pypi.org/project/mlx-whisper/",
+      "sha256": "",
+      "download_size_bytes": null,
+      "estimated_installed_bytes": 180000000,
+      "mandatory": true,
+      "platforms": ["macos"],
+      "hardware_requirement": "apple-silicon",
+      "integrity_method": "package_metadata"
     },
     {
       "id": "whisper_model_large_v3_turbo",

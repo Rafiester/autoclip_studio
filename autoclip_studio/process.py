@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .paths import bundled_binary
+from .platform_utils import subprocess_creation_flags
 
 if os.name == "nt":
     import pywintypes
@@ -49,7 +50,7 @@ class ProcessManager:
             output_tail: int | None = None,
             creationflags_extra: int | None = None) -> subprocess.CompletedProcess[str]:
         extra = self.default_creationflags if creationflags_extra is None else creationflags_extra
-        flags = (subprocess.CREATE_NO_WINDOW | extra) if os.name == "nt" else 0
+        flags = subprocess_creation_flags(extra)
         with self._lock:
             self.check_cancelled()
             job = win32job.CreateJobObject(None, "") if os.name == "nt" else None
@@ -59,11 +60,20 @@ class ProcessManager:
                     limits = win32job.QueryInformationJobObject(job, win32job.JobObjectExtendedLimitInformation)
                     limits["BasicLimitInformation"]["LimitFlags"] = win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
                     win32job.SetInformationJobObject(job, win32job.JobObjectExtendedLimitInformation, limits)
-                process = subprocess.Popen(
-                    [str(item) for item in command], cwd=cwd, env=env,
-                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, encoding="utf-8", errors="replace", creationflags=flags,
-                )
+                popen_kwargs: dict[str, object] = {
+                    "cwd": cwd,
+                    "env": env,
+                    "stdin": subprocess.DEVNULL,
+                    "stdout": subprocess.PIPE,
+                    "stderr": subprocess.STDOUT,
+                    "text": True,
+                    "encoding": "utf-8",
+                    "errors": "replace",
+                    "creationflags": flags,
+                }
+                if os.name != "nt":
+                    popen_kwargs["start_new_session"] = True
+                process = subprocess.Popen([str(item) for item in command], **popen_kwargs)
                 if job is not None and process.poll() is None:
                     handle = win32api.OpenProcess(
                         win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE, False, process.pid
@@ -123,7 +133,10 @@ class ProcessManager:
         if process.poll() is not None:
             return
         try:
-            process.send_signal(signal.SIGTERM)
+            if os.name != "nt":
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            else:
+                process.send_signal(signal.SIGTERM)
             process.wait(timeout=4)
         except (OSError, subprocess.TimeoutExpired):
             process.kill()

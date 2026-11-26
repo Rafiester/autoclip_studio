@@ -135,17 +135,19 @@ class PerformanceView(QWidget):
         settings = self.current_settings()
         snap = self.monitor.snapshot(settings.gaming_process if settings.gaming_mode else "")
         limits = resolve_profile_limits(settings.profile, snap)
+        hw_enc_label = "VideoToolbox" if snap.unified_memory else f"NVENC: {limits.nvenc_preset}"
         self.limits_label.setText(
             f"CPU threads: {limits.cpu_threads}  |  FFmpeg threads: {limits.ffmpeg_threads}  |  "
             f"Whisper batch: {limits.whisper_batch_size}  |  Tracking step: {limits.tracking_sample_interval:.2f}s  |  "
-            f"NVENC: {limits.nvenc_preset}"
+            f"{hw_enc_label}"
         )
         self._metric_values["cpu"].setText(
             f"{snap.cpu_percent:.0f}% ({snap.cpu_physical}C/{snap.cpu_logical}T)"
             if snap.cpu_percent is not None else "N/A"
         )
+        mem_suffix = " (Unified)" if snap.unified_memory else ""
         self._metric_values["ram"].setText(
-            f"{snap.ram_used_mib / 1024:.1f} / {snap.ram_total_mib / 1024:.1f} GB"
+            f"{snap.ram_used_mib / 1024:.1f} / {snap.ram_total_mib / 1024:.1f} GB{mem_suffix}"
             if snap.ram_used_mib is not None and snap.ram_total_mib is not None else "N/A"
         )
         if snap.gpu_name:
@@ -153,10 +155,13 @@ class PerformanceView(QWidget):
             self._metric_values["gpu"].setText(f"{snap.gpu_name} ({util})")
         else:
             self._metric_values["gpu"].setText("N/A")
-        self._metric_values["vram"].setText(
-            f"{snap.vram_used_mib} / {snap.vram_total_mib} MiB"
-            if snap.vram_used_mib is not None and snap.vram_total_mib is not None else "N/A"
-        )
+        if snap.unified_memory:
+            self._metric_values["vram"].setText("Unified Memory")
+        else:
+            self._metric_values["vram"].setText(
+                f"{snap.vram_used_mib} / {snap.vram_total_mib} MiB"
+                if snap.vram_used_mib is not None and snap.vram_total_mib is not None else "N/A"
+            )
         temp_text = f"{snap.gpu_temp_c} °C" if snap.gpu_temp_c is not None else "N/A"
         power_text = f"{snap.gpu_power_w:.1f} W" if snap.gpu_power_w is not None else "N/A"
         self._metric_values["gpu_temp"].setText(f"{temp_text} / {power_text}")

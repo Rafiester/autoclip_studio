@@ -17,10 +17,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .captions import TEMPLATES, _installed_fonts
-from .paths import APP_ROOT, DATA_ROOT, LOG_DIR, MODEL_CACHE
+from .paths import APP_ROOT, DATA_ROOT, LOG_DIR, MODEL_CACHE, bundled_binary
+from .platform_utils import detect_platform, marker_matches, subprocess_creation_flags, uv_executable_path, venv_python_path
 from .speech_engine import (
     MODELS, SpeechSettings, complete_model, cuda_libraries, download_speech_model,
-    find_executable, find_model, gpu_info, model_cache_root, python_cuda, subtitle_edit_engine,
+    find_executable, find_model, gpu_info, mlx_whisper_available, model_cache_root,
+    python_cuda, subtitle_edit_engine,
 )
 
 
@@ -43,6 +45,7 @@ class DependencySpec:
     hardware_requirement: str
     integrity_method: str
     fallback_url: str = ""
+    platforms: tuple[str, ...] = ("windows", "macos")
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +121,7 @@ def load_manifest(path: Path = MANIFEST_PATH) -> tuple[list[DependencySpec], lis
             hardware_requirement=str(item.get("hardware_requirement", "any")),
             integrity_method=str(item.get("integrity_method", "version_probe")),
             fallback_url=str(item.get("fallback_url", "")),
+            platforms=tuple(item.get("platforms", ["windows", "macos"])),
         )
         for item in payload.get("components", [])
     ]
@@ -221,13 +225,13 @@ def download_resumable(
     return target
 
 
-def _pinned_requirements() -> dict[str, str]:
+def _pinned_requirements(plat: str | None = None, arch: str | None = None) -> dict[str, str]:
     pins: dict[str, str] = {}
     if not REQUIREMENTS_PATH.is_file():
         return pins
     for line in REQUIREMENTS_PATH.read_text(encoding="utf-8").splitlines():
         req, _, marker = line.partition(";")
-        if 'sys_platform == "win32"' in marker and sys.platform != "win32":
+        if not marker_matches(marker, plat=plat, arch=arch):
             continue
         name, sep, ver = req.strip().partition("==")
         if sep:
@@ -240,60 +244,98 @@ def inspect_all_dependencies(
     *,
     speech_settings: SpeechSettings | None = None,
     cloud_only: bool = False,
+    target_system: str | None = None,
 ) -> list[DependencyStatus]:
-    """Inspect all components in the manifest, reusing existing installations safely."""
+    """Inspect all components in the manifest for the current platform, reusing existing installations safely."""
     specs, _, default_model = load_manifest(manifest_path)
+    pinfo = detect_platform()
+    active_system = target_system or pinfo.system
     speech_settings = speech_settings or SpeechSettings()
-    pins = _pinned_requirements()
-    gpu = gpu_info()
+    plat_tag = "win32" if active_system == "windows" else ("darwin" if active_system == "macos" else sys.platform)
+    arch_tag = "arm64" if active_system == "macos" else pinfo.machine
+    pins = _pinned_requirements(plat=plat_tag, arch=arch_tag)
+    gpu = gpu_info() if active_system == "windows" else None
     has_gpu = gpu is not None
     statuses: list[DependencyStatus] = []
 
     for spec in specs:
+        if active_system not in spec.platforms:
+            continue
         if spec.id == "uv":
-            uv_path = APP_ROOT / "tools" / "uv.exe"
+            uv_path = uv_executable_path(APP_ROOT)
             if not uv_path.is_file():
                 which_uv = shutil.which("uv")
                 if which_uv:
                     statuses.append(DependencyStatus(spec, "Reused existing", spec.version, which_uv, 0, False, "System uv detected", True))
                     continue
-                statuses.append(DependencyStatus(spec, "Missing", "—", str(uv_path), 0, False, "uv.exe not installed"))
+                statuses.append(DependencyStatus(spec, "Missing", "—", str(uv_path), 0, False, f"{uv_path.name} not installed"))
             else:
                 try:
                     out = subprocess.run(
                         [str(uv_path), "--version"], capture_output=True, text=True, timeout=5,
-                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                        creationflags=subprocess_creation_flags(),
                     ).stdout.strip()
                     if out.startswith("uv "):
                         uv_ver = out.split()[1]
                         statuses.append(DependencyStatus(spec, "Ready", uv_ver, str(uv_path), uv_path.stat().st_size, uv_ver != spec.version, "Pinned bootstrapper verified"))
                     else:
-                        statuses.append(DependencyStatus(spec, "Corrupted", "unknown", str(uv_path), uv_path.stat().st_size, False, "uv.exe failed version check"))
+                        statuses.append(DependencyStatus(spec, "Corrupted", "unknown", str(uv_path), uv_path.stat().st_size, False, f"{uv_path.name} failed version check"))
                 except (OSError, subprocess.SubprocessError, IndexError):
-                    statuses.append(DependencyStatus(spec, "Corrupted", "unknown", str(uv_path), uv_path.stat().st_size, False, "uv.exe could not run"))
+                    statuses.append(DependencyStatus(spec, "Corrupted", "unknown", str(uv_path), uv_path.stat().st_size, False, f"{uv_path.name} could not run"))
 
         elif spec.id == "python_runtime":
             ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-            py_exe = APP_ROOT / ".venv" / "Scripts" / "python.exe"
-            pyw_exe = APP_ROOT / ".venv" / "Scripts" / "pythonw.exe"
+            py_exe = venv_python_path(APP_ROOT, windowed=False)
+            pyw_exe = venv_python_path(APP_ROOT, windowed=True)
             rt_dir = APP_ROOT / ".runtime"
             if (3, 11) <= sys.version_info[:2] < (3, 13) and (py_exe.is_file() or pyw_exe.is_file()):
                 reused = not rt_dir.exists()
                 statuses.append(DependencyStatus(
                     spec, "Reused existing" if reused else "Ready", ver,
                     sys.executable, directory_size(rt_dir), False,
-                    "Compatible Python runtime active", reused,
+                    f"Compatible Python ({pinfo.machine}) runtime active", reused,
                 ))
             else:
                 statuses.append(DependencyStatus(spec, "Missing", ver, str(rt_dir), 0, False, "Python 3.11/3.12 runtime required"))
 
         elif spec.id == "python_venv":
             venv = APP_ROOT / ".venv"
-            pyw = venv / "Scripts" / "pythonw.exe"
+            pyw = venv_python_path(APP_ROOT, windowed=True)
             if venv.is_dir() and pyw.is_file():
                 statuses.append(DependencyStatus(spec, "Ready", spec.version, str(venv), directory_size(venv), False, "Project virtual environment active"))
             else:
                 statuses.append(DependencyStatus(spec, "Missing", "—", str(venv), 0, False, "Virtual environment missing"))
+
+        elif spec.id == "ffmpeg":
+            ff_dir = APP_ROOT / "tools" / "ffmpeg"
+            ff_exe = bundled_binary("ffmpeg", root=APP_ROOT)
+            fp_exe = bundled_binary("ffprobe", root=APP_ROOT)
+            if ff_exe and fp_exe and ff_exe.is_file() and fp_exe.is_file():
+                try:
+                    out = subprocess.run([str(ff_exe), "-version"], capture_output=True, text=True, timeout=8,
+                                         creationflags=subprocess_creation_flags()).stdout
+                    ver_line = out.splitlines()[0].split()[2] if out.startswith("ffmpeg version ") else "unknown"
+                    reused_ext = not ff_exe.resolve().is_relative_to(ff_dir.resolve()) if ff_dir.exists() else True
+                    state = "Reused existing" if reused_ext else "Ready"
+                    statuses.append(DependencyStatus(spec, state, ver_line, str(ff_exe.parent), directory_size(ff_dir), False, "FFmpeg & FFprobe verified", reused_ext))
+                except (OSError, subprocess.SubprocessError, IndexError):
+                    statuses.append(DependencyStatus(spec, "Corrupted", "—", str(ff_dir), directory_size(ff_dir), False, "FFmpeg failed executable check"))
+            else:
+                sys_ff = shutil.which("ffmpeg")
+                sys_fp = shutil.which("ffprobe")
+                if sys_ff and sys_fp:
+                    statuses.append(DependencyStatus(spec, "Reused existing", "system", str(Path(sys_ff).parent), 0, False, "Compatible system FFmpeg detected", True))
+                else:
+                    statuses.append(DependencyStatus(spec, "Missing", "—", str(ff_dir), 0, False, "FFmpeg & FFprobe missing"))
+
+        elif spec.id == "mlx_whisper":
+            if active_system == "macos":
+                try:
+                    inst = importlib.metadata.version("mlx-whisper")
+                    statuses.append(DependencyStatus(spec, "Ready", inst, str(APP_ROOT / ".venv"), 0, False, "MLX Whisper Apple Silicon acceleration ready"))
+                except importlib.metadata.PackageNotFoundError:
+                    statuses.append(DependencyStatus(spec, "Missing" if pinfo.is_apple_silicon else "Optional", "—", spec.install_path, 0, False, "Install mlx-whisper for Apple Silicon acceleration"))
+            continue
 
         elif spec.id == "pyside6":
             expected = pins.get("PySide6", spec.version)
@@ -322,26 +364,6 @@ def inspect_all_dependencies(
                 statuses.append(DependencyStatus(spec, "Ready", f"{len(pins)}/{len(pins)}", str(site_dir), directory_size(site_dir), True, "Version diff: " + ", ".join(mismatched)))
             else:
                 statuses.append(DependencyStatus(spec, "Ready", f"{len(pins)}/{len(pins)} pinned", str(site_dir), directory_size(site_dir), False, "All pinned packages verified"))
-
-        elif spec.id == "ffmpeg":
-            ff_dir = APP_ROOT / "tools" / "ffmpeg"
-            ff_exe = ff_dir / "bin" / "ffmpeg.exe"
-            fp_exe = ff_dir / "bin" / "ffprobe.exe"
-            if ff_exe.is_file() and fp_exe.is_file():
-                try:
-                    out = subprocess.run([str(ff_exe), "-version"], capture_output=True, text=True, timeout=8,
-                                         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0).stdout
-                    ver_line = out.splitlines()[0].split()[2] if out.startswith("ffmpeg version ") else "unknown"
-                    statuses.append(DependencyStatus(spec, "Ready", ver_line, str(ff_dir), directory_size(ff_dir), False, "Project FFmpeg & FFprobe verified"))
-                except (OSError, subprocess.SubprocessError, IndexError):
-                    statuses.append(DependencyStatus(spec, "Corrupted", "—", str(ff_dir), directory_size(ff_dir), False, "FFmpeg failed executable check"))
-            else:
-                sys_ff = shutil.which("ffmpeg")
-                sys_fp = shutil.which("ffprobe")
-                if sys_ff and sys_fp:
-                    statuses.append(DependencyStatus(spec, "Reused existing", "system", str(Path(sys_ff).parent), 0, False, "Compatible system FFmpeg detected", True))
-                else:
-                    statuses.append(DependencyStatus(spec, "Missing", "—", str(ff_dir), 0, False, "FFmpeg & FFprobe missing"))
 
         elif spec.id == "yt_dlp":
             expected = pins.get("yt-dlp", spec.version)

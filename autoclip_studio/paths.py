@@ -32,12 +32,18 @@ def ensure_directories() -> None:
         directory.mkdir(parents=True, exist_ok=True)
 
 
-def bundled_binary(name: str) -> Path | None:
+def bundled_binary(name: str, *, root: Path | None = None) -> Path | None:
+    base = root or APP_ROOT
     suffix = ".exe" if os.name == "nt" else ""
     candidates = [
-        APP_ROOT / "tools" / "ffmpeg" / "bin" / f"{name}{suffix}",
-        APP_ROOT / "tools" / "ffmpeg" / f"{name}{suffix}",
-        APP_ROOT / "tools" / "package" / f"{name}{suffix}",
+        base / "tools" / "ffmpeg" / "bin" / f"{name}{suffix}",
+        base / "tools" / "ffmpeg" / f"{name}{suffix}",
+        base / "tools" / "package" / f"{name}{suffix}",
     ]
+    if os.name != "nt":
+        candidates.extend([
+            Path("/opt/homebrew/bin") / name,
+            Path("/usr/local/bin") / name,
+        ])
     return next((path for path in candidates if path.exists()), None)
 

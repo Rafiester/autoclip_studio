@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import importlib.util
 import os
+import platform
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
@@ -58,6 +61,8 @@ class Purfview:
 
 
 def subtitle_edit_engine() -> Path | None:
+    if os.name != "nt":
+        return None
     appdata = os.environ.get("APPDATA")
     if not appdata:
         return None
@@ -65,9 +70,18 @@ def subtitle_edit_engine() -> Path | None:
     return path if path.is_file() else None
 
 
+def mlx_whisper_available() -> bool:
+    if sys.platform != "darwin" or platform.machine().lower() not in {"arm64", "aarch64"}:
+        return False
+    return importlib.util.find_spec("mlx_whisper") is not None and importlib.util.find_spec("mlx") is not None
+
+
 def find_executable(configured: str = "") -> Path | None:
+    if os.name != "nt" and not configured:
+        return None
     if configured:
-        return Path(configured).expanduser().resolve()
+        candidate = Path(configured).expanduser().resolve()
+        return candidate if os.name == "nt" or candidate.is_file() else None
     subtitle = subtitle_edit_engine()
     if subtitle:
         return subtitle
@@ -85,6 +99,8 @@ def _probe(command: list[str | Path], *, cwd: Path | None = None, timeout: int =
 
 
 def gpu_info() -> GpuInfo | None:
+    if shutil.which("nvidia-smi") is None:
+        return None
     try:
         output = _probe(
             ["nvidia-smi", "-i", "0", "--query-gpu=name,memory.total,memory.free,memory.used,utilization.gpu",
@@ -97,6 +113,10 @@ def gpu_info() -> GpuInfo | None:
 
 
 def python_cuda() -> bool:
+    if os.name == "nt" and shutil.which("nvidia-smi") is None and not os.environ.get("CUDA_PATH"):
+        pass
+    if sys.platform == "darwin":
+        return False
     try:
         import ctranslate2
         if "float16" not in ctranslate2.get_supported_compute_types("cuda"):
@@ -241,9 +261,16 @@ def install_standalone(source: Path) -> Path:
 def inspect_speech(settings: SpeechSettings, model: str) -> str:
     from importlib.metadata import version
     gpu = gpu_info()
-    lines = [f"Python Faster-Whisper {version('faster-whisper')} · CUDA runtime "
-             f"{'detected' if python_cuda() else 'unavailable'}",
-             f"{gpu.name} · {gpu.free_mib:,}/{gpu.total_mib:,} MiB free" if gpu else "NVIDIA telemetry unavailable"]
+    if sys.platform == "darwin":
+        mlx_state = "available" if mlx_whisper_available() else "unavailable (CPU fallback)"
+        lines = [
+            f"Apple Silicon MLX Whisper {mlx_state}",
+            f"Python Faster-Whisper {version('faster-whisper')} (CPU fallback)",
+        ]
+    else:
+        lines = [f"Python Faster-Whisper {version('faster-whisper')} · CUDA runtime "
+                 f"{'detected' if python_cuda() else 'unavailable'}",
+                 f"{gpu.name} · {gpu.free_mib:,}/{gpu.total_mib:,} MiB free" if gpu else "NVIDIA telemetry unavailable"]
     executable = find_executable(settings.executable)
     if executable:
         try:

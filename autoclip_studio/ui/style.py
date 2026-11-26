@@ -34,8 +34,15 @@ TOKENS: dict[str, str] = {
 }
 
 def pick_ui_font() -> str:
-    """Return the preferred installed UI font, falling back to Segoe UI."""
-    preferred = ("Inter", "Geist", "Manrope", "Segoe UI")
+    """Return the preferred installed UI font for the current OS."""
+    import sys
+
+    preferred = (
+        ("SF Pro Text", "Inter", "Helvetica Neue", "Arial")
+        if sys.platform == "darwin"
+        else ("Inter", "Geist", "Manrope", "Segoe UI")
+    )
+    fallback = "Helvetica Neue" if sys.platform == "darwin" else "Segoe UI"
     try:
         from PySide6.QtGui import QFontDatabase
         from PySide6.QtWidgets import QApplication
@@ -47,7 +54,7 @@ def pick_ui_font() -> str:
                     return family
     except Exception:
         pass
-    return "Segoe UI"
+    return fallback
 
 
 def build_stylesheet(tokens: dict[str, str] = TOKENS, font_family: str | None = None) -> str:
@@ -279,7 +286,7 @@ QLabel#transferStatus {{
     font-weight: 600;
 }}
 QLabel#transferSummary, QLabel#transferMetric, QLabel#transferPercent {{
-    font-family: "Consolas", "Courier New";
+    font-family: "Menlo", "Consolas", "Courier New";
 }}
 QLabel#transferSummary {{
     color: {t["text_secondary"]};
