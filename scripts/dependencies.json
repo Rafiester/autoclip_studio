@@ -116,6 +116,20 @@
       "integrity_method": "package_metadata"
     },
     {
+      "id": "yunet_asd_model",
+      "name": "YuNet 5-Point Facial Landmark Model (Optional ASD Upgrade)",
+      "version": "2023mar",
+      "category": "vision",
+      "install_path": "cache/models/face_detection_yunet_2023mar.onnx",
+      "download_url": "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+      "sha256": "",
+      "download_size_bytes": 232589,
+      "estimated_installed_bytes": 232589,
+      "mandatory": false,
+      "hardware_requirement": "any",
+      "integrity_method": "file_exists"
+    },
+    {
       "id": "whisper_engine",
       "name": "Speech Engine (Faster-Whisper / Purfview XXL)",
       "version": "1.2.1",

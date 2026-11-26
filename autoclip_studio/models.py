@@ -91,6 +91,7 @@ class ProjectOptions:
     aspect_ratio: str = "9:16"
     resolution: str = "1080x1920"
     face_tracking: bool = True
+    reframe_mode: str = "auto"
     captions: bool = True
     caption_template: str = "Impact"
     provider: str = "gemini"

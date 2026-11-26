@@ -395,11 +395,19 @@ def inspect_all_dependencies(
                 inst = importlib.metadata.version("opencv-python-headless")
                 cascade = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
                 if cascade.is_file():
-                    statuses.append(DependencyStatus(spec, "Ready", inst, str(cascade), cascade.stat().st_size, False, "OpenCV + Haar cascade ready"))
+                    statuses.append(DependencyStatus(spec, "Ready", inst, str(cascade), cascade.stat().st_size, False, "OpenCV + multi-orientation Haar cascade ready"))
                 else:
                     statuses.append(DependencyStatus(spec, "Corrupted", inst, str(cascade), 0, False, "Haar cascade XML missing"))
             except Exception:
                 statuses.append(DependencyStatus(spec, "Missing", "—", spec.install_path, 0, False, "OpenCV missing"))
+
+        elif spec.id == "yunet_asd_model":
+            from .smart_reframe import find_yunet_model
+            yunet = find_yunet_model()
+            if yunet is not None:
+                statuses.append(DependencyStatus(spec, "Ready", spec.version, str(yunet), yunet.stat().st_size, False, "YuNet 5-point landmark detector active for Smart Reframing"))
+            else:
+                statuses.append(DependencyStatus(spec, "Optional", "Not installed", str(MODEL_CACHE), 0, False, "Optional 227 KB MIT landmark upgrade; built-in OpenCV multi-orientation Haar fallback active"))
 
         elif spec.id == "whisper_engine":
             sub_exe = subtitle_edit_engine()

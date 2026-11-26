@@ -12,6 +12,7 @@ from .media import probe, validate_mp4
 from .models import Highlight, Transcript
 from .performance import ProfileLimits
 from .process import ProcessManager, find_media_tool
+from .smart_reframe import FramingPlan, FramingSegment, analyze_smart_reframe, keyframes_to_crop_x_expression
 from .tracking import crop_x_expression, track_faces
 
 
@@ -31,6 +32,72 @@ def source_dimensions(source: Path, manager: ProcessManager) -> tuple[int, int]:
 _ENCODER_PROBE_CACHE: dict[tuple[str, str], bool] = {}
 
 
+def _build_filter_args(
+    plan: FramingPlan,
+    crop_width: int,
+    crop_height: int,
+    y: int,
+    x_fallback: float,
+    output_size: tuple[int, int],
+    *,
+    captions: bool,
+) -> tuple[list[str], str]:
+    """Build FFmpeg -vf or -filter_complex args + mapped video stream label."""
+    out_w, out_h = output_size
+    sub_suffix = ",subtitles=captions.ass" if captions else ""
+
+    # Fast single-segment single-crop path
+    if len(plan.segments) == 1 and plan.segments[0].kind == "single":
+        seg = plan.segments[0]
+        x_expr = keyframes_to_crop_x_expression(seg.keyframes, x_fallback).replace(",", "\\,")
+        vf = f"crop={crop_width}:{crop_height}:'{x_expr}':{y},scale={out_w}:{out_h}:flags=lanczos{sub_suffix}"
+        return ["-vf", vf], "0:v:0"
+
+    # Fit Original Video with blurred vertical background
+    if len(plan.segments) == 1 and plan.segments[0].kind == "fit":
+        fc = (
+            f"[0:v]split=2[bg][fg];"
+            f"[bg]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,crop={out_w}:{out_h},gblur=sigma=24[b];"
+            f"[fg]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease[f];"
+            f"[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1{sub_suffix}[vout]"
+        )
+        return ["-filter_complex", fc], "[vout]"
+
+    # Single-segment Podcast Split Screen
+    half_h = (out_h // 2) - ((out_h // 2) % 2)
+    bot_h = out_h - half_h
+    if len(plan.segments) == 1 and plan.segments[0].kind == "split" and plan.segments[0].top_box and plan.segments[0].bottom_box:
+        tx, ty, tw, th = plan.segments[0].top_box
+        bx, by, bw, bh = plan.segments[0].bottom_box
+        fc = (
+            f"[0:v]split=2[topin][botin];"
+            f"[topin]crop={tw}:{th}:{tx}:{ty},scale={out_w}:{half_h}:flags=lanczos,setsar=1[top];"
+            f"[botin]crop={bw}:{bh}:{bx}:{by},scale={out_w}:{bot_h}:flags=lanczos,setsar=1[bot];"
+            f"[top][bot]vstack=inputs=2,setsar=1{sub_suffix}[vout]"
+        )
+        return ["-filter_complex", fc], "[vout]"
+
+    # Multi-segment mixed timeline (e.g., Split Screen <-> Single-Speaker Close-Up cuts)
+    n = len(plan.segments)
+    parts = [f"[0:v]split={n}" + "".join(f"[s{i}]" for i in range(n))]
+    out_labels: list[str] = []
+    for i, seg in enumerate(plan.segments):
+        trim = f"trim=start={seg.start:.3f}:end={seg.end:.3f},setpts=PTS-STARTPTS"
+        if seg.kind == "split" and seg.top_box and seg.bottom_box:
+            tx, ty, tw, th = seg.top_box
+            bx, by, bw, bh = seg.bottom_box
+            parts.append(f"[s{i}]{trim},split=2[st{i}][sb{i}]")
+            parts.append(f"[st{i}]crop={tw}:{th}:{tx}:{ty},scale={out_w}:{half_h}:flags=lanczos,setsar=1[top{i}]")
+            parts.append(f"[sb{i}]crop={bw}:{bh}:{bx}:{by},scale={out_w}:{bot_h}:flags=lanczos,setsar=1[bot{i}]")
+            parts.append(f"[top{i}][bot{i}]vstack=inputs=2,setsar=1[v{i}]")
+        else:
+            x_expr = keyframes_to_crop_x_expression(seg.keyframes, x_fallback).replace(",", "\\,")
+            parts.append(f"[s{i}]{trim},crop={crop_width}:{crop_height}:'{x_expr}':{y},scale={out_w}:{out_h}:flags=lanczos,setsar=1[v{i}]")
+        out_labels.append(f"[v{i}]")
+    parts.append(f"{''.join(out_labels)}concat=n={n}:v=1:a=0,setsar=1{sub_suffix}[vout]")
+    return ["-filter_complex", ";".join(parts)], "[vout]"
+
+
 def render_clip(source: Path, highlight: Highlight, transcript: Transcript,
                 output: Path, work_dir: Path, output_size: tuple[int, int],
                 aspect_ratio: str, face_tracking: bool, captions: bool,
@@ -40,7 +107,8 @@ def render_clip(source: Path, highlight: Highlight, transcript: Transcript,
                 encoder_support: dict[str, bool] | None = None,
                 profile_limits: ProfileLimits | None = None,
                 cache_enabled: bool = False,
-                video_codec: str = "h264") -> float:
+                video_codec: str = "h264",
+                reframe_mode: str | None = None) -> float:
     work_dir.mkdir(parents=True, exist_ok=True)
     output.parent.mkdir(parents=True, exist_ok=True)
     src_width, src_height = dimensions or source_dimensions(source, manager)
@@ -54,29 +122,36 @@ def render_clip(source: Path, highlight: Highlight, transcript: Transcript,
         crop_height = int(crop_width / target_ratio) // 2 * 2
     x_fallback = max(0, (src_width - crop_width) / 2)
     y = max(0, (src_height - crop_height) // 2)
-    points = []
-    if face_tracking and crop_width < src_width:
-        interval = profile_limits.tracking_sample_interval if profile_limits else 0.75
-        points = track_faces(
-            source, highlight.start, highlight.end, crop_width, manager, log,
-            sample_interval=interval, cache_enabled=cache_enabled,
+
+    effective_mode = reframe_mode if reframe_mode is not None else ("auto" if face_tracking else "off")
+    if not face_tracking and reframe_mode is None:
+        effective_mode = "off"
+
+    interval = profile_limits.tracking_sample_interval if profile_limits else 0.75
+    if effective_mode in {"off"} and not face_tracking:
+        plan = FramingPlan(segments=[FramingSegment("single", 0.0, max(0.1, highlight.end - highlight.start))])
+    else:
+        plan = analyze_smart_reframe(
+            source, highlight.start, highlight.end, src_width, src_height,
+            crop_width, output_size, manager, log,
+            mode=effective_mode, sample_interval=interval,
+            cache_enabled=cache_enabled, transcript=transcript,
         )
-    x_expression = crop_x_expression(points, x_fallback).replace(",", "\\,")
-    filters = [
-        f"crop={crop_width}:{crop_height}:'{x_expression}':{y}",
-        f"scale={output_size[0]}:{output_size[1]}:flags=lanczos",
-    ]
+
     if captions:
         ass_path = work_dir / "captions.ass"
-        write_ass(transcript, highlight, ass_path, output_size, caption_template)
-        filters.append("subtitles=captions.ass")
+        write_ass(transcript, highlight, ass_path, output_size, caption_template, split_screen=plan.has_split)
+
+    filter_args, video_map = _build_filter_args(
+        plan, crop_width, crop_height, y, x_fallback, output_size, captions=captions,
+    )
     duration = highlight.end - highlight.start
     thread_args = ["-threads", str(profile_limits.ffmpeg_threads)] if profile_limits else []
     base = [
         find_media_tool("ffmpeg"), "-hide_banner", "-nostats", "-progress", "pipe:1",
         "-stats_period", "0.5", "-y", *thread_args, "-ss", f"{highlight.start:.3f}",
-        "-i", str(source), "-t", f"{duration:.3f}", "-vf", ",".join(filters),
-        "-map", "0:v:0", "-map", "0:a?", "-c:a", "aac", "-b:a", "160k",
+        "-i", str(source), "-t", f"{duration:.3f}", *filter_args,
+        "-map", video_map, "-map", "0:a?", "-c:a", "aac", "-b:a", "160k",
         "-movflags", "+faststart", "-pix_fmt", "yuv420p",
     ]
     descriptor, staging_path = mkstemp(prefix=".render-", suffix=".mp4", dir=output.parent)

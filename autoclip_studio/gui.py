@@ -26,6 +26,7 @@ from .models import ProjectOptions
 from .paths import APP_ROOT, OUTPUT_DIR, asset_path, ensure_directories
 from .pipeline import Pipeline
 from .providers import AIProvider, ProviderError
+from .smart_reframe import REFRAME_MODES
 from .speech_engine import MODELS
 from .subtitles import SrtValidationError, SrtValidationResult, parse_srt_file
 from .thumbnails import export_thumbnail
@@ -435,15 +436,25 @@ class MainWindow(QMainWindow):
         automation.body_layout().addLayout(auto_layout)
         auto_layout.setHorizontalSpacing(16)
         auto_layout.setVerticalSpacing(10)
-        self.face_tracking = QCheckBox("Auto face tracking"); self.face_tracking.setChecked(True)
+        self.reframe_combo = configure_input(QComboBox())
+        for code, label in REFRAME_MODES:
+            self.reframe_combo.addItem(label, code)
+        self.reframe_combo.setCurrentIndex(0)  # Auto Smart Reframe (default)
+        self.face_tracking = QCheckBox("Auto face tracking")
+        self.face_tracking.setChecked(True)
+        self.face_tracking.hide()  # Preserved for API compatibility; synchronized with Smart Reframing selector
+        self.reframe_combo.currentIndexChanged.connect(
+            lambda: self.face_tracking.setChecked((self.reframe_combo.currentData() or "auto") != "off")
+        )
         self.captions = QCheckBox("Animated word captions"); self.captions.setChecked(True)
         self.cache = QCheckBox("Cache downloads and transcripts"); self.cache.setChecked(True)
         self.template_combo = configure_input(QComboBox())
         self.template_combo.addItems(TEMPLATES.keys())
         self.template_combo.setCurrentText(self.default_template())
-        auto_layout.addWidget(self.face_tracking, 0, 0)
-        auto_layout.addWidget(self.captions, 0, 1)
-        auto_layout.addWidget(self.cache, 1, 0, 1, 2)
+        auto_layout.addWidget(QLabel("Smart reframing"), 0, 0)
+        auto_layout.addWidget(self.reframe_combo, 0, 1)
+        auto_layout.addWidget(self.captions, 1, 0)
+        auto_layout.addWidget(self.cache, 1, 1)
         auto_layout.addWidget(QLabel("Caption template"), 2, 0)
         auto_layout.addWidget(self.template_combo, 2, 1)
         auto_layout.setColumnStretch(0, 1)
@@ -867,10 +878,12 @@ class MainWindow(QMainWindow):
             metadata = None
         local_meta = self.local_preview.result if using_local else None
         default_name = (metadata.title if metadata else (local_meta.path.stem if local_meta else (Path(source).stem if not youtube else "")))
+        reframe_mode = str(self.reframe_combo.currentData() or "auto")
         options = ProjectOptions(
             source=source, clip_count=self.clip_count.value(), min_duration=self.min_duration.value(),
             max_duration=self.max_duration.value(), aspect_ratio=self.aspect.currentText(),
-            resolution=self.resolution.currentText(), face_tracking=self.face_tracking.isChecked(),
+            resolution=self.resolution.currentText(), face_tracking=(reframe_mode != "off"),
+            reframe_mode=reframe_mode,
             captions=self.captions.isChecked(), caption_template=self.template_combo.currentText(),
             provider=self.project_provider.currentText(), model=self.project_model.text().strip(),
             multimodal=self.multimodal_check.isChecked(),

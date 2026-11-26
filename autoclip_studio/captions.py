@@ -192,13 +192,14 @@ def _phrases(words: list[Word], maximum: int) -> list[list[Word]]:
 
 
 class _CaptionScript:
-    def __init__(self, template: CaptionTemplate, width: int, height: int) -> None:
+    def __init__(self, template: CaptionTemplate, width: int, height: int, *, split_screen: bool = False) -> None:
         self.template = template
         self.width = width
         self.height = height
+        self.split_screen = split_screen
         self.events: list[str] = []
         self.scale = min(width / 1080, height / 1080)
-        self.margin = round(height * .14)
+        self.margin = 0 if split_screen else round(height * .14)
 
     def add(self, start: float, end: float, text: str, tags: str = "", *, layer: int = 0) -> None:
         if _cs(end) > _cs(start):
@@ -309,13 +310,14 @@ class _CaptionScript:
         outline = style.accent if style.effect in {"box", "podcast"} else "#13101C"
         secondary = style.accent if style.effect == "karaoke" else style.primary
         margin_x = max(12, round(self.width * .065))
+        alignment = 5 if self.split_screen else style.alignment
         row = (
             f"Default,{template_font(style)},{max(12, round(style.size*self.scale))},"
             f"{_ass_color(style.primary, '00')},{_ass_color(secondary, '00')},"
             f"{_ass_color(outline, '00')},&H5013101C,"
             f"{-int(style.bold)},0,0,0,100,100,0,0,{style.border},"
             f"{max(1, round(style.outline*self.scale))},{round(style.shadow*self.scale)},"
-            f"{style.alignment},{margin_x},{margin_x},{self.margin},-1"
+            f"{alignment},{margin_x},{margin_x},{self.margin},-1"
         )
         header = f"""[Script Info]
 ScriptType: v4.00+
@@ -335,9 +337,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 def write_ass(transcript: Transcript, highlight: Highlight, output: Path,
-              resolution: tuple[int, int], template_name: str) -> None:
+              resolution: tuple[int, int], template_name: str, *, split_screen: bool = False) -> None:
     template = TEMPLATES.get(template_name, TEMPLATES[TEMPLATE_DEFAULT])
-    script = _CaptionScript(template, *resolution)
+    script = _CaptionScript(template, *resolution, split_screen=split_screen)
     for segment in transcript.segments:
         if segment.end <= highlight.start or segment.start >= highlight.end:
             continue

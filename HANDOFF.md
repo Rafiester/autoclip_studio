@@ -116,8 +116,57 @@
 
 ## Test Results
 - **macOS 27.2.1 (`arm64`, Apple Silicon):**
-  - `.venv/bin/python3 -m pytest -q`: **101 passed, 3 skipped, 0 failed** (includes `tests/test_apple_silicon_perf.py`, `tests/test_theme_system.py`, `tests/test_heatmap_and_hybrid.py`; 3 Windows-only/environment skips).
-  - `.venv/bin/python3 -m tests.integration_smoke`: **Passed** (`h264_videotoolbox`, 9 face-tracking sample points, `948,804 bytes`, `6.30s`).
+  - `.venv/bin/python3 -m pytest -q`: **106 passed, 3 skipped, 0 failed** (includes `tests/test_smart_reframe.py`, `tests/test_apple_silicon_perf.py`, `tests/test_theme_system.py`, `tests/test_heatmap_and_hybrid.py`; 3 Windows-only/environment skips).
+  - `.venv/bin/python3 -m tests.integration_smoke`: **Passed** (`Smart Reframing (auto, opencv-haar-multi)`, `h264_videotoolbox`, `1,264,264 bytes`, `6.30s`).
   - `.venv/bin/python3 scripts/setup.py --check`: **Passed** (exit code 0).
 - **Windows 11 x64 Host (previous session):**
   - `.\.venv\Scripts\python.exe -m pytest -q`: **93 passed**.
+
+---
+
+## Multi-Person Active Speaker Smart Reframing
+
+### Root Cause of Previous Midpoint Bug
+Auditing legacy `autoclip_studio/tracking.py` identified three compounding causes:
+1. **Frontal-only Haar cascade (`haarcascade_frontalface_default.xml`)** frequently dropped detections on 3/4-turned podcast speakers; every dropout fell back to `target = frame_width / 2.0` (the empty center gap).
+2. **Stateless largest-face selection (`max(faces, key=area)`)** had no persistent track IDs or speaker scoring; when two seated hosts had similar face sizes, tiny jitter alternated `target` between left and right faces.
+3. **Slow exponential moving average (`0.25 * target + 0.75 * smoothed`) + linear FFmpeg interpolation** averaged alternating targets and center dropouts directly into the empty midpoint between participants and slowly panned across empty background.
+
+### Reference Repository & License Audit
+- **`algometrix/vertical_video_convertor`** (*MIT*): Reviewed sticky-subject and refocus-band concepts; adopted conceptually without adding heavy InsightFace/ONNXRuntime dependencies.
+- **`Rembr4nt/ai-clipper`** (*MIT*): Reviewed two-up vertical podcast split-screen framing and smoothing concepts; implemented natively in FFmpeg single-pass `vstack` + `concat` filter graphs.
+- **`nawta/TalkNet-ASD-py312`** (*No license file / All Rights Reserved*, unclear pretrained weight licensing): Rejected for copying or bundling.
+- **`akouris/360-autocam`** (*No license file*): Rejected for copying.
+- **`RishikeshAluguvelli/VerticalMaker`**: Not publicly accessible via GitHub search.
+- **Decision:** Clean first-principles implementation in `autoclip_studio/smart_reframe.py` using already-installed OpenCV (`cv2.FaceDetectorYN` + multi-orientation Haar fallback) and PyAV (`av`) with zero unlicensed code and zero mandatory large downloads.
+
+### Implemented Architecture
+- **Smart Reframing Engine (`autoclip_studio/smart_reframe.py`, backward-compatible wrapper in `autoclip_studio/tracking.py`):**
+  - **Optional MIT YuNet 5-Point Landmark Model (`face_detection_yunet_2023mar.onnx`, 227 KB)** integrated into Dependency Manager (`scripts/dependencies.json`, `autoclip_studio/dependencies.py`) with automatic zero-download multi-orientation OpenCV Haar fallback (frontal `alt2` + `default` + left/right mirrored `profileface` + containment NMS).
+  - **Audio-Visual Active Speaker Detection:** PyAV 16 kHz speech-band (`250–3600 Hz`) FFT RMS VAD synchronized with head-motion-compensated mouth ROI visual energy (`max(0, mouth_diff - 0.65 * upper_face_diff)`), optionally supported by transcript timing prior.
+  - **Aspect-Ratio Feasibility & Stability:** `can_group_frame()` checks whether multiple faces safely fit within `80%` of the 9:16 crop width (never averaging distant faces); enforces persistent track IDs, `1.0s` dropout tolerance, `1.6s` minimum speaker hold (`0.55s` initial confirmation after camera cuts), `1.28×` hysteresis ratio, `4.5%` crop dead zone, bounded pan velocity, scene-cut detection, content-aware edge saliency fallback when no faces are visible, and instant step cuts (`cut=True`) between distant speakers instead of panning across empty space.
+  - **Podcast Split Screen & Fit Original Video (`autoclip_studio/rendering.py`, `autoclip_studio/captions.py`):** Single-pass FFmpeg `-filter_complex` supporting stacked vertical 2-person split-screen (`vstack=inputs=2`) with median-stabilized headroom boxes, automatic return to full-frame single-speaker framing on close-up camera cuts (`concat`), continuous synchronized audio (`0:a?`), seam-centered ASS captions (`Alignment=5`) for split-screen clips, and blurred-background `Fit Original Video`.
+  - **UI & Settings (`autoclip_studio/gui.py`, `autoclip_studio/models.py`, `autoclip_studio/pipeline.py`):** Added compact **Smart reframing** selector on New Project (`Auto Smart Reframe` default, `Active Speaker`, `Podcast Split Screen`, `Single Subject Tracking`, `Fit Original Video`, `Off (Center Crop)`), preserving Poppins typography, Light/Dark/System themes, and backward-compatible `face_tracking` behavior.
+
+### Real-Footage Validation & Benchmarks (`WxFliJRKMZk`)
+Validated on real multi-person Indonesian podcast footage from `https://www.youtube.com/watch?v=WxFliJRKMZk` (*Empat Teman Datang Bawa Parfum*, Raditya Dika — `05:00–05:18` mixed solo close-ups + 2-person wide shots, and `12:00–12:18` 5-person wide table shot):
+
+| Mode / Backend | Analysis Time (18s clip) | Peak Python RAM | Face Visibility | Midpoint Traps | Switches / Cuts | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| Legacy tracker (baseline) | 0.42s | 1.6 MB | 34/36 (94.4%) | 2 | — | Off-center drift between distant hosts |
+| Smart Reframing `auto` (`opencv-haar-multi`) | 5.28s | 6.6 MB | **36/36 (100.0%)** | **0** | 5 / 5 | Zero-download built-in fallback |
+| Smart Reframing `auto` (`opencv-yunet-landmarks`) | **1.01s** | **3.1 MB** | **36/36 (100.0%)** | **0** | 2 / 5 | 5.2× faster, cleaner speaker stability |
+| Smart Reframing `active_speaker` (`opencv-yunet-landmarks`) | **0.89s** | **3.1 MB** | **36/36 (100.0%)** | **0** | 2 / 5 | Clean cuts between speaking hosts |
+| Smart Reframing `split_screen` (`opencv-yunet-landmarks`) | **0.88s** | **3.1 MB** | 100% both hosts + solo close-ups | **0** | 3 split + 3 single segs | Auto-returns to single speaker on solo close-ups |
+
+- **5-Person Wide Table Detection (`12:00–12:18`):** `opencv-yunet-landmarks` detected all **5/5** seated participants (`cx = [136, 200, 307, 434, 474]` on 640×360).
+- **Rendered 9:16 Outputs (`540×960` with Indonesian captions):**
+  - `active_speaker`: `18.00s` video / `18.00s` audio (`0.000s` sync diff), `2.08 MB` (`3.01s` CPU).
+  - `split_screen` (mixed split + close-up timeline): `18.00s` / `18.00s` (`0.000s` sync diff), `2.15 MB` (`2.67s` CPU; **`2.79s` with Apple `h264_videotoolbox`**).
+  - `fit_original` (blurred background): `18.00s` / `18.00s` (`0.000s` sync diff), `1.38 MB` (`2.60s`).
+- **Performance Profile Scaling (18s clip, YuNet):** Eco (`1.0s`) `0.70s` (68 frames), Balanced (`0.75s`) `0.86s` (90 frames), Turbo (`0.5s`) `0.98s` (108 frames).
+
+### Remaining Limitations
+- Built-in `opencv-haar-multi` works with zero downloads, while installing the optional 227 KB MIT **YuNet Face & Landmark Model** in Dependencies delivers ~5× faster analysis and markedly better 3/4-profile / wide multi-person detection.
+- For mixed clips that switch between Podcast Split Screen and solo close-up shots, the clip-level ASS subtitle file keeps seam-centered middle alignment (`Alignment=5`) throughout so captions never overlap split-screen faces; per-segment dynamic ASS positioning could be added as a future enhancement.
+- Very dark, heavily occluded, or off-camera speakers (where a speaking host's mouth is completely hidden behind a large studio microphone) rely on audio VAD + last-valid-speaker hold until visual mouth activity recovers.
