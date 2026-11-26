@@ -1,7 +1,7 @@
 # AutoClip Studio — Agent Handoff & Progress
 
 **Last Updated:** 2026-11-26  
-**Current Phase:** Processing Queue Media Processing Center Complete
+**Current Phase:** Native macOS Apple Silicon Build & Hardware Validation Complete
 
 ## Execution Status
 
@@ -30,10 +30,28 @@
   - **Phase 6 (Native macOS UI Compatibility):** Updated `style.py` (`SF Pro Text` / `Helvetica Neue` + `Menlo` monospace on macOS), `gui.py` (`autoclip.icns` icon on macOS), and `speech_view.py` (macOS MLX option & cross-platform file picker filters).
   - **Phase 7 (Tests & Build Staging):** Added `tests/test_cross_platform.py` (6 tests), generated `autoclip_studio/assets/autoclip.icns`, and staged `build/macos_stage/AutoClipStudio.app` (`Info.plist`, resources, icon).
 
-### Pending Native macOS Hardware Validation
-Because this implementation ran on **Windows 11 x64**, the following require execution on an actual Apple Silicon Mac (`arm64`, macOS 13+/27 Golden Gate):
-1. Compile native Mach-O arm64 binary & DMG: `python3 packaging/build_macos.py --dmg` (requires Xcode Command Line Tools `clang` and `hdiutil`).
-2. Launch `dist/AutoClipStudio.app` via Finder/Spotlight, verify Dock icon, Retina scaling, first-time setup wizard, `mlx-whisper` word timestamps, and `h264_videotoolbox` MP4 rendering.
+### Completed Native macOS Apple Silicon Validation (`macOS 27.2.1`, `arm64`)
+- **Host & Toolchain Verified:** Native `arm64` (`macOS 27.2.1` Build `26B131`, `Apple clang 21.0.0`, `hdiutil`, `sips`, `iconutil`, Homebrew `/opt/homebrew`).
+- **Native Runtime & Dependencies:** Provisioned `.venv` (`CPython 3.12.16 aarch64` via `tools/uv 0.13.10`), all 59 native Apple Silicon wheels (`PySide6==6.8.3`, `mlx==0.32.5`, `mlx-metal==0.32.5`, `mlx-whisper==0.4.2`, `faster-whisper==1.2.1`, `opencv-python-headless==4.10.0.84`, `av==15.1.0`, `yt-dlp==2025.11.12`, `psutil==7.2.2`), and Homebrew `ffmpeg-full 9.1` (`arm64_golden_gate`, with both `h264_videotoolbox` and `libass` `subtitles`/`ass` filters).
+- **Native `.app` & DMG Built and Verified:**
+  - `python3 packaging/build_macos.py --dmg` compiled `dist/AutoClipStudio.app` (`976 KB`, non-fat `Mach-O 64-bit executable arm64`, `Info.plist` valid) and `dist/AutoClipStudio.dmg` (`1.4 MB`, `hdiutil verify` checksum `VALID`).
+  - Lightweight launcher architecture preserved: ordinary Python source edits do not require rebuilding `AutoClipStudio.app`.
+  - LaunchServices / Finder / Spotlight check (`mdls`, `open dist/AutoClipStudio.app`): bundle ID `com.autoclip.studio`, launches `.venv/bin/python3 main.py` cleanly with zero visible Terminal windows and clean shutdown.
+- **Real Apple Silicon Pipeline Verified:**
+  - **MLX Whisper Local Transcription:** Verified `mlx-whisper 0.4.2` (`mlx-community/whisper-tiny-mlx`) on Apple Silicon Metal with word-level timestamps (`Hello from AutoClip Studio on Apple Silicon.`, 7 words) and `mx.clear_cache()` cleanup.
+  - **FFmpeg `h264_videotoolbox` + Captions + Face Tracking + Thumbnails:** Verified `detect_hw_encoder() == "videotoolbox"`, local video + Indonesian SRT import, `Hormozi` ASS caption burn-in via `libass`, OpenCV Haar face tracking (8–9 sample points), and `tests.integration_smoke` (`948,804 bytes`, `6.30s`) with zero CPU fallback.
+  - **GUI, Processing Queue, Performance Profiles & Video Playback:** Verified all 9 pages (including redesigned Processing Queue, Generated Clips + `QMediaPlayer` FFmpeg 7.1 backend, Dependency Manager, Speech-to-Text, and Performance View with Eco/Balanced/Turbo scaling on Apple Silicon Unified Memory).
+
+### macOS Issues Resolved During Validation
+1. **Homebrew `ffmpeg` lacks `libass` (`subtitles` filter):** Updated `autoclip_studio/paths.py` and `scripts/setup.py` to prefer `/opt/homebrew/opt/ffmpeg-full/bin` (and `/usr/local/opt/ffmpeg-full/bin`), verify the `subtitles` filter on macOS, and install `ffmpeg-full` via Homebrew.
+2. **System `python3` build compatibility:** Updated `packaging/build_macos.py` to reuse existing `autoclip_studio/assets/autoclip.icns` when invoked with system `python3` lacking `PySide6`.
+3. **Native Cocoa Launcher (`packaging/macos/Launcher.m`):** Fixed `launchButton` right-edge clipping (`560px` window width), prepended Homebrew `ffmpeg-full`/Homebrew bin paths to `PATH` for Finder/Spotlight launches, and redirected setup output to `~/Library/Application Support/AutoClip Studio/logs/launcher.log`.
+4. **POSIX `.venv` site-packages & macOS UI labels:** Fixed `_venv_site_packages()` and `caption_fonts` path in `autoclip_studio/dependencies.py`, updated hardware encoder checkbox label and `setApplicationDisplayName` in `autoclip_studio/gui.py`, updated macOS error hint in `autoclip_studio/process.py`, and replaced deprecated `mx.metal.clear_cache()` with `mx.clear_cache()` in `autoclip_studio/transcription.py`.
+5. **Cross-platform unit tests:** Updated `tests/test_dependencies.py`, `tests/test_pipeline_regressions.py`, and `tests/test_transcription_engines.py` so the suite runs cleanly on both Windows and macOS.
+
+### Remaining Limitations
+- `dist/AutoClipStudio.app` and `dist/AutoClipStudio.dmg` are unsigned/ad-hoc for local use; public distribution outside the local machine requires an Apple Developer ID certificate and notarization (`codesign` + `notarytool`).
+- Because the lightweight launcher spawns `.venv/bin/python3 main.py` directly (preserving zero-rebuild source updates), macOS System Events lists the child process as `python3` while Qt sets the window title, application display name, and Dock icon to AutoClip Studio.
 
 ## Modified Files
 - `autoclip_studio/platform_utils.py`
@@ -67,5 +85,10 @@ Because this implementation ran on **Windows 11 x64**, the following require exe
 - `tests/test_queue_workspace.py`
 - `HANDOFF.md`
 
-## Test Results (Windows 11 x64 Host)
-- `.\.venv\Scripts\python.exe -m pytest -q`: **93 passed** (includes `tests/test_queue_workspace.py`, `tests/test_download_progress.py`, `tests/test_log_panel.py`, `tests/test_transcription_engines.py`, and all existing suites).
+## Test Results
+- **macOS 27.2.1 (`arm64`, Apple Silicon):**
+  - `.venv/bin/python3 -m pytest -q`: **90 passed, 3 skipped, 0 failed** (3 Windows-only/environment skips).
+  - `.venv/bin/python3 -m tests.integration_smoke`: **Passed** (`h264_videotoolbox`, 9 face-tracking sample points, `948,804 bytes`, `6.30s`).
+  - `.venv/bin/python3 scripts/setup.py --check`: **Passed** (exit code 0).
+- **Windows 11 x64 Host (previous session):**
+  - `.\.venv\Scripts\python.exe -m pytest -q`: **93 passed**.

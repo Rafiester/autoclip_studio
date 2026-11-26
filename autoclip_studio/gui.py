@@ -485,7 +485,8 @@ class MainWindow(QMainWindow):
         self.output_input.setAccessibleName("Output folder")
         output_row = QHBoxLayout(); output_row.addWidget(self.output_input)
         output_browse = QPushButton("Browse"); output_browse.clicked.connect(self.browse_output); output_row.addWidget(output_browse)
-        self.hardware_check = QCheckBox("Use NVENC when available"); self.hardware_check.setChecked(bool(self.settings.data.get("hardware_encoding", True)))
+        hw_label = "Use Apple VideoToolbox when available" if sys.platform == "darwin" else "Use NVENC when available"
+        self.hardware_check = QCheckBox(hw_label); self.hardware_check.setChecked(bool(self.settings.data.get("hardware_encoding", True)))
         local_form.addRow("Output folder", output_row); local_form.addRow("Encoding", self.hardware_check)
         save_local = QPushButton("Save local settings"); save_local.clicked.connect(self.save_local_settings)
         local_form.addRow(save_local)
@@ -1390,6 +1391,7 @@ class MainWindow(QMainWindow):
 def run() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("AutoClip Studio")
+    app.setApplicationDisplayName("AutoClip Studio")
     app.setOrganizationName("AutoClip")
     icon_path = asset_path("autoclip.icns" if sys.platform == "darwin" else "autoclip.ico")
     symbol_path = asset_path("symbol.png")

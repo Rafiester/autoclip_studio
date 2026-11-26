@@ -39,19 +39,43 @@ static NSString *ResolveCheckoutRoot(void) {
     return [[NSFileManager defaultManager] currentDirectoryPath];
 }
 
+static NSString *LauncherLogPath(void) {
+    NSString *appSupport = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
+    NSString *logDir = [[appSupport stringByAppendingPathComponent:@"AutoClip Studio"] stringByAppendingPathComponent:@"logs"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:logDir withIntermediateDirectories:YES attributes:nil error:nil];
+    return [logDir stringByAppendingPathComponent:@"launcher.log"];
+}
+
+static NSMutableDictionary<NSString *, NSString *> *MergedEnvironment(NSDictionary<NSString *, NSString *> *extraEnv) {
+    NSMutableDictionary *env = [NSMutableDictionary dictionaryWithDictionary:[[NSProcessInfo processInfo] environment]];
+    NSString *existingPath = env[@"PATH"] ?: @"/usr/bin:/bin:/usr/sbin:/sbin";
+    NSString *brewPaths = @"/opt/homebrew/opt/ffmpeg-full/bin:/opt/homebrew/bin:/usr/local/opt/ffmpeg-full/bin:/usr/local/bin";
+    env[@"PATH"] = [NSString stringWithFormat:@"%@:%@", brewPaths, existingPath];
+    if (extraEnv) [env addEntriesFromDictionary:extraEnv];
+    return env;
+}
+
 static int RunSyncProcess(NSString *exe, NSArray<NSString *> *args, NSString *cwd, NSDictionary<NSString *, NSString *> *extraEnv) {
     NSTask *task = [[NSTask alloc] init];
     task.executableURL = [NSURL fileURLWithPath:exe];
     task.arguments = args;
     task.currentDirectoryURL = [NSURL fileURLWithPath:cwd];
-    NSMutableDictionary *env = [NSMutableDictionary dictionaryWithDictionary:[[NSProcessInfo processInfo] environment]];
-    if (extraEnv) [env addEntriesFromDictionary:extraEnv];
-    task.environment = env;
-    task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
-    task.standardError = [NSFileHandle fileHandleWithNullDevice];
+    task.environment = MergedEnvironment(extraEnv);
+    NSString *logPath = LauncherLogPath();
+    if (![[NSFileManager defaultManager] fileExistsAtPath:logPath]) {
+        [[NSFileManager defaultManager] createFileAtPath:logPath contents:nil attributes:nil];
+    }
+    NSFileHandle *logHandle = [NSFileHandle fileHandleForWritingAtPath:logPath];
+    [logHandle seekToEndOfFile];
+    task.standardOutput = logHandle ?: [NSFileHandle fileHandleWithNullDevice];
+    task.standardError = logHandle ?: [NSFileHandle fileHandleWithNullDevice];
     NSError *err = nil;
-    if (![task launchAndReturnError:&err]) return -1;
+    if (![task launchAndReturnError:&err]) {
+        [logHandle closeFile];
+        return -1;
+    }
     [task waitUntilExit];
+    [logHandle closeFile];
     return task.terminationStatus;
 }
 
@@ -119,11 +143,11 @@ static NSString *Sha256File(NSString *path) {
     [content addSubview:self.cloudOnlyCheck];
 
     self.cancelButton = [NSButton buttonWithTitle:@"Cancel" target:self action:@selector(cancelClicked:)];
-    self.cancelButton.frame = NSMakeRect(340, 22, 92, 32);
+    self.cancelButton.frame = NSMakeRect(306, 22, 92, 32);
     [content addSubview:self.cancelButton];
 
     self.launchButton = [NSButton buttonWithTitle:@"Launch Application" target:self action:@selector(launchClicked:)];
-    self.launchButton.frame = NSMakeRect(442, 22, 136, 32);
+    self.launchButton.frame = NSMakeRect(408, 22, 128, 32);
     self.launchButton.bezelColor = [NSColor colorWithRed:0.898 green:0.224 blue:0.208 alpha:1.0];
     self.launchButton.enabled = NO;
     [content addSubview:self.launchButton];
@@ -200,9 +224,7 @@ static NSString *Sha256File(NSString *path) {
     appTask.executableURL = [NSURL fileURLWithPath:pythonExe];
     appTask.arguments = @[mainPy];
     appTask.currentDirectoryURL = [NSURL fileURLWithPath:self.checkoutRoot];
-    NSMutableDictionary *env = [NSMutableDictionary dictionaryWithDictionary:[[NSProcessInfo processInfo] environment]];
-    env[@"AUTOCLIP_MANAGED_LAUNCH"] = @"1";
-    appTask.environment = env;
+    appTask.environment = MergedEnvironment(@{@"AUTOCLIP_MANAGED_LAUNCH": @"1"});
     [appTask launchAndReturnError:nil];
 }
 

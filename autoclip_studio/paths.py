@@ -42,6 +42,8 @@ def bundled_binary(name: str, *, root: Path | None = None) -> Path | None:
     ]
     if os.name != "nt":
         candidates.extend([
+            Path("/opt/homebrew/opt/ffmpeg-full/bin") / name,
+            Path("/usr/local/opt/ffmpeg-full/bin") / name,
             Path("/opt/homebrew/bin") / name,
             Path("/usr/local/bin") / name,
         ])

@@ -151,6 +151,10 @@ def find_media_tool(name: str) -> str:
         return found
     if getattr(sys, "frozen", False):
         raise FileNotFoundError(f"Bundled {name} is missing. Restore the complete application folder.")
+    if sys.platform == "darwin":
+        raise FileNotFoundError(
+            f"{name} was not found. Install ffmpeg-full via Homebrew (`brew install ffmpeg-full`) or run AutoClipStudio.app setup."
+        )
     raise FileNotFoundError(
         f"{name} was not found. Run AutoClipStudio.exe --setup to install the project-local FFmpeg tools."
     )

@@ -42,9 +42,10 @@ def test_clean_vs_configured_and_cloud_only_and_cuda_inspection(tmp_path: Path, 
     monkeypatch.setattr(deps, "subtitle_edit_engine", lambda: None)
     monkeypatch.setattr(deps, "find_executable", lambda *_a: None)
     monkeypatch.setattr(deps, "find_model", lambda *_a: None)
+    monkeypatch.setattr(deps, "bundled_binary", lambda *_a, **_kw: None)
     monkeypatch.setattr("shutil.which", lambda _name: None)
 
-    clean_statuses = deps.inspect_all_dependencies(cloud_only=True)
+    clean_statuses = deps.inspect_all_dependencies(cloud_only=True, target_system="windows")
     by_id = {s.spec.id: s for s in clean_statuses}
     assert by_id["uv"].state == "Missing"
     assert by_id["python_venv"].state == "Missing"

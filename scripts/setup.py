@@ -164,21 +164,34 @@ def media_tool_problems() -> list[str]:
     for name in ("ffmpeg", "ffprobe"):
         executable = FFMPEG / "bin" / f"{name}{suffix}"
         if not executable.is_file() and os.name != "nt":
-            for candidate in (Path("/opt/homebrew/bin") / name, Path("/usr/local/bin") / name):
+            for candidate in (
+                Path("/opt/homebrew/opt/ffmpeg-full/bin") / name,
+                Path("/usr/local/opt/ffmpeg-full/bin") / name,
+                Path("/opt/homebrew/bin") / name,
+                Path("/usr/local/bin") / name,
+            ):
                 if candidate.is_file():
                     executable = candidate
                     break
+        if not executable.is_file():
+            found = shutil.which(name)
+            if found:
+                executable = Path(found)
         if executable.is_file():
             try:
                 output = run(executable, "-version", capture=True, timeout=10)
                 if not output.startswith(f"{name} version "):
                     problems.append(f"{name} did not report its version")
+                    continue
+                if name == "ffmpeg" and sys.platform == "darwin":
+                    filters = run(executable, "-hide_banner", "-filters", capture=True, timeout=10)
+                    if " subtitles " not in filters:
+                        problems.append("ffmpeg lacks libass subtitles filter (install ffmpeg-full)")
+                        continue
                 continue
             except (OSError, subprocess.SubprocessError):
                 problems.append(f"{name} is missing or could not start")
                 continue
-        if shutil.which(name):
-            continue
         problems.append(f"{name} is missing or could not start")
     return problems
 
@@ -225,12 +238,12 @@ def ensure_ffmpeg() -> None:
     if sys.platform == "darwin":
         brew = shutil.which("brew") or ("/opt/homebrew/bin/brew" if Path("/opt/homebrew/bin/brew").is_file() else None)
         if brew:
-            _emit("progress", id="ffmpeg", state="Installing", detail="Installing ffmpeg via Homebrew")
-            run(brew, "install", "ffmpeg")
+            _emit("progress", id="ffmpeg", state="Installing", detail="Installing ffmpeg-full via Homebrew")
+            run(brew, "install", "ffmpeg-full")
             if not media_tool_problems():
                 _emit("progress", id="ffmpeg", state="Ready")
                 return
-        raise RuntimeError("FFmpeg is missing on macOS. Install via Homebrew (`brew install ffmpeg`) with VideoToolbox and libass support.")
+        raise RuntimeError("FFmpeg with libass support is missing on macOS. Install via Homebrew (`brew install ffmpeg-full`).")
     if not _JSON_PROGRESS:
         print("Preparing FFmpeg and ffprobe...", flush=True)
     comp = _manifest_component("ffmpeg")

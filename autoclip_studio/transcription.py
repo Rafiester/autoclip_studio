@@ -376,7 +376,9 @@ def _run_mlx_whisper(repo: str, media_path: Path, language: str | None, settings
     finally:
         try:
             import mlx.core as mx
-            mx.metal.clear_cache()
+            clear_cache = getattr(mx, "clear_cache", None) or getattr(mx.metal, "clear_cache", None)
+            if clear_cache is not None:
+                clear_cache()
         except Exception:
             pass
         gc.collect()

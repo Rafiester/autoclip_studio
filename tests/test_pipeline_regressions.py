@@ -107,7 +107,7 @@ def test_render_falls_back_and_publishes_only_valid_output(monkeypatch, tmp_path
         staged = Path(command[-1])
         assert staged != final
         staged.write_bytes(codec.encode())
-        if codec == "h264_nvenc":
+        if codec in {"h264_nvenc", "h264_videotoolbox"}:
             raise subprocess.CalledProcessError(1, command, output="Simulated encoder failure")
 
     def validate(path, _manager):
@@ -119,6 +119,7 @@ def test_render_falls_back_and_publishes_only_valid_output(monkeypatch, tmp_path
     monkeypatch.setattr(manager, "run", run)
     monkeypatch.setattr(rendering, "find_media_tool", lambda _name: "ffmpeg")
     monkeypatch.setattr(rendering, "nvenc_available", lambda _manager: True)
+    monkeypatch.setattr(rendering, "videotoolbox_available", lambda _manager: True)
     monkeypatch.setattr(rendering, "validate_mp4", validate)
     args = (
         tmp_path / "source.mp4", Highlight(0, 6, "Title", "", "", 70), Transcript(6, "en", []),
@@ -132,5 +133,6 @@ def test_render_falls_back_and_publishes_only_valid_output(monkeypatch, tmp_path
     else:
         assert rendering.render_clip(*args, dimensions=(1280, 720)) == 6
         assert final.read_bytes() == b"libx264"
-    assert commands == ["h264_nvenc", "libx264"]
+    expected_hw = "h264_videotoolbox" if __import__("sys").platform == "darwin" else "h264_nvenc"
+    assert commands == [expected_hw, "libx264"]
     assert list(tmp_path.glob("*.mp4")) == [final]

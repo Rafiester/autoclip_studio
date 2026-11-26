@@ -239,6 +239,17 @@ def _pinned_requirements(plat: str | None = None, arch: str | None = None) -> di
     return pins
 
 
+def _venv_site_packages(root: Path) -> Path:
+    if os.name == "nt":
+        return root / ".venv" / "Lib" / "site-packages"
+    lib_dir = root / ".venv" / "lib"
+    if lib_dir.is_dir():
+        found = next(lib_dir.glob("python*/site-packages"), None)
+        if found is not None:
+            return found
+    return lib_dir / "python3.12" / "site-packages"
+
+
 def inspect_all_dependencies(
     manifest_path: Path = MANIFEST_PATH,
     *,
@@ -332,7 +343,8 @@ def inspect_all_dependencies(
             if active_system == "macos":
                 try:
                     inst = importlib.metadata.version("mlx-whisper")
-                    statuses.append(DependencyStatus(spec, "Ready", inst, str(APP_ROOT / ".venv"), 0, False, "MLX Whisper Apple Silicon acceleration ready"))
+                    p = _venv_site_packages(APP_ROOT) / "mlx_whisper"
+                    statuses.append(DependencyStatus(spec, "Ready", inst, str(p), directory_size(p), False, "MLX Whisper Apple Silicon acceleration ready"))
                 except importlib.metadata.PackageNotFoundError:
                     statuses.append(DependencyStatus(spec, "Missing" if pinfo.is_apple_silicon else "Optional", "—", spec.install_path, 0, False, "Install mlx-whisper for Apple Silicon acceleration"))
             continue
@@ -343,7 +355,7 @@ def inspect_all_dependencies(
                 inst = importlib.metadata.version("PySide6")
                 state = "Ready" if inst == expected else "Ready"
                 upd = inst != expected
-                p = APP_ROOT / ".venv" / "Lib" / "site-packages" / "PySide6"
+                p = _venv_site_packages(APP_ROOT) / "PySide6"
                 statuses.append(DependencyStatus(spec, state, inst, str(p), directory_size(p), upd, f"Qt GUI runtime {inst}"))
             except importlib.metadata.PackageNotFoundError:
                 statuses.append(DependencyStatus(spec, "Missing", "—", spec.install_path, 0, False, "PySide6 not installed"))
@@ -357,7 +369,7 @@ def inspect_all_dependencies(
                         mismatched.append(f"{pkg}=={inst} (need {exp})")
                 except importlib.metadata.PackageNotFoundError:
                     missing.append(pkg)
-            site_dir = APP_ROOT / ".venv" / "Lib" / "site-packages"
+            site_dir = _venv_site_packages(APP_ROOT)
             if missing:
                 statuses.append(DependencyStatus(spec, "Missing", f"{len(pins) - len(missing)}/{len(pins)}", str(site_dir), directory_size(site_dir), False, "Missing: " + ", ".join(missing)))
             elif mismatched:
@@ -370,7 +382,7 @@ def inspect_all_dependencies(
             pkg_exe = APP_ROOT / "tools" / "package" / "yt-dlp.exe"
             try:
                 inst = importlib.metadata.version("yt-dlp")
-                statuses.append(DependencyStatus(spec, "Ready", inst, str(APP_ROOT / ".venv" / "Lib" / "site-packages" / "yt_dlp"), 0, inst != expected, f"yt-dlp {inst} active"))
+                statuses.append(DependencyStatus(spec, "Ready", inst, str(_venv_site_packages(APP_ROOT) / "yt_dlp"), 0, inst != expected, f"yt-dlp {inst} active"))
             except importlib.metadata.PackageNotFoundError:
                 if pkg_exe.is_file():
                     statuses.append(DependencyStatus(spec, "Reused existing", "bundled", str(pkg_exe), pkg_exe.stat().st_size, False, "Bundled yt-dlp.exe", True))
@@ -405,7 +417,7 @@ def inspect_all_dependencies(
             elif custom_exe and custom_exe.is_file():
                 statuses.append(DependencyStatus(spec, "Ready", "Purfview XXL", str(custom_exe), custom_exe.stat().st_size, False, "Standalone Purfview XXL ready"))
             elif fw_ver:
-                statuses.append(DependencyStatus(spec, "Ready", f"faster-whisper {fw_ver}", str(APP_ROOT / ".venv" / "Lib" / "site-packages" / "faster_whisper"), 0, False, "Python Faster-Whisper ready"))
+                statuses.append(DependencyStatus(spec, "Ready", f"faster-whisper {fw_ver}", str(_venv_site_packages(APP_ROOT) / "faster_whisper"), 0, False, "Python Faster-Whisper ready"))
             else:
                 statuses.append(DependencyStatus(spec, "Missing", "—", spec.install_path, 0, False, "No local transcription engine"))
 
@@ -443,7 +455,8 @@ def inspect_all_dependencies(
             detail = f"{len(present)}/{len(needed)} template fonts available"
             if missing_fonts:
                 detail += f" (fallback used for: {', '.join(missing_fonts)})"
-            statuses.append(DependencyStatus(spec, "Ready", f"{len(present)}/{len(needed)}", spec.install_path, 0, False, detail))
+            font_path = "/System/Library/Fonts" if active_system == "macos" else spec.install_path
+            statuses.append(DependencyStatus(spec, "Ready", f"{len(present)}/{len(needed)}", font_path, 0, False, detail))
 
     return statuses
 

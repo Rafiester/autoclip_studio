@@ -13,7 +13,17 @@ ROOT = Path(__file__).resolve().parent.parent
 PACKAGING = Path(__file__).resolve().parent
 sys.path.insert(0, str(PACKAGING))
 
-from make_icns import build_icns
+
+def _ensure_icns(icns_path: Path) -> Path:
+    try:
+        from make_icns import build_icns
+        return build_icns(icns_path)
+    except ImportError:
+        if icns_path.is_file():
+            return icns_path
+        raise RuntimeError(
+            f"{icns_path} is missing and PySide6 is not available in {sys.executable} to generate it."
+        )
 
 
 INFO_PLIST = {
@@ -41,7 +51,7 @@ def build_app_bundle(output_dir: Path, *, compile_binary: bool | None = None) ->
     resources_dir.mkdir(parents=True, exist_ok=True)
 
     icns_path = ROOT / "autoclip_studio" / "assets" / "autoclip.icns"
-    build_icns(icns_path)
+    _ensure_icns(icns_path)
     shutil.copy2(icns_path, resources_dir / "autoclip.icns")
 
     wordmark = ROOT / "autoclip_studio" / "assets" / "AutoClipTrans.png"

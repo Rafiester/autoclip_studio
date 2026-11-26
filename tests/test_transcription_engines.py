@@ -15,6 +15,7 @@ from autoclip_studio.transcription import (
 )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Subtitle Edit APPDATA lookup is Windows-only")
 def test_reuses_subtitle_edit_model_without_copying_weights(monkeypatch, tmp_path):
     monkeypatch.setenv("APPDATA", str(tmp_path))
     root = tmp_path / "Subtitle Edit/SpeechToText/Purfview-Faster-Whisper-XXL"
