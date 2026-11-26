@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from .captions import TEMPLATES, write_ass
+from .captions import DEFAULT_CAPTION_Y_RATIO, TEMPLATES, write_ass
 from .models import Highlight, Segment, Transcript, Word
 from .paths import CACHE_DIR
 from .process import ProcessManager, find_media_tool
@@ -29,7 +29,7 @@ def _sample() -> Transcript:
     ])
 
 
-def render_preview(name: str, manager: ProcessManager, cache: Path | None = None) -> Path:
+def render_preview(name: str, manager: ProcessManager, cache: Path | None = None, *, y_ratio: float = DEFAULT_CAPTION_Y_RATIO) -> Path:
     template = TEMPLATES[name]
     cache = cache if cache is not None else CACHE_DIR / "caption-previews"
     cache.mkdir(parents=True, exist_ok=True)
@@ -39,9 +39,12 @@ def render_preview(name: str, manager: ProcessManager, cache: Path | None = None
     with TemporaryDirectory(prefix="caption-preview-", dir=cache) as temporary:
         work = Path(temporary)
         captions = work / "captions.ass"
-        write_ass(_sample(), Highlight(0, PREVIEW_DURATION, name, "", "", 0), captions, PREVIEW_FRAME, name)
+        write_ass(
+            _sample(), Highlight(0, PREVIEW_DURATION, name, "", "", 0),
+            captions, PREVIEW_FRAME, name, y_ratio=y_ratio, avoid_faces=False,
+        )
         key = hashlib.sha256(captions.read_bytes())
-        key.update(f"band-v1:{template.background}:{PREVIEW_BAND}:{tool.st_size}:{tool.st_mtime_ns}".encode())
+        key.update(f"band-v2:{template.background}:{PREVIEW_BAND}:{y_ratio:.3f}:{tool.st_size}:{tool.st_mtime_ns}".encode())
         destination = cache / f"{stem}-{key.hexdigest()[:16]}.mp4"
         manager.check_cancelled()
         if destination.is_file() and destination.stat().st_size > 1024:
@@ -49,7 +52,7 @@ def render_preview(name: str, manager: ProcessManager, cache: Path | None = None
         staged = work / "preview.mp4"
         width, height = PREVIEW_FRAME
         band_width, band_height = PREVIEW_BAND
-        band_top = height - round(height * .14) - 196
+        band_top = max(0, min(height - band_height, round(height * y_ratio - band_height * 0.50)))
         command = [
             executable, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-filter_threads", "1",
             "-f", "lavfi", "-i", f"color=c=0x{template.background[1:]}:s={width}x{height}:r=24:d={PREVIEW_DURATION}",

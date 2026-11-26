@@ -10,12 +10,43 @@ from pathlib import Path
 from .models import Highlight, Transcript, Word
 
 SYNC_MODES = ("precise", "readable")
+DEFAULT_CAPTION_Y_RATIO = 0.73
+CAPTION_Y_MIN = 0.12
+CAPTION_Y_MAX = 0.88
 _SENTENCE_END = frozenset(".!?:")
 _CLAUSE_END = frozenset(",;")
 _EDGE_BLEED_MIN_S = 0.05
 _MAX_WORD_GAP_GROUP_S = 0.36
 _HYPHEN_CHARS = frozenset("-\u2010\u2011\u2013\u2014")
 _PUNCT_ATTACH = frozenset(".,!?:;…'\"”’)]")
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformSafeArea:
+    id: str
+    label: str
+    top: float
+    bottom: float
+    left: float
+    right: float
+    right_rail_top: float = 0.42
+
+
+PLATFORM_SAFE_AREAS: dict[str, PlatformSafeArea] = {
+    "all": PlatformSafeArea("all", "All Platforms", top=0.13, bottom=0.22, left=0.05, right=0.15, right_rail_top=0.40),
+    "tiktok": PlatformSafeArea("tiktok", "TikTok", top=0.13, bottom=0.22, left=0.04, right=0.15, right_rail_top=0.42),
+    "reels": PlatformSafeArea("reels", "Instagram Reels", top=0.12, bottom=0.21, left=0.04, right=0.15, right_rail_top=0.46),
+    "shorts": PlatformSafeArea("shorts", "YouTube Shorts", top=0.12, bottom=0.20, left=0.04, right=0.15, right_rail_top=0.44),
+}
+
+_EFFECT_SCALE_PEAK: dict[str, float] = {
+    "bounce": 1.22,
+    "viral": 1.20,
+    "punch": 1.11,
+    "emphasis": 1.12,
+    "box": 1.06,
+    "glow": 1.14,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +86,197 @@ class CaptionCue:
     words: tuple[Word, ...]
     text: str
     has_word_timing: bool
+
+
+@dataclass(frozen=True, slots=True)
+class FaceZone:
+    """Normalized output-frame face boxes [0..1] active during [start, end]."""
+    start: float
+    end: float
+    boxes: tuple[tuple[float, float, float, float], ...]
+
+
+def _font_advance_factor(font_name: str) -> float:
+    low = font_name.casefold()
+    if "impact" in low:
+        return 0.50
+    if "consolas" in low or "menlo" in low:
+        return 0.60
+    if "black" in low:
+        return 0.63
+    return 0.57
+
+
+def estimate_caption_bbox(
+    text: str,
+    template: CaptionTemplate,
+    width: int,
+    height: int,
+) -> tuple[float, float]:
+    """Estimate normalized caption (width, height) including wrap lines and peak animation scale."""
+    w = max(1, int(width))
+    h = max(1, int(height))
+    scale = min(w / 1080.0, h / 1080.0)
+    margin_x = max(12, round(w * 0.065))
+    avail_w = max(80.0, float(w - 2 * margin_x))
+
+    display = text.upper() if template.uppercase else text
+    words = display.split()
+    longest = max((len(item) for item in words), default=1)
+    fit_ratio = max(0.42, min(1.0, 18.0 / longest))
+    font_px = float(max(12, round(template.size * scale * (fit_ratio if fit_ratio < 1.0 else 1.0))))
+    char_w = font_px * _font_advance_factor(template.font)
+
+    if template.effect == "bounce" and words:
+        lines = [max(words, key=len)]
+    else:
+        lines = []
+        for raw_line in (display or " ").splitlines():
+            current = ""
+            for token in raw_line.split():
+                candidate = token if not current else f"{current} {token}"
+                if current and len(candidate) * char_w > avail_w:
+                    lines.append(current)
+                    current = token
+                else:
+                    current = candidate
+            if current or not lines:
+                lines.append(current)
+    line_count = max(1, len(lines))
+    max_line_px = max((len(line) * char_w for line in lines), default=char_w)
+
+    peak_scale = _EFFECT_SCALE_PEAK.get(template.effect, 1.02)
+    border_px = max(1.0, template.outline * scale) * 2.0 + (4.0 * scale if template.effect == "box" else 0.0)
+    box_w_px = min(avail_w, max_line_px * peak_scale + border_px)
+    box_h_px = line_count * font_px * 1.18 + border_px + max(0.0, (peak_scale - 1.0) * font_px * 0.85)
+    return (
+        max(0.08, min(0.95, box_w_px / w)),
+        max(0.03, min(0.55, box_h_px / h)),
+    )
+
+
+def _rect_intersection_area(
+    a: tuple[float, float, float, float],
+    b: tuple[float, float, float, float],
+) -> float:
+    ix0 = max(a[0], b[0])
+    iy0 = max(a[1], b[1])
+    ix1 = min(a[2], b[2])
+    iy1 = min(a[3], b[3])
+    if ix1 <= ix0 or iy1 <= iy0:
+        return 0.0
+    return (ix1 - ix0) * (iy1 - iy0)
+
+
+def _extract_face_boxes(
+    face_regions: list[FaceZone] | tuple[FaceZone, ...] | None,
+    start: float,
+    end: float,
+) -> list[tuple[float, float, float, float]]:
+    if not face_regions:
+        return []
+    padded: list[tuple[float, float, float, float]] = []
+    for region in face_regions:
+        if region.end < start - 0.05 or region.start > end + 0.05:
+            continue
+        for fx0, fy0, fx1, fy1 in region.boxes:
+            padded.append((
+                max(0.0, fx0 - 0.015),
+                max(0.0, fy0 - 0.015),
+                min(1.0, fx1 + 0.015),
+                min(1.0, fy1 + 0.035),
+            ))
+    return padded
+
+
+def resolve_caption_y_center(
+    start: float,
+    end: float,
+    text: str,
+    template: CaptionTemplate,
+    width: int,
+    height: int,
+    *,
+    y_ratio: float = DEFAULT_CAPTION_Y_RATIO,
+    avoid_faces: bool = True,
+    split_screen: bool = False,
+    face_regions: list[FaceZone] | tuple[FaceZone, ...] | None = None,
+    prev_y: float | None = None,
+) -> tuple[float, bool]:
+    """Compute stable, frame-safe normalized caption center Y [0..1] avoiding visible faces."""
+    box_w, box_h = estimate_caption_bbox(text, template, width, height)
+    half_h = box_h * 0.5
+    min_bound = half_h + 0.025
+    max_bound = max(min_bound, 1.0 - half_h - 0.025)
+
+    using_default_y = abs(float(y_ratio) - DEFAULT_CAPTION_Y_RATIO) < 0.005
+    raw_pref = 0.50 if (split_screen and using_default_y) else float(y_ratio)
+    preferred_y = max(min_bound, min(max_bound, raw_pref))
+
+    faces = _extract_face_boxes(face_regions, start, end) if avoid_faces else []
+    if not faces:
+        return preferred_y, False
+
+    if template.alignment in (1, 4, 7) and not split_screen:
+        cap_x0 = 0.065
+        cap_x1 = min(0.935, cap_x0 + box_w)
+    else:
+        cap_x0 = max(0.04, 0.5 - box_w * 0.5)
+        cap_x1 = min(0.96, 0.5 + box_w * 0.5)
+
+    def overlap_at(cy: float) -> float:
+        cap_rect = (cap_x0, cy - half_h, cap_x1, cy + half_h)
+        return sum(_rect_intersection_area(cap_rect, face) for face in faces)
+
+    pref_overlap = overlap_at(preferred_y)
+    if pref_overlap <= 1e-4:
+        if prev_y is not None and abs(preferred_y - prev_y) < 0.04:
+            clamped_prev = max(min_bound, min(max_bound, prev_y))
+            if overlap_at(clamped_prev) <= 1e-4:
+                return clamped_prev, abs(clamped_prev - preferred_y) > 0.005
+        return preferred_y, False
+
+    is_portrait = height >= width
+    safe_top = max(min_bound, (0.12 if is_portrait else 0.06) + half_h)
+    safe_bot = min(max_bound, (0.91 if is_portrait else 0.94) - half_h)
+    if safe_bot < safe_top:
+        safe_top, safe_bot = min_bound, max_bound
+    chrome_bot_edge = 0.80 if is_portrait else 0.91
+
+    # Track horizontal-overlapping faces for "below speaker's face" preference
+    horiz_faces = [f for f in faces if min(cap_x1, f[2]) - max(cap_x0, f[0]) > 0.02]
+    if not horiz_faces:
+        return preferred_y, False
+    lowest_face_bottom = max(f[3] for f in horiz_faces)
+    highest_face_top = min(f[1] for f in horiz_faces)
+
+    candidates: list[float] = [preferred_y]
+    if prev_y is not None:
+        candidates.append(max(safe_top, min(safe_bot, prev_y)))
+    for _, fy0, _, fy1 in horiz_faces:
+        candidates.append(max(safe_top, min(safe_bot, fy1 + half_h + 0.008)))
+        candidates.append(max(safe_top, min(safe_bot, fy0 - half_h - 0.012)))
+    step_y = safe_top
+    while step_y <= safe_bot + 1e-6:
+        candidates.append(step_y)
+        step_y += 0.02
+    candidates.append(safe_bot)
+
+    def candidate_cost(cy: float) -> float:
+        ov = overlap_at(cy)
+        # Prefer below face when avoiding overlap; penalize above-head jumps vs lower chest
+        above_pen = 0.20 if (cy + half_h <= highest_face_top + 0.01 and lowest_face_bottom < safe_bot) else 0.0
+        chrome_overhang = max(0.0, (cy + half_h) - chrome_bot_edge)
+        dist_pen = abs(cy - preferred_y) * 1.15
+        jump_pen = (abs(cy - prev_y) * 0.85) if prev_y is not None else 0.0
+        return ov * 1000.0 + above_pen + chrome_overhang * 1.8 + dist_pen + jump_pen
+
+    best_y = min(candidates, key=candidate_cost)
+    if prev_y is not None and abs(best_y - prev_y) < 0.04:
+        clamped_prev = max(safe_top, min(safe_bot, prev_y))
+        if overlap_at(clamped_prev) <= overlap_at(best_y) + 1e-4:
+            best_y = clamped_prev
+    return best_y, abs(best_y - preferred_y) > 0.005
 
 
 @dataclass(frozen=True, slots=True)
@@ -589,20 +811,64 @@ def build_caption_cues(
 
 
 class _CaptionScript:
-    def __init__(self, template: CaptionTemplate, width: int, height: int, *, split_screen: bool = False) -> None:
+    def __init__(
+        self,
+        template: CaptionTemplate,
+        width: int,
+        height: int,
+        *,
+        split_screen: bool = False,
+        y_ratio: float = DEFAULT_CAPTION_Y_RATIO,
+        avoid_faces: bool = True,
+        face_regions: list[FaceZone] | tuple[FaceZone, ...] | None = None,
+    ) -> None:
         self.template = template
         self.width = width
         self.height = height
         self.split_screen = split_screen
+        self.y_ratio = max(CAPTION_Y_MIN, min(CAPTION_Y_MAX, float(y_ratio)))
+        self.avoid_faces = avoid_faces
+        self.face_regions = face_regions
         self.events: list[tuple[int, int, int, str]] = []
         self.scale = min(width / 1080, height / 1080)
-        self.margin = 0 if split_screen else round(height * .14)
+        self._prev_y: float | None = None
 
-    def add(self, start: float, end: float, text: str, tags: str = "", *, layer: int = 0) -> None:
+        _, rep_box_h = estimate_caption_bbox(template.sample or "Sample line", template, width, height)
+        rep_h_px = rep_box_h * height
+        if split_screen:
+            self.margin = 0
+        else:
+            bottom_px = min(height - 10.0, max(rep_h_px + 10.0, self.y_ratio * height + rep_h_px * 0.5))
+            self.margin = max(10, round(height - bottom_px))
+
+    def _cue_placement(self, start: float, end: float, text: str) -> tuple[int, int, int | None]:
+        """Return (event_margin_v_override, target_bottom_y_px, split_pos_center_y_px_or_None)."""
+        _, box_h = estimate_caption_bbox(text, self.template, self.width, self.height)
+        resolved_y, _ = resolve_caption_y_center(
+            start, end, text, self.template, self.width, self.height,
+            y_ratio=self.y_ratio,
+            avoid_faces=self.avoid_faces,
+            split_screen=self.split_screen,
+            face_regions=self.face_regions,
+            prev_y=self._prev_y,
+        )
+        self._prev_y = resolved_y
+        box_h_px = box_h * self.height
+        bottom_px = round(min(self.height - 10.0, max(box_h_px + 10.0, resolved_y * self.height + box_h_px * 0.5)))
+        if self.split_screen:
+            center_px = round(resolved_y * self.height)
+            if abs(resolved_y - 0.50) > 0.025:
+                return 0, bottom_px, center_px
+            return 0, self.height // 2, None
+        cue_margin_v = max(10, self.height - bottom_px)
+        override = cue_margin_v if abs(cue_margin_v - self.margin) > 2 else 0
+        return override, bottom_px, None
+
+    def add(self, start: float, end: float, text: str, tags: str = "", *, layer: int = 0, margin_v: int = 0) -> None:
         start_cs, end_cs = _cs(start), _cs(end)
         if end_cs > start_cs:
             override = f"{{{tags}}}" if tags else ""
-            row = f"Dialogue: {layer},{ass_timestamp(start)},{ass_timestamp(end)},Default,,0,0,0,," + override + text
+            row = f"Dialogue: {layer},{ass_timestamp(start)},{ass_timestamp(end)},Default,,0,0,{margin_v},," + override + text
             self.events.append((layer, start_cs, end_cs, row))
 
     def transform_text(self, text: str) -> str:
@@ -613,11 +879,21 @@ class _CaptionScript:
         scale = max(.42, min(1.0, 18 / longest))
         return fr"\fs{max(12, round(self.template.size * self.scale * scale))}" if scale < 1 else ""
 
-    def phrase(self, start: float, end: float, text: str, words: list[Word] | None = None) -> None:
+    def phrase(
+        self,
+        start: float,
+        end: float,
+        text: str,
+        words: list[Word] | None = None,
+        *,
+        margin_v: int = 0,
+        split_pos_y: int | None = None,
+    ) -> None:
         style = self.template
         text = self.transform_text(text)
         body = _escape(text)
         fit = self.fit(text)
+        pos_tag = fr"\an5\pos({self.width // 2},{split_pos_y})" if split_pos_y is not None else ""
         length = max(1, round((end - start) * 1000))
         short_fade = min(140, max(25, length // 4))
         effect = style.effect
@@ -642,8 +918,8 @@ class _CaptionScript:
             glow_fade = min(460, max(glow_peak + 60, length))
             glow = (fr"\bord{border}\blur{max(1, round(10 * self.scale))}\3c{_ass_color(style.accent)}"
                     fr"\1a&HFF&\3a&H92&\t(0,{glow_peak},\3a&H15&)\t({glow_peak},{glow_fade},\3a&H8C&)")
-            self.add(start, end, body, fit + glow)
-            self.add(start, end, body, fit + tags, layer=1)
+            self.add(start, end, body, fit + pos_tag + glow, margin_v=margin_v)
+            self.add(start, end, body, fit + pos_tag + tags, layer=1, margin_v=margin_v)
             return
         if effect == "gradient":
             body = _gradient(text, style.primary, style.accent)
@@ -656,7 +932,7 @@ class _CaptionScript:
             )
         if effect == "karaoke" and not words:
             tags += r"\1c&H00F4F4F4&"
-        self.add(start, end, body, fit + tags)
+        self.add(start, end, body, fit + pos_tag + tags, margin_v=margin_v)
 
     def _base_y(self) -> int:
         if self.split_screen:
@@ -668,11 +944,15 @@ class _CaptionScript:
     def group(self, cue: CaptionCue, profile: CaptionSyncProfile) -> None:
         style = self.template
         words = list(cue.words)
+        cue_margin_v, cue_bottom_px, split_pos_y = self._cue_placement(cue.start, cue.end, cue.text)
         if not words or not cue.has_word_timing:
-            self.phrase(cue.start, cue.end, cue.text, None)
+            self.phrase(cue.start, cue.end, cue.text, None, margin_v=cue_margin_v, split_pos_y=split_pos_y)
             return
         if style.effect not in {"emphasis", "viral", "bounce", "box", "typewriter"}:
-            self.phrase(cue.start, cue.end, " ".join(item.text for item in words), words)
+            self.phrase(
+                cue.start, cue.end, " ".join(item.text for item in words), words,
+                margin_v=cue_margin_v, split_pos_y=split_pos_y,
+            )
             return
 
         full_text = self.transform_text(" ".join(item.text for item in words))
@@ -680,7 +960,8 @@ class _CaptionScript:
         fit = self.fit(full_text)
         background = fr"\bord1\3c{_ass_color('#13101C')}"
         before = ""
-        base_y = self._base_y()
+        base_y = split_pos_y if split_pos_y is not None else (self.height // 2 if self.split_screen else cue_bottom_px)
+        pos_tag = fr"\an5\pos({self.width // 2},{split_pos_y})" if split_pos_y is not None else ""
 
         # Precompute word spans, seamlessly bridging tiny <=140-180ms gaps inside one phrase.
         spans: list[tuple[float, float]] = []
@@ -700,21 +981,22 @@ class _CaptionScript:
             length = max(1, round((w_end - w_start) * 1000))
             if style.effect in {"emphasis", "viral"}:
                 if _cs(w_start) > _cs(cursor):
-                    self.add(cursor, w_start, " ".join(plain), fit)
+                    self.add(cursor, w_start, " ".join(plain), fit + pos_tag, margin_v=cue_margin_v)
                 accent = "#A2FFE8" if style.effect == "viral" and index % 2 else style.accent
                 emphasis = fr"\1c{_ass_color(accent)}\b1\fscy112"
-                movement = ""
+                movement = pos_tag
                 if style.effect == "viral":
                     if index == 0:
                         move_ms = min(115, length)
                         rise_y = base_y + round(16 * self.scale)
-                        movement = fr"\move({self.width // 2},{rise_y},{self.width // 2},{base_y},0,{move_ms})"
+                        an_prefix = r"\an5" if self.split_screen else ""
+                        movement = fr"{an_prefix}\move({self.width // 2},{rise_y},{self.width // 2},{base_y},0,{move_ms})"
                         emphasis += fr"\fscy122\t(0,{min(125, length)},\fscy100)"
                     else:
                         emphasis = fr"\1c{_ass_color(accent)}\b1\fscy114\t(0,{min(100, length)},\fscy104)"
                 line = plain.copy()
                 line[index] = "{" + emphasis + "}" + plain[index] + r"{\1c\fscy100}"
-                self.add(w_start, w_end, " ".join(line), fit + movement)
+                self.add(w_start, w_end, " ".join(line), fit + movement, margin_v=cue_margin_v)
             elif style.effect == "bounce":
                 word_fit = self.fit(word_text)
                 if length >= 220:
@@ -723,21 +1005,21 @@ class _CaptionScript:
                 else:
                     first, second, last = [max(1, round(length * f)) for f in (.30, .62, .90)]
                     peak = 114
-                self.add(w_start, w_end, _escape(word_text), word_fit + (
+                self.add(w_start, w_end, _escape(word_text), word_fit + pos_tag + (
                     fr"\fscx64\fscy64\t(0,{first},\fscx{peak}\fscy{peak})"
                     fr"\t({first},{second},\fscx94\fscy94)\t({second},{last},\fscx100\fscy100)"
-                ))
+                ), margin_v=cue_margin_v)
             elif style.effect == "box":
                 if _cs(w_start) > _cs(cursor):
-                    self.add(cursor, w_start, " ".join(plain), fit + background)
+                    self.add(cursor, w_start, " ".join(plain), fit + pos_tag + background, margin_v=cue_margin_v)
                 box = max(2, round(style.outline * self.scale))
                 reveal = fr"\bord{box}\3c\3a&H65&\t(0,{min(95, length)},\3a&H00&)"
                 line = plain.copy()
                 line[index] = "{" + reveal + "}" + line[index] + "{" + background + r"\3a&H00&}"
-                self.add(w_start, w_end, " ".join(line), fit + background)
+                self.add(w_start, w_end, " ".join(line), fit + pos_tag + background, margin_v=cue_margin_v)
             else:
                 if before and _cs(w_start) > _cs(cursor):
-                    self.add(cursor, w_start, _escape(before.rstrip()), fit)
+                    self.add(cursor, w_start, _escape(before.rstrip()), fit + pos_tag, margin_v=cue_margin_v)
                 chars = _graphemes(word_text)
                 active_window = max(0.02, (word.end - w_start) * .82)
                 stride = active_window / max(1, len(chars))
@@ -745,7 +1027,7 @@ class _CaptionScript:
                     c_start = w_start + (count - 1) * stride
                     c_end = c_start + stride if count < len(chars) else w_end
                     body = before + "".join(chars[:count])
-                    self.add(c_start, c_end, _escape(body), fit)
+                    self.add(c_start, c_end, _escape(body), fit + pos_tag, margin_v=cue_margin_v)
                 before += word_text + " "
             cursor = w_end
 
@@ -792,10 +1074,20 @@ def write_ass(
     fps: float | None = None,
     sync_mode: str = "precise",
     offset_ms: int = 0,
+    y_ratio: float = DEFAULT_CAPTION_Y_RATIO,
+    avoid_faces: bool = True,
+    face_regions: list[FaceZone] | tuple[FaceZone, ...] | None = None,
 ) -> None:
     template = TEMPLATES.get(template_name, TEMPLATES[TEMPLATE_DEFAULT])
     profile = _SYNC_PROFILES.get(str(sync_mode).lower(), _SYNC_PROFILES["precise"])
-    script = _CaptionScript(template, *resolution, split_screen=split_screen)
+    script = _CaptionScript(
+        template,
+        *resolution,
+        split_screen=split_screen,
+        y_ratio=y_ratio,
+        avoid_faces=avoid_faces,
+        face_regions=face_regions,
+    )
     for cue in build_caption_cues(transcript, highlight, template, fps=fps, sync_mode=sync_mode, offset_ms=offset_ms):
         script.group(cue, profile)
     script.write(output)

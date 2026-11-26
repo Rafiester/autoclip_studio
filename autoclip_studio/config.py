@@ -85,6 +85,10 @@ DEFAULTS: dict[str, Any] = {
     "caption_template": TEMPLATE_DEFAULT,
     "caption_sync_mode": "precise",
     "caption_offset_ms": 0,
+    "caption_y_ratio": 0.73,
+    "caption_avoid_faces": True,
+    "caption_show_safe_area": True,
+    "caption_safe_area_platform": "all",
     "output_dir": "",
     "whisper_model": "small",
     "whisper_device": "auto",
@@ -481,6 +485,42 @@ class SettingsStore:
         with self._lock:
             self.data["caption_sync_mode"] = clean_mode
             self.data["caption_offset_ms"] = clean_offset
+        if debounced:
+            self.save_debounced()
+        else:
+            self.save()
+
+    def caption_positioning(self) -> tuple[float, bool, bool, str]:
+        with self._lock:
+            try:
+                y_ratio = max(0.12, min(0.88, float(self.data.get("caption_y_ratio", 0.73))))
+            except (TypeError, ValueError):
+                y_ratio = 0.73
+            avoid_faces = bool(self.data.get("caption_avoid_faces", True))
+            show_safe_area = bool(self.data.get("caption_show_safe_area", True))
+            raw_platform = str(self.data.get("caption_safe_area_platform") or "all").strip().lower()
+            platform = raw_platform if raw_platform in {"all", "tiktok", "reels", "shorts"} else "all"
+            return round(y_ratio, 3), avoid_faces, show_safe_area, platform
+
+    def update_caption_positioning(
+        self,
+        *,
+        y_ratio: float | None = None,
+        avoid_faces: bool | None = None,
+        show_safe_area: bool | None = None,
+        platform: str | None = None,
+        debounced: bool = False,
+    ) -> None:
+        with self._lock:
+            if y_ratio is not None:
+                self.data["caption_y_ratio"] = round(max(0.12, min(0.88, float(y_ratio))), 3)
+            if avoid_faces is not None:
+                self.data["caption_avoid_faces"] = bool(avoid_faces)
+            if show_safe_area is not None:
+                self.data["caption_show_safe_area"] = bool(show_safe_area)
+            if platform is not None:
+                clean = str(platform).strip().lower()
+                self.data["caption_safe_area_platform"] = clean if clean in {"all", "tiktok", "reels", "shorts"} else "all"
         if debounced:
             self.save_debounced()
         else:

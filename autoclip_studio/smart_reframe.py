@@ -107,10 +107,19 @@ class FramingMetrics:
 
 
 @dataclass(slots=True)
+class OutputFaceWindow:
+    """Normalized face boxes inside final output frame [0..1] over a shot/window."""
+    start: float
+    end: float
+    boxes: list[tuple[float, float, float, float]] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class FramingPlan:
     segments: list[FramingSegment]
     metrics: FramingMetrics = field(default_factory=FramingMetrics)
     has_split: bool = False
+    face_windows: list[OutputFaceWindow] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -126,6 +135,14 @@ class FramingPlan:
                     "bottom_box": list(s.bottom_box) if s.bottom_box else None,
                 }
                 for s in self.segments
+            ],
+            "face_windows": [
+                {
+                    "start": round(w.start, 3),
+                    "end": round(w.end, 3),
+                    "boxes": [[round(v, 4) for v in box] for box in w.boxes],
+                }
+                for w in self.face_windows
             ],
         }
 
@@ -146,7 +163,15 @@ class FramingPlan:
             ))
         m_raw = data.get("metrics") or {}
         metrics = FramingMetrics(**{k: v for k, v in m_raw.items() if k in FramingMetrics.__dataclass_fields__})
-        return cls(segments=segments, metrics=metrics, has_split=bool(data.get("has_split", False)))
+        windows = [
+            OutputFaceWindow(
+                start=float(w["start"]),
+                end=float(w["end"]),
+                boxes=[(float(b[0]), float(b[1]), float(b[2]), float(b[3])) for b in w.get("boxes", []) if len(b) == 4],
+            )
+            for w in data.get("face_windows", [])
+        ]
+        return cls(segments=segments, metrics=metrics, has_split=bool(data.get("has_split", False)), face_windows=windows)
 
 
 def find_yunet_model() -> Path | None:
@@ -512,7 +537,7 @@ def _plan_cache_path(
         stat = source.stat()
     except OSError:
         return None
-    key = f"reframe-v3:{source.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:{start:.3f}:{end:.3f}:{crop_width}:{mode}:{style}:{sample_fps:.2f}"
+    key = f"reframe-v5:{source.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:{start:.3f}:{end:.3f}:{crop_width}:{mode}:{style}:{sample_fps:.2f}"
     digest = hashlib.sha256(key.encode()).hexdigest()[:32]
     base_dir = cache_dir if cache_dir is not None else CACHE_DIR
     return base_dir / "tracking" / f"{digest}.json"
@@ -794,6 +819,128 @@ def _build_single_track_keyframes(
     return [CropKeyframe(kf.time, kf.left, kf.cut) for kf in directed]
 
 
+def _eval_keyframes_left(keyframes: list[CropKeyframe], t: float, fallback: float) -> float:
+    """Evaluate output crop left coordinate at clip/segment time t matching FFmpeg expression."""
+    if not keyframes:
+        return fallback
+    if t <= keyframes[0].time:
+        return keyframes[0].left
+    for i in range(len(keyframes) - 1):
+        ka = keyframes[i]
+        kb = keyframes[i + 1]
+        if t < kb.time:
+            if kb.cut or abs(kb.left - ka.left) < 0.5 or kb.time <= ka.time:
+                return ka.left
+            frac = max(0.0, min(1.0, (t - ka.time) / (kb.time - ka.time)))
+            return ka.left + (kb.left - ka.left) * frac
+    return keyframes[-1].left
+
+
+def _summarize_track_boxes(
+    mapped_by_tid: dict[int, list[tuple[float, float, float, float]]],
+    window_samples: int = 1,
+) -> list[tuple[float, float, float, float]]:
+    """Aggregate persistent frame detections per track into steady shot-level face zones."""
+    if not mapped_by_tid:
+        return []
+    max_len = max(len(rects) for rects in mapped_by_tid.values())
+    min_persist = 2 if max_len >= 4 or window_samples >= 4 else 1
+    zones: list[tuple[float, float, float, float]] = []
+    for rects in mapped_by_tid.values():
+        if not rects:
+            continue
+        if len(mapped_by_tid) > 1 and len(rects) < max(min_persist, int(window_samples * 0.25)):
+            continue
+        x0 = float(np.percentile([r[0] for r in rects], 20))
+        y0 = float(np.percentile([r[1] for r in rects], 20))
+        x1 = float(np.percentile([r[2] for r in rects], 85))
+        y1 = float(np.percentile([r[3] for r in rects], 85))
+        # Reject corner/table edge false positives when a higher primary face exists in the shot.
+        if len(mapped_by_tid) > 1 and y0 >= 0.62 and (x0 <= 0.03 or x1 >= 0.97) and len(rects) < max_len * 0.65:
+            continue
+        if x1 - x0 >= 0.04 and y1 - y0 >= 0.04:
+            zones.append((max(0.0, x0), max(0.0, y0), min(1.0, x1), min(1.0, y1)))
+    return zones
+
+
+def _compute_output_face_windows(
+    samples: list[_FrameSample],
+    segments: list[FramingSegment],
+    src_width: int,
+    src_height: int,
+    crop_width: int,
+    output_size: tuple[int, int],
+    *,
+    crop_height: int | None = None,
+    crop_y: int = 0,
+) -> list[OutputFaceWindow]:
+    """Transform tracked source faces into steady shot-level normalized output-frame bounding boxes."""
+    if not samples or not segments:
+        return []
+    out_w, out_h = output_size
+    c_w = max(1, int(crop_width))
+    c_h = max(1, int(crop_height if crop_height is not None else src_height))
+    half_h = (out_h // 2) - ((out_h // 2) % 2)
+    top_ratio = half_h / max(1, out_h)
+    bot_ratio = (out_h - half_h) / max(1, out_h)
+    fallback_left = _clamp_crop_left(src_width * 0.5, c_w, src_width)
+    windows: list[OutputFaceWindow] = []
+
+    for seg in segments:
+        if seg.end <= seg.start + 0.02:
+            continue
+        if seg.kind == "split" and seg.top_box and seg.bottom_box:
+            tx, ty, tw, th = seg.top_box
+            bx, by, bw, bh = seg.bottom_box
+            mapped: dict[int, list[tuple[float, float, float, float]]] = {}
+            seg_count = 0
+            for s in samples:
+                if s.rel_t < seg.start - 0.05 or s.rel_t > seg.end + 0.05:
+                    continue
+                seg_count += 1
+                for tid, det, _ in s.tracks:
+                    for key_offset, box, y_base, y_span in ((0, (tx, ty, tw, th), 0.0, top_ratio), (100_000, (bx, by, bw, bh), top_ratio, bot_ratio)):
+                        rx, ry, rw, rh = box
+                        nx0 = max(0.0, (det.x - rx) / max(1, rw))
+                        nx1 = min(1.0, (det.x + det.w - rx) / max(1, rw))
+                        ny0 = y_base + max(0.0, (det.y - ry) / max(1, rh)) * y_span
+                        ny1 = y_base + min(y_span, max(0.0, (det.y + det.h - ry) / max(1, rh)) * y_span)
+                        if nx1 - nx0 >= 0.05 and ny1 - ny0 >= 0.03:
+                            mapped.setdefault(tid + key_offset, []).append((nx0, ny0, nx1, ny1))
+            boxes = _summarize_track_boxes(mapped, seg_count)
+            if boxes:
+                windows.append(OutputFaceWindow(seg.start, seg.end, boxes))
+            continue
+
+        # Single-crop segment: break cleanly at cut keyframes into steady shot windows.
+        cut_starts = [seg.start]
+        for kf in seg.keyframes:
+            abs_t = kf.time + (seg.start if len(segments) > 1 else 0.0)
+            if kf.cut and abs_t > cut_starts[-1] + 0.12 and abs_t < seg.end - 0.08:
+                cut_starts.append(abs_t)
+        cut_bounds = list(zip(cut_starts, cut_starts[1:] + [seg.end]))
+        for w_start, w_end in cut_bounds:
+            mapped_single: dict[int, list[tuple[float, float, float, float]]] = {}
+            win_count = 0
+            for s in samples:
+                if s.rel_t < w_start - 0.05 or s.rel_t > w_end + 0.05:
+                    continue
+                win_count += 1
+                rel_in_seg = s.rel_t - (seg.start if len(segments) > 1 else 0.0)
+                c_left = _eval_keyframes_left(seg.keyframes, rel_in_seg, fallback_left)
+                for tid, det, _ in s.tracks:
+                    nx0 = max(0.0, (det.x - c_left) / c_w)
+                    nx1 = min(1.0, (det.x + det.w - c_left) / c_w)
+                    ny0 = max(0.0, (det.y - crop_y) / c_h)
+                    ny1 = min(1.0, (det.y + det.h - crop_y) / c_h)
+                    if nx1 - nx0 >= 0.05 and ny1 - ny0 >= 0.04:
+                        mapped_single.setdefault(tid, []).append((nx0, ny0, nx1, ny1))
+            boxes = _summarize_track_boxes(mapped_single, win_count)
+            if boxes:
+                windows.append(OutputFaceWindow(w_start, w_end, boxes))
+    return windows
+
+
 def _build_scene_adaptive_plan(
     samples: list[_FrameSample],
     duration: float,
@@ -806,6 +953,8 @@ def _build_scene_adaptive_plan(
     metrics: FramingMetrics,
     style: str = "natural",
     source_fps: float = 25.0,
+    crop_height: int | None = None,
+    crop_y: int = 0,
 ) -> FramingPlan:
     """Build single-speaker portrait timeline, or explicit Podcast Split Screen <-> Close-up segments."""
     if not samples:
@@ -824,10 +973,16 @@ def _build_scene_adaptive_plan(
             samples, src_width, crop_width, mode=mode, metrics=metrics,
             style=style, src_height=src_height, source_fps=source_fps,
         )
+        segs = [FramingSegment("single", 0.0, duration, keyframes=kfs)]
+        face_wins = _compute_output_face_windows(
+            samples, segs, src_width, src_height, crop_width, output_size,
+            crop_height=crop_height, crop_y=crop_y,
+        )
         return FramingPlan(
-            segments=[FramingSegment("single", 0.0, duration, keyframes=kfs)],
+            segments=segs,
             metrics=metrics,
             has_split=False,
+            face_windows=face_wins,
         )
 
     # Explicit Podcast Split Screen: split at camera cuts so close-up shots return to single-speaker framing.
@@ -911,12 +1066,22 @@ def _build_scene_adaptive_plan(
             samples, src_width, crop_width, mode=mode, metrics=metrics,
             style=style, src_height=src_height, source_fps=source_fps,
         )
+        segs = [FramingSegment("single", 0.0, duration, keyframes=kfs)]
+        face_wins = _compute_output_face_windows(
+            samples, segs, src_width, src_height, crop_width, output_size,
+            crop_height=crop_height, crop_y=crop_y,
+        )
         return FramingPlan(
-            segments=[FramingSegment("single", 0.0, duration, keyframes=kfs)],
+            segments=segs,
             metrics=metrics,
             has_split=False,
+            face_windows=face_wins,
         )
-    return FramingPlan(segments=segments, metrics=metrics, has_split=True)
+    face_wins = _compute_output_face_windows(
+        samples, segments, src_width, src_height, crop_width, output_size,
+        crop_height=crop_height, crop_y=crop_y,
+    )
+    return FramingPlan(segments=segments, metrics=metrics, has_split=True, face_windows=face_wins)
 
 
 def analyze_smart_reframe(
@@ -936,6 +1101,8 @@ def analyze_smart_reframe(
     cache_enabled: bool = False,
     transcript: Transcript | None = None,
     cache_dir: Path | None = None,
+    crop_height: int | None = None,
+    crop_y: int = 0,
 ) -> FramingPlan:
     """Analyze a clip range and build a deterministic, cached Smart Reframing plan."""
     selected_mode = mode if mode in VALID_REFRAME_MODES else "auto"
@@ -989,6 +1156,7 @@ def analyze_smart_reframe(
     plan = _build_scene_adaptive_plan(
         samples, duration, src_width, src_height, crop_width, output_size,
         mode=selected_mode, style=selected_style, metrics=metrics, source_fps=source_fps,
+        crop_height=crop_height, crop_y=crop_y,
     )
     if cache_path is not None and plan.segments:
         try:

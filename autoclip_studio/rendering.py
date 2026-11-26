@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import mkstemp
 from typing import Callable
 
-from .captions import write_ass
+from .captions import DEFAULT_CAPTION_Y_RATIO, FaceZone, write_ass
 from .media import probe, validate_mp4
 from .models import Highlight, Transcript
 from .performance import ProfileLimits
@@ -167,7 +167,9 @@ def render_clip(source: Path, highlight: Highlight, transcript: Transcript,
                 reframe_mode: str | None = None,
                 reframe_style: str = "natural",
                 caption_sync_mode: str = "precise",
-                caption_offset_ms: int = 0) -> float:
+                caption_offset_ms: int = 0,
+                caption_y_ratio: float = DEFAULT_CAPTION_Y_RATIO,
+                caption_avoid_faces: bool = True) -> float:
     work_dir.mkdir(parents=True, exist_ok=True)
     output.parent.mkdir(parents=True, exist_ok=True)
     (src_width, src_height), source_fps, is_vfr, has_audio = _stream_metadata(source, manager, dimensions)
@@ -195,16 +197,25 @@ def render_clip(source: Path, highlight: Highlight, transcript: Transcript,
             crop_width, output_size, manager, log,
             mode=effective_mode, style=reframe_style, sample_interval=interval,
             cache_enabled=cache_enabled, transcript=transcript,
+            crop_height=crop_height, crop_y=y,
         )
 
     if captions:
         ass_path = work_dir / "captions.ass"
+        face_regions = [
+            FaceZone(w.start, w.end, tuple(w.boxes))
+            for w in getattr(plan, "face_windows", ()) or ()
+            if w.boxes
+        ]
         write_ass(
             transcript, highlight, ass_path, output_size, caption_template,
             split_screen=plan.has_split,
             fps=source_fps,
             sync_mode=caption_sync_mode,
             offset_ms=caption_offset_ms,
+            y_ratio=caption_y_ratio,
+            avoid_faces=caption_avoid_faces,
+            face_regions=face_regions,
         )
 
     vfr_fps = source_fps if is_vfr and source_fps else None

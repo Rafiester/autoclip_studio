@@ -1,11 +1,30 @@
 # AutoClip Studio — Agent Handoff & Progress
 
 **Last Updated:** 2026-11-26  
-**Current Phase:** Single Active Speaker Auto Reframing Complete
+**Current Phase:** Adjustable Caption Positioning & Face-Safe Placement Complete
 
 ## Execution Status
 
 ### Completed Tasks
+- **Adjustable Caption Positioning & Face-Safe Placement:** (Pre-modification checkpoint: `05149e4`)
+  - **Default Placement & Coordinate Model ([`autoclip_studio/captions.py`](autoclip_studio/captions.py)):**
+    - Replaced fixed bottom `0.14` margin (`86%` bottom edge, overlapping bottom TikTok/Shorts UI overlays) with normalized vertical center anchor **`DEFAULT_CAPTION_Y_RATIO = 0.73`** (`73%` frame height — lower-chest zone cleanly below speaker chins/mics and above bottom platform UI chrome) across portrait resolutions while keeping stacked `split_screen` defaulting safely onto the `50%` seam.
+    - Added `estimate_caption_bbox()` computing wrapped line count (`WrapStyle: 0`), scaled font height (`\fs` reductions), border padding, and animation peak multipliers (`_EFFECT_SCALE_PEAK`: `Pop Bounce` `1.22x`, `Viral Shorts` `1.20x`, `Glow` `1.14x`, `Hormozi` `1.12x`, `Impact` `1.11x`), applying per-event ASS `MarginV` overrides cleanly for multi-line or face-shifted cues without breaking word-effect ASS tags (`Typewriter`).
+  - **Zero-Extra-Pass Face-Aware Placement ([`autoclip_studio/smart_reframe.py`](autoclip_studio/smart_reframe.py), [`autoclip_studio/rendering.py`](autoclip_studio/rendering.py), [`autoclip_studio/captions.py`](autoclip_studio/captions.py)):**
+    - Reused existing Smart Reframing detections in `_compute_output_face_windows()` (`reframe-v5` cache) to project visible faces into steady, shot-level normalized output boxes (`OutputFaceWindow` across `single`, `split` top+bottom panels, and cut cuts), filtering out transient 1-frame / corner edge false positives in `_summarize_track_boxes()`.
+    - Added `resolve_caption_y_center()` to preserve the user's preferred `y_ratio` whenever clear, shift below colliding faces toward lower chest when overlap occurs (within safe portrait/landscape bounds), evaluate all faces in stacked `split_screen`, and apply `4%` hysteresis (`prev_y`) to eliminate cue-to-cue vertical bobbing.
+  - **Caption Templates UI Controls & Platform Safe-Area Guides ([`autoclip_studio/ui/caption_library.py`](autoclip_studio/ui/caption_library.py), [`autoclip_studio/config.py`](autoclip_studio/config.py), [`autoclip_studio/models.py`](autoclip_studio/models.py), [`autoclip_studio/pipeline.py`](autoclip_studio/pipeline.py), [`autoclip_studio/gui.py`](autoclip_studio/gui.py), [`autoclip_studio/caption_preview.py`](autoclip_studio/caption_preview.py)):**
+    - Extended `CaptionLibrary` with a right-hand **Caption Positioning** card containing an interactive click/drag **`9:16` `_PositionPreview`** (showing head/torso silhouette, `Face Zone` clearance status, active template styling, and preview-only translucent dashed `PLATFORM_SAFE_AREAS` guides for **All Platforms**, **TikTok**, **Instagram Reels**, and **YouTube Shorts** — never rendered into exports), **Vertical Position** slider (`12%`–`88%`), **Avoid Covering Faces** checkbox, **Show Platform Safe Area** toggle + platform selector, and **Reset to Default** button.
+    - Persisted `caption_y_ratio`, `caption_avoid_faces`, `caption_show_safe_area`, and `caption_safe_area_platform` in `SettingsStore` / `SettingsManager` and wired them through `ProjectOptions` into `render_clip()` and `caption_preview.render_preview()` (`band-v2`).
+  - **Regression Clip & Layout Comparison (`6QyRGE6Cg8E.mp4`, `[1521.5 -> 1557.1]`, `35.600s`, `1080x1920`, `25 FPS`, `auto`, `Impact`):**
+    - Rendered in **`25.81s`** total (tracking + face projection + NVENC encoding), producing `35.600s` duration, `13` steady shot face windows (`face_windows=13`), and `30` frame-aligned ASS cues (`Unique Dialogue MarginV overrides: [0, 406]` — 1-line cues anchored cleanly at `455` / `73%` lower chest, 2-line cues dynamically centered at `406` / `73%` with zero face overlap and zero corner-mug false triggers).
+    - Verified visually in conversation scratch captures (`caption_templates_ui.png`, `caption_templates_face_avoid.png`, `pos_t05.png`, `pos_t16.png`, `pos_t25.png`).
+  - **Regression & Smoke Test Results:**
+    - Added [`tests/test_caption_positioning.py`](tests/test_caption_positioning.py) covering multi-resolution `73%` normalization, 1-line vs 2-line + `Pop Bounce` animation box scaling, face-clear preservation vs lower-chest dodge & hysteresis, landscape/square/stacked split-screen projections, safe-area export isolation, `SettingsManager` persistence, and `CaptionLibrary` UI interactions + reset.
+    - Verification run (`test_caption_positioning`, `test_captions`, `test_caption_sync`, `test_auto_director`, `test_local_and_srt`, `test_persistent_settings`, `test_pipeline_regressions`, `test_transcription_engines`, `test_cross_platform`, `test_floating_sidebar_navigation`, `test_media`): **63 passed**.
+    - Smart Reframe suite (`tests/test_smart_reframe.py -k "not test_new_project_smart_reframe_selector_ui"`): **5 passed** (`1` host-setting UI test excluded).
+    - Media integration smoke (`.\.venv\Scripts\python.exe -m tests.integration_smoke`): **passed** (`Rendering with NVIDIA NVENC (p5)`, `1501361 bytes`, `6.30s`).
+
 - **Single Active Speaker Reframing (Auto Smart Reframe & Intelligent Auto Director):** (Pre-modification checkpoint: `fa6fcc6`)
   - **Confirmed Root Causes:**
     1. **Automatic Split-Screen Trigger ([`autoclip_studio/smart_reframe.py`](autoclip_studio/smart_reframe.py)):** `_build_scene_adaptive_plan()` activated stacked `split` segments whenever `mode == "auto"` encountered wide two-person shots (`two_shot_ratio >= 0.50`) with overlapping audio/laughter (`overlap_ratio >= 0.35`, duration `>= 2.5s`), duplicating panels instead of keeping a full-height 9:16 single-speaker composition.

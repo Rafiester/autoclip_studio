@@ -97,6 +97,8 @@ class ProjectOptions:
     caption_template: str = "Impact"
     caption_sync_mode: str = "precise"
     caption_offset_ms: int = 0
+    caption_y_ratio: float = 0.73
+    caption_avoid_faces: bool = True
     provider: str = "gemini"
     model: str = "gemini-2.5-flash"
     multimodal: bool = False

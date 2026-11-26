@@ -7,12 +7,24 @@ from PySide6.QtCore import QEvent, QObject, QRectF, QSignalBlocker, Qt, QThread,
 from PySide6.QtGui import QColor, QFont, QImage, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtMultimedia import QMediaPlayer, QVideoFrame, QVideoSink
 from PySide6.QtWidgets import (
-    QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton,
-    QScrollArea, QSizePolicy, QSpinBox, QVBoxLayout, QWidget,
+    QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton,
+    QScrollArea, QSizePolicy, QSlider, QSpinBox, QVBoxLayout, QWidget,
 )
 
 from ..caption_preview import PREVIEW_DURATION, render_preview
-from ..captions import TEMPLATES, CaptionTemplate, template_font
+from ..captions import (
+    CAPTION_Y_MAX,
+    CAPTION_Y_MIN,
+    DEFAULT_CAPTION_Y_RATIO,
+    PLATFORM_SAFE_AREAS,
+    TEMPLATE_DEFAULT,
+    TEMPLATES,
+    CaptionTemplate,
+    FaceZone,
+    estimate_caption_bbox,
+    resolve_caption_y_center,
+    template_font,
+)
 from ..diagnostics import log_error
 from ..process import CancelledError, ProcessManager
 
@@ -24,14 +36,15 @@ class _PreviewRender(QThread):
     ready = Signal(str, object)
     failed = Signal(str)
 
-    def __init__(self, name: str, parent: QWidget) -> None:
+    def __init__(self, name: str, parent: QWidget, *, y_ratio: float = DEFAULT_CAPTION_Y_RATIO) -> None:
         super().__init__(parent)
         self.name = name
+        self.y_ratio = y_ratio
         self.manager = ProcessManager()
 
     def run(self) -> None:
         try:
-            self.ready.emit(self.name, render_preview(self.name, self.manager))
+            self.ready.emit(self.name, render_preview(self.name, self.manager, y_ratio=self.y_ratio))
         except CancelledError:
             pass
         except Exception as error:
@@ -170,6 +183,211 @@ class _Card(QFrame):
         self.select.setAccessibleName(f"{self.name}, selected as default" if selected else f"Use {self.name} as default")
 
 
+_MOCK_SPEAKER_FACE = (0.34, 0.22, 0.66, 0.49)
+
+
+class _PositionPreview(QWidget):
+    """Interactive 9:16 portrait preview showing caption placement, mock face zone, and platform guides."""
+
+    y_picked = Signal(float)
+
+    def __init__(self, template_name: str = TEMPLATE_DEFAULT) -> None:
+        super().__init__()
+        self.template_name = template_name if template_name in TEMPLATES else TEMPLATE_DEFAULT
+        self.y_ratio = DEFAULT_CAPTION_Y_RATIO
+        self.avoid_faces = True
+        self.show_safe_area = True
+        self.safe_platform = "all"
+        self.resolved_y = DEFAULT_CAPTION_Y_RATIO
+        self.shifted_by_face = False
+        self.setFixedSize(180, 320)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setAccessibleName("Live 9:16 caption positioning preview")
+        self.setToolTip("Click or drag vertically to adjust caption height.")
+        self._recompute()
+
+    def set_state(
+        self,
+        *,
+        template_name: str | None = None,
+        y_ratio: float | None = None,
+        avoid_faces: bool | None = None,
+        show_safe_area: bool | None = None,
+        safe_platform: str | None = None,
+    ) -> tuple[float, bool]:
+        if template_name is not None and template_name in TEMPLATES:
+            self.template_name = template_name
+        if y_ratio is not None:
+            self.y_ratio = max(CAPTION_Y_MIN, min(CAPTION_Y_MAX, float(y_ratio)))
+        if avoid_faces is not None:
+            self.avoid_faces = bool(avoid_faces)
+        if show_safe_area is not None:
+            self.show_safe_area = bool(show_safe_area)
+        if safe_platform is not None and safe_platform in PLATFORM_SAFE_AREAS:
+            self.safe_platform = safe_platform
+        self._recompute()
+        self.update()
+        return self.resolved_y, self.shifted_by_face
+
+    def _recompute(self) -> None:
+        template = TEMPLATES[self.template_name]
+        mock_zones = (FaceZone(0.0, 5.0, (_MOCK_SPEAKER_FACE,)),)
+        self.resolved_y, self.shifted_by_face = resolve_caption_y_center(
+            0.0, 2.0, template.sample, template, 1080, 1920,
+            y_ratio=self.y_ratio, avoid_faces=self.avoid_faces, face_regions=mock_zones,
+        )
+
+    def _emit_from_y(self, py: float) -> None:
+        ratio = max(CAPTION_Y_MIN, min(CAPTION_Y_MAX, py / max(1, self.height())))
+        self.y_picked.emit(round(ratio, 2))
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            self._emit_from_y(event.position().y())
+
+    def mouseMoveEvent(self, event) -> None:
+        if event.buttons() & Qt.MouseButton.LeftButton:
+            self._emit_from_y(event.position().y())
+
+    def mouseReleaseEvent(self, event) -> None:
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHints(QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform)
+        w, h = float(self.width()), float(self.height())
+        bounds = QRectF(0.5, 0.5, w - 1.0, h - 1.0)
+        clip = QPainterPath()
+        clip.addRoundedRect(bounds, 10, 10)
+        painter.setClipPath(clip)
+
+        # Studio backdrop gradient
+        bg = QLinearGradient(0, 0, 0, h)
+        bg.setColorAt(0.0, QColor("#181B24"))
+        bg.setColorAt(1.0, QColor("#101218"))
+        painter.fillRect(bounds, bg)
+
+        # Stylized reference speaker silhouette (upper chest & head for clear vertical height gauge)
+        silhouette = QColor("#272C3B")
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(silhouette)
+        # Head & neck
+        head_x, head_y = w * _MOCK_SPEAKER_FACE[0], h * _MOCK_SPEAKER_FACE[1]
+        head_w = w * (_MOCK_SPEAKER_FACE[2] - _MOCK_SPEAKER_FACE[0])
+        head_h = h * (_MOCK_SPEAKER_FACE[3] - _MOCK_SPEAKER_FACE[1]) * 0.90
+        painter.drawEllipse(QRectF(head_x + head_w * 0.08, head_y, head_w * 0.84, head_h))
+        # Upper torso / lower chest region
+        torso_path = QPainterPath()
+        torso_path.moveTo(w * 0.16, h * 0.92)
+        torso_path.quadTo(w * 0.18, h * 0.56, w * 0.38, h * 0.50)
+        torso_path.lineTo(w * 0.62, h * 0.50)
+        torso_path.quadTo(w * 0.82, h * 0.56, w * 0.84, h * 0.92)
+        torso_path.closeSubpath()
+        painter.drawPath(torso_path)
+
+        # Mock face boundary indicator
+        face_rect = QRectF(
+            w * _MOCK_SPEAKER_FACE[0],
+            h * _MOCK_SPEAKER_FACE[1],
+            w * (_MOCK_SPEAKER_FACE[2] - _MOCK_SPEAKER_FACE[0]),
+            h * (_MOCK_SPEAKER_FACE[3] - _MOCK_SPEAKER_FACE[1]),
+        )
+        face_pen = QPen(QColor("#5EC2FF" if self.avoid_faces else "#7D8599"), 1.2, Qt.PenStyle.DashLine)
+        painter.setPen(face_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(face_rect, 6, 6)
+        painter.setFont(QFont("Segoe UI", 7))
+        painter.drawText(face_rect.adjusted(2, -13, 0, 0), Qt.AlignmentFlag.AlignLeft, "Face Zone")
+
+        # Conservative Platform Safe-Area UI Guides (never exported)
+        if self.show_safe_area:
+            safe = PLATFORM_SAFE_AREAS.get(self.safe_platform, PLATFORM_SAFE_AREAS["all"])
+            danger_fill = QColor(229, 57, 53, 44)
+            danger_pen = QPen(QColor(255, 90, 79, 140), 1.0, Qt.PenStyle.DashLine)
+            top_h = h * safe.top
+            bot_top = h * (1.0 - safe.bottom)
+            right_w = w * safe.right
+            right_top = h * safe.right_rail_top
+            painter.fillRect(QRectF(0, 0, w, top_h), danger_fill)
+            painter.fillRect(QRectF(0, bot_top, w, h - bot_top), danger_fill)
+            painter.fillRect(QRectF(w - right_w, right_top, right_w, max(0.0, bot_top - right_top)), danger_fill)
+
+            safe_box = QRectF(
+                w * safe.left,
+                top_h,
+                w * (1.0 - safe.left - safe.right),
+                max(20.0, bot_top - top_h),
+            )
+            painter.setPen(danger_pen)
+            painter.drawRect(safe_box)
+
+            guide_font = QFont("Segoe UI", 7)
+            painter.setFont(guide_font)
+            painter.setPen(QColor("#FFB4AE"))
+            painter.drawText(QRectF(6, 2, w - 12, top_h - 2), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, f"{safe.label} · Top UI")
+            painter.drawText(QRectF(6, bot_top + 3, w - 12, 16), Qt.AlignmentFlag.AlignLeft, "Platform UI Zone")
+
+        # User requested Y hairline
+        pref_py = h * self.y_ratio
+        if abs(self.resolved_y - self.y_ratio) > 0.01:
+            painter.setPen(QPen(QColor(255, 255, 255, 70), 1.0, Qt.PenStyle.DotLine))
+            painter.drawLine(8, int(round(pref_py)), int(w - 8), int(round(pref_py)))
+
+        # Rendered sample caption centered at resolved_y
+        template = TEMPLATES[self.template_name]
+        box_w_norm, box_h_norm = estimate_caption_bbox(template.sample, template, 1080, 1920)
+        cap_w, cap_h = w * box_w_norm, h * box_h_norm
+        cap_cy = h * self.resolved_y
+
+        font = QFont(template_font(template))
+        font.setBold(template.bold)
+        px_size = max(10, round(template.size * (w / 1080.0)))
+        font.setPixelSize(px_size)
+        painter.setFont(font)
+        text = template.sample.upper() if template.uppercase else template.sample
+        while painter.fontMetrics().horizontalAdvance(text) > w * 0.84 and px_size > 8:
+            px_size -= 1
+            font.setPixelSize(px_size)
+            painter.setFont(font)
+
+        fm = painter.fontMetrics()
+        tw = fm.horizontalAdvance(text)
+        tx = w * 0.08 if (template.alignment in (1, 4, 7)) else (w - tw) * 0.5
+        baseline = cap_cy + (fm.ascent() - fm.descent()) * 0.5
+        path = QPainterPath()
+        path.addText(tx, baseline, font, text)
+
+        if template.effect in {"box", "podcast"}:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(template.accent))
+            painter.drawRoundedRect(path.boundingRect().adjusted(-5, -3, 5, 3), 3, 3)
+        elif template.effect == "glow":
+            glow = QColor(template.accent)
+            glow.setAlpha(110)
+            painter.strokePath(path, QPen(glow, 4))
+
+        fill = QColor(template.primary)
+        if template.effect == "gradient":
+            grad = QLinearGradient(tx, 0, tx + tw, 0)
+            grad.setColorAt(0, QColor(template.primary))
+            grad.setColorAt(1, QColor(template.accent))
+            fill = grad
+        painter.strokePath(path, QPen(QColor("#101116"), 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.fillPath(path, fill)
+
+        # Subtle caption box guide outline around resolved position
+        guide_rect = QRectF((w - cap_w) * 0.5 if template.alignment not in (1, 4, 7) else w * 0.065, cap_cy - cap_h * 0.5, cap_w, cap_h)
+        painter.setPen(QPen(QColor("#5FE3B4" if not self.shifted_by_face else "#FFD45A"), 1.0, Qt.PenStyle.SolidLine))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(guide_rect, 4, 4)
+
+        # Crisp outer border
+        painter.setClipping(False)
+        painter.setPen(QPen(QColor(255, 255, 255, 28), 1.0))
+        painter.drawRoundedRect(bounds, 10, 10)
+
+
 class CaptionLibrary(QWidget):
     idle = Signal()
 
@@ -182,13 +400,20 @@ class CaptionLibrary(QWidget):
         sync_mode: str = "precise",
         offset_ms: int = 0,
         on_timing_changed: Callable[[str, int], None] | None = None,
+        y_ratio: float = DEFAULT_CAPTION_Y_RATIO,
+        avoid_faces: bool = True,
+        show_safe_area: bool = True,
+        safe_platform: str = "all",
+        on_positioning_changed: Callable[[float, bool, bool, str], None] | None = None,
     ) -> None:
         super().__init__()
         self.active: str | None = None
         self.render: _PreviewRender | None = None
         self.columns = 0
         self.visible_cards: list[str] = []
+        self._selected_template = selected if selected in TEMPLATES else TEMPLATE_DEFAULT
         self._on_timing_changed = on_timing_changed
+        self._on_positioning_changed = on_positioning_changed
         self.player = QMediaPlayer(self)
         self.sink = QVideoSink(self)
         self.player.setVideoSink(self.sink)
@@ -202,6 +427,7 @@ class CaptionLibrary(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
         toolbar = QHBoxLayout()
+        toolbar.setSpacing(8)
         self.search = QLineEdit(placeholderText="Search templates…", clearButtonEnabled=True)
         self.search.setAccessibleName("Search caption templates")
         self.category = QComboBox()
@@ -240,6 +466,9 @@ class CaptionLibrary(QWidget):
         self.notice = QLabel(objectName="captionDescription", wordWrap=True)
         self.notice.hide()
         layout.addWidget(self.notice)
+
+        workspace = QHBoxLayout()
+        workspace.setSpacing(14)
         self.scroll = QScrollArea()
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setWidgetResizable(True)
@@ -252,7 +481,81 @@ class CaptionLibrary(QWidget):
         self.grid.setContentsMargins(0, 0, 5, 0)
         self.grid.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll.setWidget(self.body)
-        layout.addWidget(self.scroll, 1)
+        workspace.addWidget(self.scroll, 1)
+
+        # Right-hand interactive Caption Positioning & Platform Safe Area panel
+        pos_card = QFrame(objectName="sectionCard")
+        pos_card.setFixedWidth(284)
+        pos_layout = QVBoxLayout(pos_card)
+        pos_layout.setContentsMargins(14, 14, 14, 14)
+        pos_layout.setSpacing(10)
+
+        pos_title = QLabel("Caption Positioning", objectName="captionTitle")
+        pos_sub = QLabel(
+            "Default 73% anchors lower chest below speaker faces.",
+            objectName="captionDescription",
+            wordWrap=True,
+        )
+        pos_layout.addWidget(pos_title)
+        pos_layout.addWidget(pos_sub)
+
+        self.pos_preview = _PositionPreview(self._selected_template)
+        self.pos_preview.y_picked.connect(self._on_preview_y_picked)
+        pos_layout.addWidget(self.pos_preview, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        self.pos_status_label = QLabel(objectName="captionDescription", wordWrap=True)
+        self.pos_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pos_layout.addWidget(self.pos_status_label)
+
+        slider_header = QHBoxLayout()
+        slider_header.setSpacing(8)
+        slider_lbl = QLabel("Vertical Position")
+        self.y_value_label = QLabel(objectName="transferMetric")
+        self.y_value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        slider_header.addWidget(slider_lbl)
+        slider_header.addStretch(1)
+        slider_header.addWidget(self.y_value_label)
+        pos_layout.addLayout(slider_header)
+
+        self.y_slider = QSlider(Qt.Orientation.Horizontal)
+        self.y_slider.setRange(round(CAPTION_Y_MIN * 100), round(CAPTION_Y_MAX * 100))
+        self.y_slider.setSingleStep(1)
+        self.y_slider.setPageStep(5)
+        self.y_slider.setAccessibleName("Caption vertical position slider")
+        pos_layout.addWidget(self.y_slider)
+
+        self.avoid_faces_check = QCheckBox("Avoid Covering Faces")
+        self.avoid_faces_check.setToolTip(
+            "Uses detected face tracking zones to keep subtitles clear of visible speakers."
+        )
+        self.safe_area_check = QCheckBox("Show Platform Safe Area")
+        self.safe_area_check.setToolTip(
+            "Overlays conservative platform UI bounds in preview only (never exported)."
+        )
+        self.safe_platform_combo = QComboBox()
+        self.safe_platform_combo.setAccessibleName("Platform safe area preset")
+        for key, safe in PLATFORM_SAFE_AREAS.items():
+            self.safe_platform_combo.addItem(f"Guide: {safe.label}", key)
+
+        pos_layout.addWidget(self.avoid_faces_check)
+        pos_layout.addWidget(self.safe_area_check)
+        pos_layout.addWidget(self.safe_platform_combo)
+
+        self.reset_position_btn = QPushButton("Reset to Default")
+        self.reset_position_btn.setAccessibleName("Reset caption position to default")
+        pos_layout.addWidget(self.reset_position_btn)
+        pos_layout.addStretch(1)
+
+        self.set_positioning_preferences(y_ratio, avoid_faces, show_safe_area, safe_platform)
+        self.y_slider.valueChanged.connect(self._on_positioning_widget_changed)
+        self.avoid_faces_check.toggled.connect(self._on_positioning_widget_changed)
+        self.safe_area_check.toggled.connect(self._on_positioning_widget_changed)
+        self.safe_platform_combo.currentIndexChanged.connect(self._on_positioning_widget_changed)
+        self.reset_position_btn.clicked.connect(self.reset_positioning_defaults)
+
+        workspace.addWidget(pos_card, 0)
+        layout.addLayout(workspace, 1)
+
         self.cards = {name: _Card(name, template, select, self._toggle, self._replay)
                       for name, template in TEMPLATES.items()}
         for card in self.cards.values():
@@ -272,8 +575,70 @@ class CaptionLibrary(QWidget):
         self.notice.setVisible(bool(text))
 
     def set_selected(self, name: str) -> None:
+        if name in TEMPLATES:
+            self._selected_template = name
         for candidate, card in self.cards.items():
             card.set_selected(candidate == name)
+        if hasattr(self, "pos_preview"):
+            self._sync_preview()
+
+    def set_positioning_preferences(
+        self,
+        y_ratio: float,
+        avoid_faces: bool,
+        show_safe_area: bool,
+        platform: str,
+    ) -> None:
+        clean_y = max(CAPTION_Y_MIN, min(CAPTION_Y_MAX, float(y_ratio)))
+        pct = round(clean_y * 100)
+        clean_platform = platform.strip().lower() if isinstance(platform, str) and platform.strip().lower() in PLATFORM_SAFE_AREAS else "all"
+        idx = self.safe_platform_combo.findData(clean_platform)
+        with QSignalBlocker(self.y_slider), QSignalBlocker(self.avoid_faces_check), QSignalBlocker(self.safe_area_check), QSignalBlocker(self.safe_platform_combo):
+            self.y_slider.setValue(pct)
+            self.avoid_faces_check.setChecked(bool(avoid_faces))
+            self.safe_area_check.setChecked(bool(show_safe_area))
+            self.safe_platform_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.safe_platform_combo.setEnabled(bool(show_safe_area))
+        self._sync_preview()
+
+    def positioning_preferences(self) -> tuple[float, bool, bool, str]:
+        return (
+            round(self.y_slider.value() / 100.0, 2),
+            self.avoid_faces_check.isChecked(),
+            self.safe_area_check.isChecked(),
+            str(self.safe_platform_combo.currentData() or "all"),
+        )
+
+    def reset_positioning_defaults(self) -> None:
+        self.set_positioning_preferences(DEFAULT_CAPTION_Y_RATIO, True, True, "all")
+        self._on_positioning_widget_changed()
+
+    def _on_preview_y_picked(self, ratio: float) -> None:
+        self.y_slider.setValue(round(ratio * 100))
+
+    def _sync_preview(self) -> None:
+        y_ratio, avoid_faces, show_safe, platform = self.positioning_preferences()
+        resolved_y, shifted = self.pos_preview.set_state(
+            template_name=self._selected_template,
+            y_ratio=y_ratio,
+            avoid_faces=avoid_faces,
+            show_safe_area=show_safe,
+            safe_platform=platform,
+        )
+        self.y_value_label.setText(f"{round(y_ratio * 100)}%")
+        if shifted:
+            self.pos_status_label.setText(f"Auto-adjusted to {round(resolved_y * 100)}% to clear face")
+        elif avoid_faces:
+            self.pos_status_label.setText(f"{self._selected_template} · {round(resolved_y * 100)}% · Face-safe")
+        else:
+            self.pos_status_label.setText(f"{self._selected_template} · {round(resolved_y * 100)}% · Manual Y")
+
+    def _on_positioning_widget_changed(self) -> None:
+        y_ratio, avoid_faces, show_safe, platform = self.positioning_preferences()
+        self.safe_platform_combo.setEnabled(show_safe)
+        self._sync_preview()
+        if self._on_positioning_changed is not None:
+            self._on_positioning_changed(y_ratio, avoid_faces, show_safe, platform)
 
     def set_timing_preferences(self, sync_mode: str, offset_ms: int) -> None:
         clean_mode = sync_mode.strip().lower() if isinstance(sync_mode, str) else "precise"
@@ -305,7 +670,8 @@ class CaptionLibrary(QWidget):
         self._layout_cards(force=True)
 
     def _layout_cards(self, *, force: bool = False) -> None:
-        columns = 4 if self.scroll.viewport().width() >= 860 else 3
+        width = self.scroll.viewport().width()
+        columns = 3 if width >= 720 else (2 if width >= 460 else 1)
         if columns == self.columns and not force:
             return
         self.columns = columns
@@ -350,7 +716,8 @@ class CaptionLibrary(QWidget):
             self._start_render(name)
 
     def _start_render(self, name: str) -> None:
-        self.render = _PreviewRender(name, self)
+        y_ratio = self.positioning_preferences()[0] if hasattr(self, "y_slider") else DEFAULT_CAPTION_Y_RATIO
+        self.render = _PreviewRender(name, self, y_ratio=y_ratio)
         self.render.ready.connect(self._ready)
         self.render.failed.connect(self._failed)
         self.render.finished.connect(self._render_finished)

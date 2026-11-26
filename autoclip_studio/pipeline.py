@@ -222,6 +222,8 @@ class Pipeline:
                     reframe_style=options.reframe_style,
                     caption_sync_mode=options.caption_sync_mode,
                     caption_offset_ms=options.caption_offset_ms,
+                    caption_y_ratio=options.caption_y_ratio,
+                    caption_avoid_faces=options.caption_avoid_faces,
                 )
                 rendered_clip = RenderedClip(output, highlight, duration)
                 rendered.append(rendered_clip)

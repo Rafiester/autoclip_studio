@@ -609,6 +609,7 @@ class MainWindow(QMainWindow):
     def _templates_page(self) -> QWidget:
         outer, page = self._page("Caption Templates", "Preview animated captions and choose a default for new projects.")
         sync_mode, offset_ms = self.settings.caption_timing()
+        y_ratio, avoid_faces, show_safe, safe_platform = self.settings.caption_positioning()
         self.caption_library = CaptionLibrary(
             self.default_template(),
             self.choose_template,
@@ -616,6 +617,11 @@ class MainWindow(QMainWindow):
             sync_mode=sync_mode,
             offset_ms=offset_ms,
             on_timing_changed=self._on_caption_timing_changed,
+            y_ratio=y_ratio,
+            avoid_faces=avoid_faces,
+            show_safe_area=show_safe,
+            safe_platform=safe_platform,
+            on_positioning_changed=self._on_caption_positioning_changed,
         )
         self.caption_library.idle.connect(self._finish_close)
         page.addWidget(self.caption_library, 1)
@@ -1074,6 +1080,7 @@ class MainWindow(QMainWindow):
             return
         self.settings.flush()
         caption_sync_mode, caption_offset_ms = self.settings.caption_timing()
+        caption_y_ratio, caption_avoid_faces, _, _ = self.settings.caption_positioning()
         options = ProjectOptions(
             source=source, clip_count=self.clip_count.value(), min_duration=self.min_duration.value(),
             max_duration=self.max_duration.value(), aspect_ratio=self.aspect.currentText(),
@@ -1082,6 +1089,7 @@ class MainWindow(QMainWindow):
             reframe_style=reframe_style,
             captions=self.captions.isChecked(), caption_template=self.template_combo.currentText(),
             caption_sync_mode=caption_sync_mode, caption_offset_ms=caption_offset_ms,
+            caption_y_ratio=caption_y_ratio, caption_avoid_faces=caption_avoid_faces,
             provider=provider_name, model=resolved_cfg["model"],
             multimodal=self.multimodal_check.isChecked(),
             cache_enabled=self.cache.isChecked(), whisper_model=self.whisper_model.currentText(),
@@ -1804,6 +1812,23 @@ class MainWindow(QMainWindow):
             return
         self.caption_library.show_notice("")
 
+    def _on_caption_positioning_changed(self, y_ratio: float, avoid_faces: bool, show_safe_area: bool, platform: str) -> None:
+        if self._hydrating_ui:
+            return
+        try:
+            self.settings.update_caption_positioning(
+                y_ratio=y_ratio,
+                avoid_faces=avoid_faces,
+                show_safe_area=show_safe_area,
+                platform=platform,
+                debounced=False,
+            )
+        except OSError as error:
+            log_error("Could not save caption positioning preferences", error)
+            self.caption_library.show_notice("Could not save caption positioning settings. Try again.")
+            return
+        self.caption_library.show_notice("")
+
     def _on_reframe_mode_changed(self) -> None:
         mode = str(self.reframe_combo.currentData() or "auto")
         self.face_tracking.setChecked(mode != "off")
@@ -2163,6 +2188,7 @@ class MainWindow(QMainWindow):
                 self.clip_detail.set_audio_preferences(80, False)
             if hasattr(self, "caption_library"):
                 self.caption_library.set_timing_preferences(*self.settings.caption_timing())
+                self.caption_library.set_positioning_preferences(*self.settings.caption_positioning())
         finally:
             self._hydrating_ui = False
         if hasattr(self, "general_status"):
