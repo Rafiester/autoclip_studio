@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import re
+import shutil
+import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
@@ -11,12 +15,15 @@ from tempfile import TemporaryDirectory, mkdtemp
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
+from .diagnostics import LOG, redact
 from .paths import CACHE_DIR, bundled_binary
-from .process import ProcessManager, find_media_tool
+from .process import CancelledError, ProcessManager, find_media_tool
 
 
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
 MEDIA_EXTENSIONS = {".mp4", ".mkv", ".webm", ".mov"}
+DEFAULT_FORMAT = "bv*[height<=1080]+ba/b[height<=1080]/best"
+FALLBACK_FORMAT = "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080]/best"
 _TRANSFER_PREFIX = "AUTOCLIP_TRANSFER\t"
 # Expose the CLI's downloader hook fields in both Python and bundled executable builds.
 _TRANSFER_TEMPLATE = "download:" + _TRANSFER_PREFIX + "\t".join((
@@ -24,6 +31,31 @@ _TRANSFER_TEMPLATE = "download:" + _TRANSFER_PREFIX + "\t".join((
     "%(progress.total_bytes_estimate)j", "%(progress.speed)j", "%(progress.eta)j",
     "%(info.vcodec)s", "%(info.acodec)s", "%(progress._default_template)s",
 ))
+
+
+class DownloadError(RuntimeError):
+    """Structured, actionable downloader error carrying redacted diagnostic details."""
+
+    def __init__(
+        self,
+        summary: str,
+        *,
+        category: str = "unknown",
+        details: str = "",
+        retryable: bool = False,
+        needs_dependency_repair: bool = False,
+        exit_code: int | None = None,
+    ) -> None:
+        self.summary = redact(summary).strip()
+        self.category = category
+        self.details = redact(details).strip()
+        self.retryable = retryable
+        self.needs_dependency_repair = needs_dependency_repair
+        self.exit_code = exit_code
+        full = self.summary
+        if self.details:
+            full = f"{self.summary}\n\nTechnical details:\n{self.details}"
+        super().__init__(full)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +143,32 @@ def youtube_watch_url(video_id: str) -> str:
     return f"https://www.youtube.com/watch?v={video_id}"
 
 
+def detect_js_runtime() -> tuple[str, str] | None:
+    """Detect a yt-dlp-compatible JS runtime (deno, node, bun, quickjs) without requiring bundled binaries."""
+    deno = bundled_binary("deno")
+    if deno and deno.is_file():
+        return ("deno", str(deno))
+
+    candidates: list[tuple[str, list[str]]] = [
+        ("deno", [shutil.which("deno") or "", "/opt/homebrew/bin/deno", "/usr/local/bin/deno", str(Path.home() / ".deno" / "bin" / "deno")]),
+        ("node", [shutil.which("node") or "", "/opt/homebrew/bin/node", "/usr/local/bin/node"]),
+        ("bun", [shutil.which("bun") or "", "/opt/homebrew/bin/bun", str(Path.home() / ".bun" / "bin" / "bun")]),
+        ("quickjs", [shutil.which("qjs") or "", "/opt/homebrew/bin/qjs", "/usr/local/bin/qjs"]),
+    ]
+    for kind, paths in candidates:
+        for raw in paths:
+            if raw and Path(raw).is_file():
+                return (kind, str(Path(raw)))
+    return None
+
+
+def _yt_dlp_version_label() -> str:
+    try:
+        return importlib.metadata.version("yt-dlp")
+    except importlib.metadata.PackageNotFoundError:
+        return "bundled/unknown"
+
+
 def yt_dlp_command() -> list[str]:
     downloader = bundled_binary("yt-dlp")
     python = Path(sys.executable)
@@ -119,10 +177,189 @@ def yt_dlp_command() -> list[str]:
     if getattr(sys, "frozen", False) and downloader is None:
         raise FileNotFoundError("The bundled yt-dlp executable is missing. Restore the complete application folder.")
     command = [str(downloader)] if downloader else [str(python), "-m", "yt_dlp"]
-    deno = bundled_binary("deno")
-    if deno:
-        command += ["--js-runtimes", f"deno:{deno}"]
+    runtime = detect_js_runtime()
+    if runtime:
+        command += ["--js-runtimes", f"{runtime[0]}:{runtime[1]}"]
     return command + ["--cache-dir", str(CACHE_DIR / "yt-dlp")]
+
+
+def _first_error_line(output: str) -> str:
+    for line in reversed(output.splitlines()):
+        stripped = line.strip()
+        if stripped.startswith("ERROR:"):
+            return stripped[len("ERROR:"):].strip()
+    for line in reversed(output.splitlines()):
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return ""
+
+
+def classify_download_error(
+    output: str,
+    exit_code: int | None = None,
+    *,
+    command_hint: str = "",
+) -> DownloadError:
+    """Map raw yt-dlp/FFmpeg subprocess output to a structured, user-actionable DownloadError."""
+    redacted_out = redact(output or "").strip()
+    low = redacted_out.lower()
+    js_rt = detect_js_runtime()
+    env_header = (
+        f"yt-dlp: {_yt_dlp_version_label()} | "
+        f"JS runtime: {f'{js_rt[0]} ({js_rt[1]})' if js_rt else 'none'} | "
+        f"exit_code: {exit_code if exit_code is not None else 'n/a'}"
+    )
+    if command_hint:
+        env_header += f"\nCommand: {redact(command_hint)}"
+    diag = f"{env_header}\n{redacted_out}".strip() if redacted_out else env_header
+
+    if any(tok in low for tok in ("http error 403", "403: forbidden", "403 forbidden")):
+        hint = (
+            "Update yt-dlp in Dependency Manager and ensure a JavaScript runtime (Node.js or Deno) is available."
+            if not js_rt
+            else "Update yt-dlp in Dependency Manager or retry in a moment."
+        )
+        return DownloadError(
+            f"YouTube rejected the media download (HTTP 403 Forbidden). {hint}",
+            category="http_403",
+            details=diag,
+            retryable=True,
+            needs_dependency_repair=True,
+            exit_code=exit_code,
+        )
+    if any(tok in low for tok in ("http error 429", "429: too many requests", "too many requests", "rate limit")):
+        return DownloadError(
+            "YouTube temporarily rate-limited downloads (HTTP 429 Too Many Requests). Wait briefly and retry.",
+            category="http_429",
+            details=diag,
+            retryable=True,
+            exit_code=exit_code,
+        )
+    if any(tok in low for tok in (
+        "sign in to confirm", "confirm you’re not a bot", "confirm you're not a bot",
+        "login required", "cookies", "private video", "this video is private",
+        "members-only", "join this channel", "age-restricted", "confirm your age",
+    )):
+        return DownloadError(
+            "YouTube requires authentication or restricts access to this video (private, age-restricted, members-only, or bot check).",
+            category="auth_required",
+            details=diag,
+            retryable=False,
+            exit_code=exit_code,
+        )
+    if any(tok in low for tok in (
+        "no supported javascript runtime", "js challenge", "yt-dlp-ejs", "ejs", "deno", "quickjs",
+    )) and ("error" in low or "failed" in low or "unavailable" in low or "missing" in low):
+        return DownloadError(
+            "YouTube JavaScript challenge solving failed. Install Node.js or Deno and update yt-dlp in Dependency Manager.",
+            category="js_runtime_error",
+            details=diag,
+            retryable=False,
+            needs_dependency_repair=True,
+            exit_code=exit_code,
+        )
+    if any(tok in low for tok in ("requested format is not available", "no video formats found", "only images are available")):
+        return DownloadError(
+            "The requested video/audio format is unavailable for this YouTube video. Try retrying or updating yt-dlp.",
+            category="format_unavailable",
+            details=diag,
+            retryable=True,
+            needs_dependency_repair=True,
+            exit_code=exit_code,
+        )
+    if any(tok in low for tok in ("ffmpeg not found", "ffprobe not found", "ffmpeg is not installed", "ffprobe and ffmpeg not found")):
+        return DownloadError(
+            "FFmpeg or FFprobe is missing and required to merge YouTube video and audio. Open Dependency Manager to repair media tools.",
+            category="missing_media_tool",
+            details=diag,
+            retryable=False,
+            needs_dependency_repair=True,
+            exit_code=exit_code,
+        )
+    if any(tok in low for tok in ("postprocessing", "error merging", "merger", "could not write header", "moov atom", "invalid data found when processing")):
+        return DownloadError(
+            "FFmpeg failed while merging the downloaded video and audio streams. Check FFmpeg in Dependency Manager or retry.",
+            category="merge_error",
+            details=diag,
+            retryable=True,
+            needs_dependency_repair=True,
+            exit_code=exit_code,
+        )
+    if any(tok in low for tok in ("no space left on device", "not enough space", "disk full", "errno 28")):
+        return DownloadError(
+            "Download stopped because there is not enough free disk space. Free up storage and retry.",
+            category="disk_space",
+            details=diag,
+            retryable=False,
+            exit_code=exit_code,
+        )
+    if any(tok in low for tok in ("permission denied", "access is denied", "read-only file system", "errno 13")):
+        return DownloadError(
+            "Could not write the downloaded file due to folder permissions. Check cache/output directory permissions.",
+            category="permission_error",
+            details=diag,
+            retryable=False,
+            exit_code=exit_code,
+        )
+    if any(tok in low for tok in (
+        "timed out", "connection reset", "connection refused", "temporary failure in name resolution",
+        "getaddrinfo", "nodename nor servname", "ssl:", "certificate verify failed",
+        "network is unreachable", "remote end closed", "incomplete read", "urlopen error",
+    )):
+        return DownloadError(
+            "Network interruption while downloading from YouTube. Check your internet connection and retry.",
+            category="network_error",
+            details=diag,
+            retryable=True,
+            exit_code=exit_code,
+        )
+    if any(tok in low for tok in (
+        "unable to extract", "extractor error", "signature extraction failed",
+        "nsig extraction failed", "sabr", "video unavailable", "this video is unavailable",
+    )):
+        return DownloadError(
+            "YouTube extractor failed to retrieve playable streams. Update yt-dlp in Dependency Manager or verify the link is public.",
+            category="extractor_error",
+            details=diag,
+            retryable=False,
+            needs_dependency_repair=True,
+            exit_code=exit_code,
+        )
+
+    reason = _first_error_line(redacted_out)
+    summary = (
+        f"YouTube download failed: {reason}"
+        if reason
+        else f"YouTube download failed (yt-dlp exited with code {exit_code}). Open Technical Details for diagnostics."
+    )
+    return DownloadError(
+        summary,
+        category="unknown",
+        details=diag,
+        retryable=False,
+        needs_dependency_repair=True,
+        exit_code=exit_code,
+    )
+
+
+def _verify_downloaded_file(path: Path, manager: ProcessManager) -> bool:
+    """Verify a downloaded media file is non-empty and playable before publishing to cache."""
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    try:
+        ffprobe_path = Path(find_media_tool("ffprobe"))
+    except FileNotFoundError:
+        return path.stat().st_size > 0
+    if not ffprobe_path.is_file():
+        # Unit tests that monkeypatch find_media_tool to a fake path cannot run real ffprobe.
+        return path.stat().st_size > 0
+    try:
+        validate_mp4(path, manager)
+        return True
+    except Exception as exc:
+        LOG.warning("Downloaded file failed media verification (%s): %s", path.name, exc)
+        return False
 
 
 def acquire_source(source: str, cache: bool, manager: ProcessManager,
@@ -146,9 +383,17 @@ def acquire_source(source: str, cache: bool, manager: ProcessManager,
     downloads.mkdir(parents=True, exist_ok=True)
     for item in sorted(downloads.glob(f"{key}.*")):
         if item.suffix.lower() in MEDIA_EXTENSIONS and item.is_file() and item.stat().st_size:
-            log(f"Using cached download: {item.name}")
-            return item
-    with TemporaryDirectory(prefix="incoming-", dir=downloads) as staging:
+            if _verify_downloaded_file(item, manager):
+                log(f"Using cached download: {item.name}")
+                return item
+            log(f"Ignoring corrupted cached file {item.name}; re-downloading…")
+            try:
+                item.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    # Preserve partial download folder across bounded retries, then clean up on completion.
+    with TemporaryDirectory(prefix=f"incoming-{key}-", dir=downloads) as staging:
         video = _download_youtube(source, Path(staging), key, manager, log, progress=progress)
         destination = downloads / video.name
         video.replace(destination)
@@ -157,29 +402,101 @@ def acquire_source(source: str, cache: bool, manager: ProcessManager,
 
 def _download_youtube(source: str, target: Path, key: str, manager: ProcessManager,
                       log: Callable[[str], None], *, progress: Callable[[DownloadProgress], None] | None = None) -> Path:
+    try:
+        ffmpeg_dir = str(Path(find_media_tool("ffmpeg")).parent)
+    except FileNotFoundError as exc:
+        raise DownloadError(
+            str(exc),
+            category="missing_media_tool",
+            details=str(exc),
+            retryable=False,
+            needs_dependency_repair=True,
+        ) from exc
+
     template = str(target / f"{key}.%(ext)s")
     receipt = target / "downloaded-path.txt"
-    command = yt_dlp_command()
-    on_output = log
-    if progress is not None:
-        command += ["--progress", "--progress-delta", "0.2", "--progress-template", _TRANSFER_TEMPLATE]
-        on_output = lambda line: _log_transfer(line, log, progress)
-    command += [
-        "--no-playlist", "--no-simulate", "--newline", "--restrict-filenames",
-        "--ffmpeg-location", str(Path(find_media_tool("ffmpeg")).parent),
-        "--merge-output-format", "mp4", "-f",
-        "bv*[height<=1080]+ba/b[height<=1080]/best", "-o", template,
-        "--print-to-file", "after_move:filepath", str(receipt), source,
-    ]
-    manager.run(command, on_output=on_output, output_tail=40)
-    if receipt.is_file():
-        paths = receipt.read_text(encoding="utf-8").splitlines()
-        receipt.unlink()
-        if paths:
-            result = Path(paths[-1]).resolve()
-            if result.parent == target.resolve() and result.is_file() and result.stat().st_size:
-                return result
-    raise RuntimeError("yt-dlp completed but produced no video file.")
+    format_plan = (DEFAULT_FORMAT, DEFAULT_FORMAT, FALLBACK_FORMAT)
+    last_error: DownloadError | None = None
+
+    for attempt, fmt in enumerate(format_plan):
+        manager.check_cancelled()
+        receipt.unlink(missing_ok=True)
+        command = yt_dlp_command()
+        on_output = log
+        if progress is not None:
+            command += ["--progress", "--progress-delta", "0.2", "--progress-template", _TRANSFER_TEMPLATE]
+            on_output = lambda line: _log_transfer(line, log, progress)
+        command += [
+            "--no-playlist", "--no-simulate", "--newline", "--restrict-filenames",
+            "--continue", "--retries", "3", "--fragment-retries", "3",
+            "--ffmpeg-location", ffmpeg_dir,
+            "--merge-output-format", "mp4", "-f", fmt, "-o", template,
+            "--print-to-file", "after_move:filepath", str(receipt), source,
+        ]
+        try:
+            manager.run(command, on_output=on_output, output_tail=80)
+        except CancelledError:
+            raise
+        except FileNotFoundError as exc:
+            raise DownloadError(
+                f"Required downloader executable is missing: {exc}",
+                category="missing_media_tool",
+                details=str(exc),
+                retryable=False,
+                needs_dependency_repair=True,
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            err = classify_download_error(
+                exc.output or "",
+                exit_code=exc.returncode,
+                command_hint=" ".join(str(c) for c in command),
+            )
+            last_error = err
+            LOG.warning(
+                "YouTube download attempt %d/%d failed (%s): %s",
+                attempt + 1, len(format_plan), err.category, err.summary,
+            )
+            can_retry = err.retryable and attempt + 1 < len(format_plan)
+            if not can_retry:
+                raise err from exc
+            wait_s = 2 ** attempt
+            log(f"Download interrupted ({err.category}); retrying in {wait_s}s ({attempt + 2}/{len(format_plan)})…")
+            for _ in range(wait_s * 5):
+                manager.check_cancelled()
+                time.sleep(0.2)
+            continue
+
+        if receipt.is_file():
+            paths = [p.strip() for p in receipt.read_text(encoding="utf-8").splitlines() if p.strip()]
+            receipt.unlink(missing_ok=True)
+            if paths:
+                result = Path(paths[-1]).resolve()
+                if result.parent == target.resolve() and _verify_downloaded_file(result, manager):
+                    return result
+                last_error = DownloadError(
+                    "Downloaded video file failed integrity verification (incomplete or unplayable output).",
+                    category="merge_error",
+                    details=f"Expected playable video at: {result}",
+                    retryable=True,
+                    needs_dependency_repair=True,
+                )
+                if attempt + 1 < len(format_plan):
+                    try:
+                        result.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    continue
+                raise last_error
+        last_error = DownloadError(
+            "yt-dlp completed without producing a playable video file.",
+            category="unknown",
+            details=f"Staging directory: {target}",
+            retryable=False,
+            needs_dependency_repair=True,
+        )
+        raise last_error
+
+    raise last_error or DownloadError("YouTube download failed after retries.", category="unknown")
 
 
 def probe(path: Path, manager: ProcessManager | None = None) -> dict:
@@ -203,4 +520,3 @@ def validate_mp4(path: Path, manager: ProcessManager | None = None) -> float:
     if duration <= 0.1:
         raise RuntimeError(f"Rendered file has invalid duration: {path}")
     return duration
-

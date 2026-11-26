@@ -42,7 +42,7 @@ from .ui.local_preview import LocalVideoDropZone, LocalVideoMetadata, LocalVideo
 from .ui.log_view import LogView
 from .ui.performance_view import PerformanceView
 from .ui.queue_workspace import (
-    ActiveJobCard, CollapsibleLogsPanel, JobDetailsDialog, JobQueuePanel,
+    ActiveJobCard, CollapsibleLogsPanel, ErrorDetailsDialog, JobDetailsDialog, JobQueuePanel,
     QueueOverviewBar, project_thumbnail_path,
 )
 from .ui.speech_view import SpeechProgressView, SpeechSettingsView
@@ -661,8 +661,11 @@ class MainWindow(QMainWindow):
         return outer
 
     def _dependencies_page(self) -> QWidget:
-        outer, page = self._page("Dependency Manager", "Inspect, repair, and manage runtimes, tools, and Whisper models")
-        self.dependency_view = DependencyManagerView(self.settings.speech)
+        outer, page = self._page("Dependency Manager", "Inspect, repair, update yt-dlp, and manage runtimes and models")
+        self.dependency_view = DependencyManagerView(
+            self.settings.speech,
+            is_job_active=lambda: self.worker_thread is not None,
+        )
         page.addWidget(self.dependency_view, 1)
         return outer
 
@@ -1172,7 +1175,21 @@ class MainWindow(QMainWindow):
         state = "Cancelled" if cancelled else "Error"
         self.metric_active.findChild(QLabel, "metricValue").setText(state)
         if not cancelled and not retryable and not self.closing:
-            QMessageBox.critical(self, "Processing failed", message)
+            low = message.lower()
+            needs_deps = any(tok in low for tok in ("yt-dlp", "ffmpeg", "ffprobe", "dependency manager", "javascript runtime", "403"))
+            can_retry = any(tok in low for tok in ("retry", "403", "429", "network", "timed out", "format", "merging"))
+            dlg = ErrorDetailsDialog(
+                "Processing failed",
+                message,
+                allow_retry=can_retry,
+                allow_dependencies=needs_deps,
+                parent=self,
+            )
+            dlg.exec()
+            if dlg.chosen_action == "dependencies" and "Dependencies" in self.NAV_ITEMS:
+                self.show_page(self.NAV_ITEMS.index("Dependencies"))
+            elif dlg.chosen_action == "retry":
+                self._handle_queue_action("retry_failed", project_id)
 
     def _worker_finished(self) -> None:
         self.cancel_button.setEnabled(False)

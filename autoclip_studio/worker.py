@@ -5,11 +5,22 @@ from collections.abc import Callable
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from .diagnostics import log_error, redact
+from .media import DownloadError
 from .models import ProjectOptions
 from .pipeline import Pipeline
 from .process import CancelledError
 from .providers import ProviderError
 from .youtube_metadata import YouTubeMetadataError
+
+
+def _format_exception_message(error: Exception) -> str:
+    import subprocess
+    if isinstance(error, subprocess.CalledProcessError):
+        tail = redact((error.output or error.stderr or "").strip())
+        if tail:
+            first_err = next((ln.strip() for ln in reversed(tail.splitlines()) if ln.strip()), "")
+            return f"Subprocess failed (exit code {error.returncode}): {first_err}\n\nTechnical details:\n{tail}"
+    return redact(str(error))
 
 
 class FunctionThread(QThread):
@@ -28,7 +39,8 @@ class FunctionThread(QThread):
             self.succeeded.emit(self.function())
         except CancelledError:
             return
-        except (ProviderError, YouTubeMetadataError) as error:
+        except (ProviderError, YouTubeMetadataError, DownloadError, RuntimeError, ValueError) as error:
+            log_error(f"{self.operation} failed", error)
             self.failed.emit(redact(str(error)))
         except Exception as error:
             log_error(f"{self.operation} failed", error)
@@ -65,7 +77,7 @@ class PipelineWorker(QObject):
         except CancelledError:
             self.failed.emit(self.project_id, "Processing cancelled")
         except Exception as error:
-            self.failed.emit(self.project_id, redact(str(error)))
+            self.failed.emit(self.project_id, _format_exception_message(error))
         finally:
             self.finished.emit()
 

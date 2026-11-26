@@ -88,4 +88,9 @@ def configure_logging() -> None:
 
 def log_error(operation: str, error: BaseException) -> None:
     frames = "".join(traceback.format_tb(error.__traceback__))
-    LOG.error("%s (%s)\n%s", operation, type(error).__name__, frames.rstrip())
+    extra = ""
+    if hasattr(error, "details") and getattr(error, "details"):
+        extra = f"\n{getattr(error, 'details')}"
+    elif hasattr(error, "output") and getattr(error, "output"):
+        extra = f"\n{getattr(error, 'output')}"
+    LOG.error("%s (%s): %s%s\n%s", operation, type(error).__name__, str(error), extra, frames.rstrip())

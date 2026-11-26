@@ -10,8 +10,8 @@ from typing import Any
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath
 from PySide6.QtWidgets import (
-    QButtonGroup, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout,
-    QHBoxLayout, QLabel, QLineEdit, QMenu, QProgressBar, QPushButton,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout,
+    QHBoxLayout, QLabel, QLineEdit, QMenu, QPlainTextEdit, QProgressBar, QPushButton,
     QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
 
@@ -806,22 +806,103 @@ class JobDetailsDialog(QDialog):
             err_title = QLabel("Failure Details")
             err_title.setStyleSheet("font-size: 12px; font-weight: 700; color: #FF9EA8;")
             layout.addWidget(err_title)
-            err_box = QLabel(err)
-            err_box.setWordWrap(True)
-            err_box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            err_box.setStyleSheet(
-                "background-color: #191318; border: 1px solid rgba(255, 107, 122, 0.35); "
-                "border-radius: 8px; padding: 10px; color: #FFD2D7; font-family: Consolas; font-size: 12px;"
-            )
+            err_box = QPlainTextEdit()
+            err_box.setReadOnly(True)
+            err_box.setPlainText(err)
+            err_box.setMaximumHeight(160)
             layout.addWidget(err_box)
 
         layout.addStretch()
+        btn_row = QHBoxLayout()
+        if err:
+            copy_btn = QPushButton("Copy Diagnostics")
+            copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(err))
+            btn_row.addWidget(copy_btn)
+        btn_row.addStretch()
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.accept)
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
+
+
+class ErrorDetailsDialog(QDialog):
+    """Actionable failure dialog with concise headline, expandable technical diagnostics, Copy, Retry, and Dependency Manager."""
+
+    def __init__(
+        self,
+        title: str,
+        message: str,
+        *,
+        allow_retry: bool = False,
+        allow_dependencies: bool = False,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(520)
+        self.chosen_action = "close"
+
+        redacted = redact(message).strip()
+        summary, sep, details = redacted.partition("\n\nTechnical details:\n")
+        if not sep and "\n" in redacted:
+            summary, _, details = redacted.partition("\n")
+        self._full_diagnostics = redacted
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+
+        headline = QLabel(summary.strip() or "Processing failed.")
+        headline.setWordWrap(True)
+        headline.setStyleSheet("font-size: 14px; font-weight: 600;")
+        layout.addWidget(headline)
+
+        self.details_view = QPlainTextEdit()
+        self.details_view.setReadOnly(True)
+        self.details_view.setPlainText(details.strip() or redacted)
+        self.details_view.setMinimumHeight(140)
+        self.details_view.setVisible(False)
+
+        self.toggle_btn = QPushButton("Show Technical Details")
+        self.toggle_btn.clicked.connect(self._toggle_details)
+        layout.addWidget(self.toggle_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self.details_view)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(8)
+        copy_btn = QPushButton("Copy Diagnostics")
+        copy_btn.clicked.connect(self._copy)
+        actions.addWidget(copy_btn)
+
+        if allow_dependencies:
+            dep_btn = QPushButton("Open Dependency Manager")
+            dep_btn.clicked.connect(lambda: self._finish("dependencies"))
+            actions.addWidget(dep_btn)
+
+        actions.addStretch()
+
+        if allow_retry:
+            retry_btn = QPushButton("Retry", objectName="primary")
+            retry_btn.clicked.connect(lambda: self._finish("retry"))
+            actions.addWidget(retry_btn)
+
+        close_btn = QPushButton("Close", objectName="" if allow_retry else "primary")
+        close_btn.clicked.connect(self.accept)
+        actions.addWidget(close_btn)
+        layout.addLayout(actions)
+
+    def _toggle_details(self) -> None:
+        showing = not self.details_view.isVisible()
+        self.details_view.setVisible(showing)
+        self.toggle_btn.setText("Hide Technical Details" if showing else "Show Technical Details")
+        self.adjustSize()
+
+    def _copy(self) -> None:
+        QApplication.clipboard().setText(self._full_diagnostics)
+
+    def _finish(self, action: str) -> None:
+        self.chosen_action = action
+        self.accept()
 
 
 class JobRowCard(QFrame):

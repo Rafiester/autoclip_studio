@@ -116,7 +116,7 @@
 
 ## Test Results
 - **macOS 27.2.1 (`arm64`, Apple Silicon):**
-  - `.venv/bin/python3 -m pytest -q`: **106 passed, 3 skipped, 0 failed** (includes `tests/test_smart_reframe.py`, `tests/test_apple_silicon_perf.py`, `tests/test_theme_system.py`, `tests/test_heatmap_and_hybrid.py`; 3 Windows-only/environment skips).
+  - `.venv/bin/python3 -m pytest -q`: **125 passed, 3 skipped, 0 failed** (includes `tests/test_startup_and_downloader.py`, `tests/test_smart_reframe.py`, `tests/test_apple_silicon_perf.py`, `tests/test_theme_system.py`, `tests/test_heatmap_and_hybrid.py`; 3 Windows-only/environment skips).
   - `.venv/bin/python3 -m tests.integration_smoke`: **Passed** (`Smart Reframing (auto, opencv-haar-multi)`, `h264_videotoolbox`, `1,264,264 bytes`, `6.30s`).
   - `.venv/bin/python3 scripts/setup.py --check`: **Passed** (exit code 0).
 - **Windows 11 x64 Host (previous session):**
@@ -170,3 +170,53 @@ Validated on real multi-person Indonesian podcast footage from `https://www.yout
 - Built-in `opencv-haar-multi` works with zero downloads, while installing the optional 227 KB MIT **YuNet Face & Landmark Model** in Dependencies delivers ~5× faster analysis and markedly better 3/4-profile / wide multi-person detection.
 - For mixed clips that switch between Podcast Split Screen and solo close-up shots, the clip-level ASS subtitle file keeps seam-centered middle alignment (`Alignment=5`) throughout so captions never overlap split-screen faces; per-segment dynamic ASS positioning could be added as a future enhancement.
 - Very dark, heavily occluded, or off-camera speakers (where a speaking host's mouth is completely hidden behind a large studio microphone) rely on audio VAD + last-valid-speaker hold until visual mouth activity recovers.
+
+---
+
+## Startup, Dependency Management & YouTube Downloader Stability Fix
+
+### Confirmed Root Causes (Verified from Logs & Code)
+1. **Unexpected First-Time Setup & Silent `yt-dlp` Downgrade:**
+   - Confirmed directly in `~/Library/Application Support/AutoClip Studio/logs/launcher.log`:
+     - `yt-dlp 2025.11.12 is required (installed 2026.11.23)` → `Uninstalled 1 package ... - yt-dlp==2026.11.23 / + yt-dlp==2025.11.12`.
+   - `scripts/setup.py:check()` enforced strict `installed != expected` equality against `requirements.txt` (`yt-dlp==2025.11.12`). Updating `yt-dlp` caused `--check` to exit `1`, which forced `Launcher.m` to re-open First-Time Setup and run `uv pip install -r requirements.txt`, silently downgrading `yt-dlp` back to `2025.11.12`.
+2. **Stuck First-Time Setup & Unreadable Dark Mode Controls (`packaging/macos/Launcher.m`):**
+   - `Launcher.m` set dark background color (`#101116`) without setting `window.appearance = NSAppearanceNameDarkAqua`, causing macOS Light/System mode to render black checkbox and button text on a dark surface.
+   - `Launcher.m` ran `uv run ... scripts/setup.py --no-tests --local-whisper` synchronously with an indeterminate spinner (no `--json-progress` streaming, no 20s startup check timeout, no child-process termination on Cancel, no duplicate-bootstrap lock, and no expandable diagnostic log).
+3. **Recurring YouTube Download Failure (`https://www.youtube.com/watch?v=dSq0Z5XpoLc`):**
+   - Confirmed via `yt-dlp --verbose`: `yt-dlp` had been downgraded to `2025.11.12` and `autoclip_studio/media.py:yt_dlp_command()` only checked bundled `deno`, ignoring system Node.js (`/opt/homebrew/bin/node` v26.3.1). With `[debug] JS runtimes: none` and an outdated extractor, YouTube skipped SABR web formats, fell back to `android` sdkless format `399+251`, and failed with `HTTP Error 403: Forbidden`.
+4. **Opaque Subprocess Error Messages:**
+   - `ProcessManager.run()` raised raw `subprocess.CalledProcessError`, whose `__str__()` exposes only `Command '[...]' returned non-zero exit status 1` and drops `error.output` (stderr/stdout).
+
+### Implemented Fixes & Dependency Strategy
+- **Idempotent Startup & Version Persistence (`requirements.txt`, `scripts/setup.py`, `scripts/dependencies.json`):**
+  - Updated `yt-dlp` specification from strict `yt-dlp==2025.11.12` to minimum floor **`yt-dlp>=2026.11.23`**; `scripts/setup.py` now parses `==`, `>=`, `~=` and never flags or downgrades newer compatible versions of `yt-dlp`, `yt-dlp-ejs`, or `mlx-whisper`.
+  - Optional components (`yunet_asd_model`, `whisper_model_large_v3_turbo`, `cuda_runtime`, `caption_fonts`) and dev tools (`pytest`) never trigger mandatory First-Time Setup.
+  - Added `--repair-only` selective installation (skips package installation completely when required packages are satisfied; supports both `uv` without `pip` and `.venv` `pip`), a non-blocking `.setup.lock` lockfile against duplicate runs, Cloud-only `settings.json` awareness, and structured `--json-progress` stages + byte/speed/ETA metrics.
+- **Upgraded Dependency Manager (`autoclip_studio/dependencies.py`, `autoclip_studio/ui/dependency_view.py`):**
+  - Automatic `detect_package_manager()` supporting `uv`-managed venvs without `pip`, `pip`-managed venvs, native macOS ARM64, and Windows Python.
+  - Organized components into 7 categories: *Core Application Runtime*, *Media Processing Tools*, *YouTube Downloader*, *Local Transcription*, *Face Tracking*, *Advanced Active Speaker Detection*, and *Platform-Specific Acceleration*.
+  - Added official PyPI stable-only `check_yt_dlp_update()`, `update_yt_dlp()` (blocked during active processing jobs, persists versions in `dependency_state.json`, validates CLI + `YoutubeIE` post-update, and automatically rolls back to the prior known-good version on failure), and one-click optional YuNet 227 KB model install.
+- **Downloader Reliability & Actionable Errors (`autoclip_studio/media.py`, `autoclip_studio/diagnostics.py`, `autoclip_studio/worker.py`, `autoclip_studio/ui/queue_workspace.py`, `autoclip_studio/gui.py`):**
+  - Added `detect_js_runtime()` auto-detecting `deno`, `node`, `bun`, and `quickjs` and passing `--js-runtimes <kind>:<path>` to `yt-dlp`.
+  - Added structured `DownloadError` + `classify_download_error()` covering HTTP 403, HTTP 429, auth/bot restrictions, extractor errors, JS runtime/EJS errors, format unavailability, missing FFmpeg/FFprobe, network interruptions, disk space, permissions, FFmpeg merge errors, cancellation, and unknown stderr failures — with automatic secret/cookie/token redaction.
+  - Added `--continue` resume, bounded retries (max 3 attempts with backoff + safe fallback format), and post-download `ffprobe`/`validate_mp4` integrity verification before publishing to `cache/downloads/`.
+  - Added `ErrorDetailsDialog` with concise headline, expandable redacted Technical Details, **Copy Diagnostics**, **Retry**, and **Open Dependency Manager** buttons.
+- **Native macOS Launcher & First-Time Setup UI (`packaging/macos/Launcher.m`, `packaging/build_macos.py`):**
+  - Forced `NSAppearanceNameDarkAqua` + explicit white attributed checkbox label and bundled Poppins font loading (`CoreText`, with native system fallback).
+  - Added 20-second startup validation timeout, `flock` single-instance setup lock, live `--json-progress` streaming (real percentage, downloaded/total bytes, speed, ETA), expandable diagnostic log viewer + Copy Logs, Retry button, and clean subprocess termination on Cancel.
+  - Rebuilt `dist/AutoClipStudio.app` (`Mach-O 64-bit executable arm64`) because `Launcher.m` itself had confirmed dark-mode/progress/timeout root causes. Ordinary Python source edits still require **no** launcher rebuild.
+
+### Actual Regression Test Results (macOS 27.2.1 Apple Silicon ARM64)
+- **Dependency Version Persistence:** Updated `yt-dlp` `2025.11.12 → 2026.11.23` via `update_yt_dlp()`; ran `scripts/setup.py --check` (exit `0`) and `scripts/setup.py --repair-only --no-tests` (exit `0`); verified `yt-dlp` remained `2026.11.23`.
+- **Repeated Native App Startup:** Launched rebuilt `dist/AutoClipStudio.app` twice consecutively, closing cleanly between runs — both launches started `main.py` directly without opening First-Time Setup (`0 bytes` added to `launcher.log`). Verified fresh-install detection cleanly in an isolated temp root without altering `.venv`.
+- **Full End-to-End YouTube Download (`https://www.youtube.com/watch?v=dSq0Z5XpoLc`):**
+  - JS runtime auto-detected: `('node', '/opt/homebrew/bin/node')`.
+  - Metadata extracted in `3.06s`: *"Pertemuan Bersejarah dr. Tirta dan dr. Gia"*, `1920 × 1080`, `4127s`, **100 real Audience Replay Heatmap points**, **2,324 Indonesian automatic caption segments**.
+  - Complete `acquire_source()` 1080p download + FFmpeg 9.1 merge + `ffprobe` validation succeeded in `203.4s`: `dSq0Z5XpoLc.mp4` (`1,592,652,488 bytes`, `vp9 1920×1080` + `opus`, `4126.71s`, `988` progress events).
+  - Second call reused verified cache in `0.099s` (`Using cached download: dSq0Z5XpoLc.mp4`).
+- **Windows Compatibility:** Reviewed `packaging/launcher/Launcher.cs` and `SetupWizard.cs` (both delegate `--check` and `--json-progress` to `scripts/setup.py`, so they benefit automatically without requiring a Windows `.exe` rebuild); Windows host runtime execution was not re-run on this macOS machine.
+
+### Remaining Limitations & Launcher Notes
+- `dist/AutoClipStudio.app` was rebuilt locally for this launcher-level fix (unsigned/ad-hoc for local macOS use); re-run `.venv/bin/python3 packaging/build_macos.py --dmg` if an updated `.dmg` installer image is also needed.
+- On systems without any JavaScript runtime (`node`, `deno`, `bun`, or `quickjs`), YouTube may still restrict certain SABR streams; the downloader now reports a clear `js_runtime_error` / `http_403` diagnostic guiding installation of Node.js or Deno.

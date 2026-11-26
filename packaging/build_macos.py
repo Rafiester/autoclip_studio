@@ -69,7 +69,7 @@ def build_app_bundle(output_dir: Path, *, compile_binary: bool | None = None) ->
         subprocess.run(
             [
                 "clang", "-fobjc-arc", "-O2", "-arch", "arm64",
-                "-framework", "Cocoa",
+                "-framework", "Cocoa", "-framework", "CoreText",
                 str(launcher_src), "-o", str(binary),
             ],
             check=True,
