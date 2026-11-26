@@ -46,11 +46,11 @@ def _build_filter_args(
     out_w, out_h = output_size
     sub_suffix = ",subtitles=captions.ass" if captions else ""
 
-    # Fast single-segment single-crop path
+    # Fast single-segment single-crop path (normalize PTS to 0.000s so crop t matches exact frame-accurate cuts!)
     if len(plan.segments) == 1 and plan.segments[0].kind == "single":
         seg = plan.segments[0]
         x_expr = keyframes_to_crop_x_expression(seg.keyframes, x_fallback).replace(",", "\\,")
-        vf = f"crop={crop_width}:{crop_height}:'{x_expr}':{y},scale={out_w}:{out_h}:flags=lanczos{sub_suffix}"
+        vf = f"setpts=PTS-STARTPTS,crop={crop_width}:{crop_height}:'{x_expr}':{y},scale={out_w}:{out_h}:flags=lanczos{sub_suffix}"
         return ["-vf", vf], "0:v:0"
 
     # Fit Original Video with blurred vertical background
@@ -108,7 +108,8 @@ def render_clip(source: Path, highlight: Highlight, transcript: Transcript,
                 profile_limits: ProfileLimits | None = None,
                 cache_enabled: bool = False,
                 video_codec: str = "h264",
-                reframe_mode: str | None = None) -> float:
+                reframe_mode: str | None = None,
+                reframe_style: str = "natural") -> float:
     work_dir.mkdir(parents=True, exist_ok=True)
     output.parent.mkdir(parents=True, exist_ok=True)
     src_width, src_height = dimensions or source_dimensions(source, manager)
@@ -134,7 +135,7 @@ def render_clip(source: Path, highlight: Highlight, transcript: Transcript,
         plan = analyze_smart_reframe(
             source, highlight.start, highlight.end, src_width, src_height,
             crop_width, output_size, manager, log,
-            mode=effective_mode, sample_interval=interval,
+            mode=effective_mode, style=reframe_style, sample_interval=interval,
             cache_enabled=cache_enabled, transcript=transcript,
         )
 

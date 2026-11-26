@@ -196,6 +196,7 @@ class Pipeline:
                     dimensions=dimensions, encoder_support=encoder_support,
                     profile_limits=limits, cache_enabled=options.cache_enabled,
                     reframe_mode=options.reframe_mode if options.face_tracking else "off",
+                    reframe_style=options.reframe_style,
                 )
                 rendered_clip = RenderedClip(output, highlight, duration)
                 rendered.append(rendered_clip)

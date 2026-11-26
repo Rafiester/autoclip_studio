@@ -21,6 +21,14 @@ from typing import Callable
 import cv2
 import numpy as np
 
+from .auto_director import (
+    REFRAME_STYLES,
+    VALID_REFRAME_STYLES,
+    DirectorSample,
+    TrackObservation,
+    direct_single_stream,
+    get_style_config,
+)
 from .models import Transcript
 from .paths import CACHE_DIR, MODEL_CACHE
 from .process import ProcessManager
@@ -85,6 +93,7 @@ class FramingSegment:
 @dataclass(slots=True)
 class FramingMetrics:
     mode_used: str = "auto"
+    style_used: str = "natural"
     detector_backend: str = "opencv-haar-multi"
     frames_analyzed: int = 0
     scene_cuts: int = 0
@@ -92,6 +101,9 @@ class FramingMetrics:
     midpoint_avoided_frames: int = 0
     split_segments: int = 0
     single_segments: int = 0
+    median_shot_duration: float = 0.0
+    crop_jitter_px_s: float = 0.0
+    face_visibility_ratio: float = 0.0
 
 
 @dataclass(slots=True)
@@ -244,7 +256,58 @@ class _FaceDetector:
             for (x, y, fw, fh) in self._profile.detectMultiScale(flipped, 1.12, 5, minSize=(min_side, min_side)):
                 orig_x = w - (x + fw)
                 dets.append(FaceDetection(orig_x * inv, y * inv, fw * inv, fh * inv, 0.78))
-        return _nms_faces(dets, iou_thresh=0.35)
+        return _filter_false_faces(_nms_faces(dets, iou_thresh=0.35), gray, scale, w * inv, h * inv)
+
+
+def _filter_false_faces(
+    dets: list[FaceDetection],
+    gray_small: np.ndarray,
+    scale: float,
+    src_width: float,
+    src_height: float,
+) -> list[FaceDetection]:
+    """Suppress common Haar false positives (dark backpacks/shirts, hands/chests below real faces, bottom-edge noise)."""
+    if not dets:
+        return []
+    gh, gw = gray_small.shape[:2]
+    # Step 1: Reject dark, low-texture fabric false positives (e.g. black chair/backpack/shirt folds)
+    # when not backed by high-confidence frontal alt2 detection.
+    plausible: list[FaceDetection] = []
+    for d in dets:
+        x0 = max(0, min(gw - 1, int(round(d.x * scale))))
+        y0 = max(0, min(gh - 1, int(round(d.y * scale))))
+        x1 = max(x0 + 1, min(gw, int(round((d.x + d.w) * scale))))
+        y1 = max(y0 + 1, min(gh, int(round((d.y + d.h) * scale))))
+        roi = gray_small[y0:y1, x0:x1]
+        if roi.size > 0 and d.score < 0.90:
+            mean_luma = float(roi.mean())
+            std_luma = float(roi.std())
+            if mean_luma < 36.0 and std_luma < 26.0:
+                continue
+        # Bottom 18% of frame is almost always table/chair/backpack, not a human head.
+        if d.cy > src_height * 0.82 and d.score < 0.92:
+            continue
+        plausible.append(d)
+
+    if len(plausible) <= 1:
+        return plausible
+
+    # Step 2: Reject detections sitting directly inside another larger/higher-scoring face's torso column
+    # (prevents hands, lapels, or chest folds from spawning fake secondary speaker tracks!).
+    ordered = sorted(plausible, key=lambda item: (item.score, item.area), reverse=True)
+    kept: list[FaceDetection] = []
+    for cand in ordered:
+        is_torso_fp = False
+        for upper in kept:
+            horiz_aligned = abs(cand.cx - upper.cx) <= max(upper.w * 1.15, cand.w * 1.15)
+            below_chin = cand.cy >= (upper.y + upper.h * 0.92)
+            smaller_or_weaker = (cand.area <= upper.area * 0.92) or (cand.score < upper.score)
+            if horiz_aligned and below_chin and smaller_or_weaker:
+                is_torso_fp = True
+                break
+        if not is_torso_fp:
+            kept.append(cand)
+    return kept
 
 
 def extract_audio_vad_envelope(
@@ -424,6 +487,7 @@ class _TrackState:
     prev_mouth: np.ndarray | None = None
     prev_upper: np.ndarray | None = None
     activity_history: list[tuple[float, float]] = field(default_factory=list)
+    last_lip_motion: float = 0.0
     smoothed_cx: float = 0.0
     hits: int = 1
 
@@ -435,20 +499,55 @@ class _FrameSample:
     vad: float
     tracks: list[tuple[int, FaceDetection, float]]  # (track_id, detection, speaking_confidence)
     saliency_x: float
+    lip_motions: dict[int, float] = field(default_factory=dict)
+    turn_boundary: bool = False
 
 
 def _plan_cache_path(
     source: Path, start: float, end: float, crop_width: int, mode: str, sample_fps: float,
+    style: str = "natural",
     cache_dir: Path | None = None,
 ) -> Path | None:
     try:
         stat = source.stat()
     except OSError:
         return None
-    key = f"reframe-v1:{source.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:{start:.3f}:{end:.3f}:{crop_width}:{mode}:{sample_fps:.2f}"
+    key = f"reframe-v2:{source.resolve()}:{stat.st_size}:{stat.st_mtime_ns}:{start:.3f}:{end:.3f}:{crop_width}:{mode}:{style}:{sample_fps:.2f}"
     digest = hashlib.sha256(key.encode()).hexdigest()[:32]
     base_dir = cache_dir if cache_dir is not None else CACHE_DIR
     return base_dir / "tracking" / f"{digest}.json"
+
+
+def _refine_exact_cut_frame(
+    source: Path,
+    prev_frame_idx: int,
+    curr_frame_idx: int,
+) -> int:
+    """Pinpoint the exact native-FPS frame of a detected scene cut inside [prev_frame_idx+1, curr_frame_idx]."""
+    if curr_frame_idx - prev_frame_idx <= 1:
+        return curr_frame_idx
+    cap = cv2.VideoCapture(str(source))
+    if not cap.isOpened():
+        return curr_frame_idx
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, prev_frame_idx))
+        prev_g: np.ndarray | None = None
+        best_frame = curr_frame_idx
+        best_mad = -1.0
+        for fidx in range(prev_frame_idx, curr_frame_idx + 1):
+            ok, fr = cap.read()
+            if not ok or fr is None:
+                break
+            g = cv2.cvtColor(cv2.resize(fr, (160, 90), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
+            if prev_g is not None:
+                mad = float(np.mean(np.abs(g.astype(np.float32) - prev_g.astype(np.float32))))
+                if mad > best_mad:
+                    best_mad = mad
+                    best_frame = fidx
+            prev_g = g
+        return best_frame
+    finally:
+        cap.release()
 
 
 def _analyze_clip_frames(
@@ -461,25 +560,37 @@ def _analyze_clip_frames(
     *,
     sample_fps: float = 5.0,
     transcript: Transcript | None = None,
-) -> tuple[list[_FrameSample], str]:
-    """Decode only the clip range (with 1s pre-roll), track persistent faces, and score audio-visual activity."""
+) -> tuple[list[_FrameSample], str, float]:
+    """Decode only the clip range (with 1s pre-roll), refine exact native-FPS cut frames, track faces, and score ASD."""
     pre_roll = min(1.0, max(0.0, start))
     scan_start = max(0.0, start - pre_roll)
     scan_end = end + 0.15
     vad_env, vad_bin = extract_audio_vad_envelope(source, scan_start, scan_end, transcript=transcript)
 
+    # Collect transcript segment boundaries for conversational turn-aligned cuts
+    turn_times: list[float] = []
+    if transcript is not None and transcript.segments:
+        for seg in transcript.segments:
+            if seg.end >= start - 0.5 and seg.start <= end + 0.5:
+                turn_times.append(seg.start - start)
+                turn_times.append(seg.end - start)
+
     detector = _FaceDetector()
     capture = cv2.VideoCapture(str(source))
     samples: list[_FrameSample] = []
+    fps = 25.0
     if not capture.isOpened():
-        return samples, detector.backend
+        return samples, detector.backend, fps
 
     try:
         fps = float(capture.get(cv2.CAP_PROP_FPS) or 30.0)
         if not math.isfinite(fps) or fps <= 1.0 or fps > 240.0:
             fps = 30.0
         frame_stride = max(1, int(round(fps / max(1.0, sample_fps))))
-        start_frame = int(round(scan_start * fps))
+        # Align clip_start_frame with FFmpeg `-ss {start:.3f}` + `setpts=PTS-STARTPTS`:
+        # FFmpeg outputs the first frame whose PTS >= start!
+        clip_start_frame = int(math.ceil(start * fps - 1e-6))
+        start_frame = max(0, int(round(scan_start * fps)))
         end_frame = int(round(scan_end * fps))
         if start_frame > 0:
             capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
@@ -487,6 +598,7 @@ def _analyze_clip_frames(
         tracks: dict[int, _TrackState] = {}
         next_tid = 1
         prev_small: np.ndarray | None = None
+        prev_sampled_frame_idx: int | None = None
         frame_idx = start_frame
 
         while frame_idx <= end_frame:
@@ -502,13 +614,18 @@ def _analyze_clip_frames(
                 break
 
             abs_t = frame_idx / fps
-            rel_t = abs_t - start
+            rel_t = (frame_idx - clip_start_frame) / fps
             scale = min(1.0, 640.0 / max(1, frame.shape[1]))
             small_bgr = cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1.0 else frame
             small_gray = cv2.cvtColor(small_bgr, cv2.COLOR_BGR2GRAY)
 
             is_cut = _is_scene_cut(prev_small, small_gray)
+            exact_cut_rel_t = rel_t
+            if is_cut and prev_sampled_frame_idx is not None and frame_idx - prev_sampled_frame_idx > 1 and rel_t >= -0.05:
+                exact_f = _refine_exact_cut_frame(source, prev_sampled_frame_idx, frame_idx)
+                exact_cut_rel_t = max(0.0, (exact_f - clip_start_frame) / fps)
             prev_small = small_gray
+            prev_sampled_frame_idx = frame_idx
             if is_cut:
                 tracks.clear()
 
@@ -554,6 +671,7 @@ def _analyze_clip_frames(
                 tr.prev_upper = upper_patch
                 tr.last_det = det
                 tr.last_seen = abs_t
+                tr.last_lip_motion = lip_motion
                 tr.smoothed_cx = 0.45 * det.cx + 0.55 * tr.smoothed_cx
                 tr.hits += 1
                 tr.activity_history.append((abs_t, av_activity))
@@ -575,35 +693,68 @@ def _analyze_clip_frames(
                 )
                 next_tid += 1
 
-            # Drop expired tracks (1.0s dropout tolerance preserves stability during brief turns/occlusions).
-            expired = [tid for tid, tr in tracks.items() if abs_t - tr.last_seen > 1.0]
+            # Drop expired tracks (0.85s dropout tolerance preserves stability during brief turns/occlusions).
+            expired = [tid for tid, tr in tracks.items() if abs_t - tr.last_seen > 0.85]
             for tid in expired:
                 del tracks[tid]
 
             # Record samples inside actual clip range [0.0, end - start].
-            if rel_t >= -0.05:
+            sample_rel_t = exact_cut_rel_t if is_cut else rel_t
+            if sample_rel_t >= -0.05:
+                clamped_t = max(0.0, sample_rel_t)
                 frame_tracks: list[tuple[int, FaceDetection, float]] = []
+                lip_map: dict[int, float] = {}
                 for tid, tr in tracks.items():
-                    if abs_t - tr.last_seen > 0.75:
+                    if abs_t - tr.last_seen > 0.65:
                         continue
                     recent = [v for _, v in tr.activity_history]
                     mean_act = sum(recent) / max(1, len(recent))
                     # Combine temporal mouth activity + subtle face-size centrality weight (tie-breaker only).
-                    size_weight = min(0.18, math.sqrt(tr.last_det.area / max(1.0, src_width * src_height)) * 0.45)
+                    size_weight = min(0.14, math.sqrt(tr.last_det.area / max(1.0, src_width * src_height)) * 0.38)
                     confidence = mean_act + size_weight * (0.35 + 0.65 * vad)
                     frame_tracks.append((tid, tr.last_det, confidence))
+                    lip_map[tid] = tr.last_lip_motion
                 saliency_x = _content_saliency_center_x(small_gray, src_width) if not frame_tracks else src_width * 0.5
+                is_turn = any(abs(clamped_t - tt) <= 0.22 for tt in turn_times)
                 samples.append(_FrameSample(
-                    rel_t=max(0.0, rel_t),
+                    rel_t=clamped_t,
                     is_cut=is_cut,
                     vad=vad,
                     tracks=frame_tracks,
                     saliency_x=saliency_x,
+                    lip_motions=lip_map,
+                    turn_boundary=is_turn,
                 ))
             frame_idx += 1
     finally:
         capture.release()
-    return samples, detector.backend
+    return samples, detector.backend, fps
+
+
+def _samples_to_director_inputs(samples: list[_FrameSample]) -> list[DirectorSample]:
+    return [
+        DirectorSample(
+            rel_t=s.rel_t,
+            is_cut=s.is_cut,
+            vad=s.vad,
+            tracks=[
+                TrackObservation(
+                    track_id=tid,
+                    x=det.x,
+                    y=det.y,
+                    w=det.w,
+                    h=det.h,
+                    speaking_conf=conf,
+                    lip_motion=float(s.lip_motions.get(tid, 0.0)),
+                    det_score=det.score,
+                )
+                for tid, det, conf in s.tracks
+            ],
+            saliency_x=s.saliency_x,
+            turn_boundary=s.turn_boundary,
+        )
+        for s in samples
+    ]
 
 
 def _build_single_track_keyframes(
@@ -613,116 +764,34 @@ def _build_single_track_keyframes(
     *,
     mode: str,
     metrics: FramingMetrics,
-    min_hold_seconds: float = 1.6,
-    hysteresis_ratio: float = 1.28,
+    style: str = "natural",
+    src_height: int = 1080,
+    source_fps: float = 25.0,
+    min_hold_seconds: float | None = None,
+    hysteresis_ratio: float | None = None,
 ) -> list[CropKeyframe]:
-    """Convert tracked multi-person samples into stable crop keyframes with clean cuts and zero midpoint bugs."""
+    """Delegate tracked multi-person samples to the offline Auto Director for cinematic crop keyframes."""
     if not samples:
         return []
-    fallback_left = _clamp_crop_left(src_width * 0.5, crop_width, src_width)
-    dead_zone = crop_width * 0.045
-    cut_jump_thresh = crop_width * 0.42
-    max_pan_speed = crop_width * 0.35  # px/s
-
-    active_tid: int | None = None
-    last_switch_t = -999.0
-    last_valid_left: float | None = None
-    last_face_t = -999.0
-    current_left: float | None = None
-    prev_t = 0.0
-    keyframes: list[CropKeyframe] = []
-
-    for sample in samples:
-        t = sample.rel_t
-        dt = max(0.05, t - prev_t)
-        force_cut = False
-        if sample.is_cut:
-            metrics.scene_cuts += 1
-            active_tid = None
-            force_cut = True
-
-        dets = [det for _, det, _ in sample.tracks]
-        target_left: float
-
-        if not sample.tracks:
-            # Dropout tolerance: retain previous valid framing briefly, else use content-aware saliency.
-            if last_valid_left is not None and (t - last_face_t) <= 1.2 and not sample.is_cut:
-                target_left = last_valid_left
-            else:
-                target_left = _clamp_crop_left(sample.saliency_x, crop_width, src_width)
-        elif len(sample.tracks) == 1:
-            tid, det, _ = sample.tracks[0]
-            active_tid = tid
-            target_left = _clamp_crop_left(det.cx, crop_width, src_width)
-            last_valid_left = target_left
-            last_face_t = t
-        else:
-            # Multiple faces visible!
-            fits_group, group_cx = can_group_frame(dets, crop_width)
-            if mode == "single_subject":
-                # Single Subject mode: stick to primary largest/tracked face without midpoint averaging.
-                by_id = {tid: det for tid, det, _ in sample.tracks}
-                if active_tid not in by_id:
-                    best_tid, best_det, _ = max(sample.tracks, key=lambda item: item[1].area)
-                    active_tid = best_tid
-                target_left = _clamp_crop_left(by_id[active_tid].cx, crop_width, src_width)
-            elif fits_group and mode == "auto" and sample.vad < 0.25:
-                # Two close participants fit safely inside 9:16 crop -> clean group framing.
-                target_left = _clamp_crop_left(group_cx, crop_width, src_width)
-            else:
-                # Distant participants CANNOT fit safely -> MUST select active speaker, NEVER midpoint!
-                if not fits_group:
-                    metrics.midpoint_avoided_frames += 1
-                by_id = {tid: (det, conf) for tid, det, conf in sample.tracks}
-                ranked = sorted(sample.tracks, key=lambda item: item[2], reverse=True)
-                best_tid, best_det, best_conf = ranked[0]
-
-                if active_tid is None or active_tid not in by_id:
-                    active_tid = best_tid
-                    # Initial acquisition after a cut has not yet accumulated full mouth history;
-                    # allow quicker confirmation (~0.55s) while keeping full min_hold_seconds for real switches.
-                    last_switch_t = t - min_hold_seconds * 0.65 if force_cut else t
-                else:
-                    cur_det, cur_conf = by_id[active_tid]
-                    can_switch = (t - last_switch_t) >= min_hold_seconds or force_cut
-                    confident_challenger = (
-                        best_tid != active_tid
-                        and best_conf >= max(0.08, cur_conf * hysteresis_ratio)
-                        and sample.vad >= 0.20
-                    )
-                    if can_switch and confident_challenger:
-                        active_tid = best_tid
-                        last_switch_t = t
-                        metrics.speaker_switches += 1
-                chosen_det = by_id[active_tid][0]
-                target_left = _clamp_crop_left(chosen_det.cx, crop_width, src_width)
-            last_valid_left = target_left
-            last_face_t = t
-
-        if current_left is None:
-            current_left = target_left
-            keyframes.append(CropKeyframe(round(t, 3), round(current_left, 2), cut=False))
-        else:
-            delta = target_left - current_left
-            if force_cut or abs(delta) >= cut_jump_thresh:
-                # Clean cut between distant speakers or across camera cuts (never pan across empty background!).
-                current_left = target_left
-                keyframes.append(CropKeyframe(round(t, 3), round(current_left, 2), cut=True))
-            elif abs(delta) <= dead_zone:
-                # Dead zone: hold rock-steady during tiny head sway.
-                keyframes.append(CropKeyframe(round(t, 3), round(current_left, 2), cut=False))
-            else:
-                # Smooth bounded pan within the same speaker.
-                desired_step = delta * 0.45
-                max_step = max_pan_speed * dt
-                clamped_step = max(-max_step, min(max_step, desired_step))
-                current_left = max(0.0, min(float(max(0, src_width - crop_width)), current_left + clamped_step))
-                keyframes.append(CropKeyframe(round(t, 3), round(current_left, 2), cut=False))
-        prev_t = t
-
-    if not keyframes:
-        keyframes.append(CropKeyframe(0.0, round(fallback_left, 2), cut=False))
-    return keyframes
+    _ = min_hold_seconds, hysteresis_ratio  # Preserved for backward-compatible signature
+    dir_samples = _samples_to_director_inputs(samples)
+    directed, stats = direct_single_stream(
+        dir_samples,
+        src_width,
+        src_height,
+        crop_width,
+        mode=mode,
+        style=style,
+        source_fps=source_fps,
+    )
+    metrics.scene_cuts += stats.original_cuts
+    metrics.speaker_switches += stats.artificial_switches
+    metrics.midpoint_avoided_frames += stats.midpoint_avoided_frames
+    metrics.style_used = stats.style_used
+    metrics.median_shot_duration = stats.median_shot_duration
+    metrics.crop_jitter_px_s = stats.crop_jitter_px_s
+    metrics.face_visibility_ratio = stats.face_visibility_ratio
+    return [CropKeyframe(kf.time, kf.left, kf.cut) for kf in directed]
 
 
 def _build_scene_adaptive_plan(
@@ -735,6 +804,8 @@ def _build_scene_adaptive_plan(
     *,
     mode: str,
     metrics: FramingMetrics,
+    style: str = "natural",
+    source_fps: float = 25.0,
 ) -> FramingPlan:
     """Partition clip into scene-aware single-speaker or stacked Podcast Split Screen segments."""
     if not samples:
@@ -810,10 +881,16 @@ def _build_scene_adaptive_plan(
         else:
             # Shift timestamps relative to segment start for FFmpeg segment rendering.
             shifted = [
-                _FrameSample(max(0.0, s.rel_t - seg_start), False, s.vad, s.tracks, s.saliency_x)
+                _FrameSample(
+                    max(0.0, s.rel_t - seg_start), False, s.vad, s.tracks, s.saliency_x,
+                    lip_motions=s.lip_motions, turn_boundary=s.turn_boundary,
+                )
                 for s in scene_samples
             ]
-            kfs = _build_single_track_keyframes(shifted, src_width, crop_width, mode=mode, metrics=metrics)
+            kfs = _build_single_track_keyframes(
+                shifted, src_width, crop_width, mode=mode, metrics=metrics,
+                style=style, src_height=src_height, source_fps=source_fps,
+            )
             metrics.single_segments += 1
             segments.append(FramingSegment("single", seg_start, seg_end, keyframes=kfs))
 
@@ -824,7 +901,10 @@ def _build_scene_adaptive_plan(
         metrics.speaker_switches = 0
         metrics.midpoint_avoided_frames = 0
         metrics.single_segments = 1
-        kfs = _build_single_track_keyframes(samples, src_width, crop_width, mode=mode, metrics=metrics)
+        kfs = _build_single_track_keyframes(
+            samples, src_width, crop_width, mode=mode, metrics=metrics,
+            style=style, src_height=src_height, source_fps=source_fps,
+        )
         return FramingPlan(
             segments=[FramingSegment("single", 0.0, duration, keyframes=kfs)],
             metrics=metrics,
@@ -845,6 +925,7 @@ def analyze_smart_reframe(
     log: Callable[[str], None],
     *,
     mode: str = "auto",
+    style: str = "natural",
     sample_interval: float = 0.75,
     cache_enabled: bool = False,
     transcript: Transcript | None = None,
@@ -852,16 +933,17 @@ def analyze_smart_reframe(
 ) -> FramingPlan:
     """Analyze a clip range and build a deterministic, cached Smart Reframing plan."""
     selected_mode = mode if mode in VALID_REFRAME_MODES else "auto"
+    selected_style = get_style_config(style).name
     duration = max(0.1, end - start)
 
     if selected_mode == "fit_original":
-        metrics = FramingMetrics(mode_used="fit_original", detector_backend="none")
+        metrics = FramingMetrics(mode_used="fit_original", style_used=selected_style, detector_backend="none")
         log("Smart Reframing: Fit Original Video (blurred vertical background)")
         return FramingPlan(segments=[FramingSegment("fit", 0.0, duration)], metrics=metrics, has_split=False)
 
     if selected_mode == "off" or crop_width >= src_width:
         fb = _clamp_crop_left(src_width * 0.5, crop_width, src_width)
-        metrics = FramingMetrics(mode_used="off", detector_backend="none", single_segments=1)
+        metrics = FramingMetrics(mode_used="off", style_used=selected_style, detector_backend="none", single_segments=1)
         return FramingPlan(
             segments=[FramingSegment("single", 0.0, duration, [CropKeyframe(0.0, fb)])],
             metrics=metrics,
@@ -875,28 +957,32 @@ def analyze_smart_reframe(
         # Eco (1.0s) -> 4 fps, Balanced (0.75s) -> 5 fps, Turbo (0.5s) -> 6 fps
         sample_fps = 6.0 if sample_interval <= 0.55 else (5.0 if sample_interval <= 0.85 else 4.0)
 
-    cache_path = _plan_cache_path(source, start, end, crop_width, selected_mode, sample_fps, cache_dir=cache_dir) if cache_enabled else None
+    cache_path = (
+        _plan_cache_path(source, start, end, crop_width, selected_mode, sample_fps, style=selected_style, cache_dir=cache_dir)
+        if cache_enabled else None
+    )
     if cache_path is not None and cache_path.is_file():
         try:
             plan = FramingPlan.from_dict(json.loads(cache_path.read_text(encoding="utf-8")))
             if plan.segments:
-                log(f"Using cached face tracking / Smart Reframing plan ({selected_mode}, {len(plan.segments)} segment(s))")
+                log(f"Using cached face tracking / Auto Director plan ({selected_mode}/{selected_style}, {len(plan.segments)} segment(s))")
                 return plan
         except (OSError, ValueError, KeyError, TypeError):
             pass
 
-    samples, backend = _analyze_clip_frames(
+    samples, backend, source_fps = _analyze_clip_frames(
         source, start, end, src_width, src_height, manager,
         sample_fps=sample_fps, transcript=transcript,
     )
     metrics = FramingMetrics(
         mode_used=selected_mode,
+        style_used=selected_style,
         detector_backend=backend,
         frames_analyzed=len(samples),
     )
     plan = _build_scene_adaptive_plan(
         samples, duration, src_width, src_height, crop_width, output_size,
-        mode=selected_mode, metrics=metrics,
+        mode=selected_mode, style=selected_style, metrics=metrics, source_fps=source_fps,
     )
     if cache_path is not None and plan.segments:
         try:
@@ -905,18 +991,18 @@ def analyze_smart_reframe(
         except OSError:
             pass
     log(
-        f"Smart Reframing ({selected_mode}, {backend}): {metrics.frames_analyzed} frames, "
-        f"{metrics.speaker_switches} switch(es), {metrics.scene_cuts} cut(s), "
-        f"{metrics.midpoint_avoided_frames} multi-face frames framed on speaker"
+        f"Auto Director ({selected_mode}/{selected_style}, {backend}): {metrics.frames_analyzed} frames, "
+        f"{metrics.speaker_switches} switch(es), {metrics.scene_cuts} source cut(s), "
+        f"median shot {metrics.median_shot_duration:.1f}s, jitter {metrics.crop_jitter_px_s:.1f} px/s"
         + (f", {metrics.split_segments} split segment(s)" if plan.has_split else "")
     )
     return plan
 
 
 def keyframes_to_crop_x_expression(keyframes: list[CropKeyframe], fallback: float) -> str:
-    """Build a balanced FFmpeg x-expression supporting BOTH smooth pans and instant step cuts."""
+    """Build a balanced FFmpeg x-expression supporting BOTH smooth pans and frame-accurate instant cuts."""
     if not keyframes:
-        return str(round(fallback, 2))
+        return f"{fallback:.2f}"
     # Compress redundant stationary runs to keep FFmpeg expression depth compact.
     compact: list[CropKeyframe] = [keyframes[0]]
     for kf in keyframes[1:]:
@@ -925,6 +1011,9 @@ def keyframes_to_crop_x_expression(keyframes: list[CropKeyframe], fallback: floa
             compact[-1] = kf
         else:
             compact.append(kf)
+
+    def _fmt_t(val: float) -> str:
+        return f"{val:.2f}" if abs(val * 100.0 - round(val * 100.0)) < 1e-4 else f"{val:.3f}"
 
     def piecewise(first: int, last: int) -> str:
         if first == last:
@@ -936,11 +1025,11 @@ def keyframes_to_crop_x_expression(keyframes: list[CropKeyframe], fallback: floa
             if kf_b.cut or abs(kf_b.left - kf_a.left) < 0.5:
                 return f"{kf_a.left:.2f}"
             span = max(0.01, kf_b.time - kf_a.time)
-            return f"{kf_a.left:.2f}+({kf_b.left - kf_a.left:.2f})*(t-{kf_a.time:.2f})/{span:.2f}"
+            return f"{kf_a.left:.2f}+({kf_b.left - kf_a.left:.2f})*(t-{_fmt_t(kf_a.time)})/{_fmt_t(span)}"
         middle = (first + last + 1) // 2
         t_mid = compact[middle].time
         earlier = piecewise(first, middle - 1)
         later = piecewise(middle, last)
-        return f"if(lt(t,{t_mid:.2f}),{earlier},{later})"
+        return f"if(lt(t,{_fmt_t(t_mid)}),{earlier},{later})"
 
     return piecewise(0, len(compact) - 1)

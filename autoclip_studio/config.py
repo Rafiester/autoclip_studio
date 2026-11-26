@@ -97,6 +97,7 @@ DEFAULTS: dict[str, Any] = {
         "aspect_ratio": "9:16",
         "resolution": "1080x1920",
         "reframe_mode": "auto",
+        "reframe_style": "natural",
         "captions": True,
         "cache_enabled": True,
         "highlight_mode": "hybrid",

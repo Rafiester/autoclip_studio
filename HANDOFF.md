@@ -1,11 +1,37 @@
 # AutoClip Studio — Agent Handoff & Progress
 
 **Last Updated:** 2026-11-26  
-**Current Phase:** Processing Queue & Generated Clips UI/UX Refinement, Native Video Player & Apple Silicon Transcription Telemetry Complete
+**Current Phase:** Intelligent Auto Director & Cinematic Smart Reframing Complete
 
 ## Execution Status
 
 ### Completed Tasks
+- **Intelligent Auto Director & Cinematic Smart Reframing:**
+  - **Root Cause Audit (`02-asal-usul-nama-gia-pratama-dan-tirta.mp4`, `1864.50s–1898.80s`, `34.30s`, `1920×1080 @ 25 FPS` VP9 → `1080×1920 @ 25 FPS` H.264):**
+    - Confirmed the original 3-person podcast footage (`Pertemuan Bersejarah dr. Tirta dan dr. Gia`, Raditya Dika) contains **17 real studio camera cuts**, and FFmpeg rendering itself had `0` dropped/duplicated frames (`exact 40ms` PTS intervals).
+    - Identified 5 AutoClip Studio root causes behind the perceived abruptness:
+      1. **160–200ms Delayed Cut Snap-Back (13 double-cuts):** 5 FPS scene-cut sampling without native-FPS refinement plus missing `setpts=PTS-STARTPTS` before `crop=` caused 3–5 frame delays after every source cut (`10.46s`, `15.98s`, `16.98s`, `21.06s`, `28.50s`, `30.98s`), slicing the new speaker's face before snapping.
+      2. **Frame-0 Misframing Flash (`00:00–00:01`):** First keyframe began at `t=0.02s` rather than `0.000s`.
+      3. **Haar False-Positive "Faces" on Dark Backpacks & Hands (`00:21–00:24`, `00:28–00:32`):** Bottom-edge dark fabric (`y > 82%`) and hand/chest detections below real faces spawned bogus tracks (e.g., at `28.20s`, a black backpack scored `0.51 > 0.17`, causing a 292px jump cut off dr. Gia onto the backpack).
+      4. **Tripod Wobble / Micro-Panning (`00:00–00:10`, `00:22–00:24`):** A tiny `4.5%` (`27px`) dead zone chased minor conversational sway on locked-off close-up shots (`190–370px` drift).
+      5. **Missing Shot-Level Lookahead & Offline DP Direction (`00:31–00:32`, multi-person wide shots):** Leading/mid-shot dropouts (dr. Tirta looking down at `31.0s–31.5s`) fell back to jumpy edge saliency instead of backfilling from the same shot, and multi-speaker switching lacked Viterbi/DP lookahead, turn-boundary alignment, and A-B-A suppression.
+  - **Modular Auto Director Architecture (`autoclip_studio/auto_director.py`):**
+    - Strictly separated camera direction and kinematic trajectory generation from detection/tracking (`smart_reframe.py`) and rendering (`rendering.py`).
+    - Implemented 3 tunable styles (`REFRAME_STYLES`): **Natural** (default: `min_shot=2.4s`, `confirm=0.55s`, `cooldown=1.25s`, `lookahead=1.5s`, `dropout=0.55s`, `dead_zone=14%`), **Stable** (`min_shot=3.2s`, `confirm=0.70s`, `cooldown=1.60s`, `lookahead=2.0s`, `dead_zone=18%`), and **Dynamic** (`min_shot=1.6s`, `confirm=0.40s`, `cooldown=0.90s`, `lookahead=1.1s`, `dead_zone=10%`).
+    - Implemented per-shot offline **Viterbi / Dynamic Programming** speaker state optimizer with causal+lookahead temporal evidence, reaction-shot damping during low speech VAD, conversational turn-boundary alignment, late-shot switch suppression, and post-DP rapid A-B-A ping-pong cleanup (while allowing genuine solo short responses and original camera cuts to override fixed duration thresholds).
+    - Implemented **Stable Composition & Kinematic Trajectory Generator**: lookahead dropout backfill, locked-off tripod detection when a subject stays safely inside dead-zone & edge-safety margins, velocity- & acceleration-bounded eased pans for same-subject movement, and clean instant cuts aligned to mid-frame (`t_cut - 0.5 / source_fps`) for different subjects and original camera cuts.
+  - **Detection Hardening, Frame-Accurate Cut Refinement & Rendering Sync (`autoclip_studio/smart_reframe.py`, `autoclip_studio/rendering.py`):**
+    - Added `_filter_false_faces()` suppressing dark low-texture bottom-edge fabric and torso-column hand/shirt false positives while preserving existing OpenCV YuNet and Haar backends (zero extra downloads or paid API calls).
+    - Added `_refine_exact_cut_frame()` pinpointing exact native-FPS cut frames (`<15ms` overhead) synchronized to `clip_start_frame = ceil(start * fps)` and prepended `setpts=PTS-STARTPTS` before `crop=` in `_build_filter_args` with millisecond `:.3f` expression formatting.
+    - Bumped tracking cache schema to `reframe-v2` (includes `reframe_style`).
+  - **Compact UI & Persistence (`autoclip_studio/models.py`, `autoclip_studio/config.py`, `autoclip_studio/pipeline.py`, `autoclip_studio/gui.py`):** Added compact **Reframing style** selector (`Natural`, `Stable`, `Dynamic`) under `Automation` in New Project, persisted via `SettingsStore` and auto-disabled when reframing mode is `Off` or `Fit Original`.
+  - **Reference Clip Before vs. After Results (`02-asal-usul-nama-gia-pratama-dan-tirta.mp4`, Apple M1 `8 GB`, VideoToolbox `h264_videotoolbox`):**
+    - **Visual cuts in rendered MP4:** `30` (BEFORE) → **`17`** (AFTER — exact 1:1 match to the 17 original source camera cuts).
+    - **Double-cuts within 350ms (cut-lag snap-backs):** `13` (BEFORE) → **`0`** (AFTER — 100% eliminated across all 5 target windows `00:00–00:01`, `00:10–00:14`, `00:16–00:17`, `00:21–00:24`, `00:28–00:32`).
+    - **Artificial speaker switches:** `3` (including the 292px jump onto dr. Gia's backpack at `28.20s`) → **`0` (`0.0/min`)** in `Natural` & `Stable` (`1` in `Dynamic`).
+    - **Face visibility:** **`92.5%`**, **crop jitter:** **`34.7 px/s`** (`33.5 px/s` Stable, `38.7 px/s` Dynamic), **zoom jitter:** **`0`** (constant `606×1080` 9:16 full-height scale), **black frames:** **`0`**, **PTS integrity:** `858` frames at exact `25.000 FPS` (`0` non-40ms gaps, `first_pts=0.000s`, `v_dur=34.32s`, `a_dur=34.30s`).
+    - **Performance:** **`16.52s`** full end-to-end render (`11.11s` analysis + `5.41s` VideoToolbox encode), **`19.1 MiB`** peak Python traced memory (`169 MiB` RSS).
+    - **Remaining Limitations:** Without the optional YuNet ONNX model installed, OpenCV Haar can still miss heavily downward-tilted or extreme-profile faces briefly (mitigated by offline shot lookahead & dropout backfill); visual-only lip-motion ASD on simultaneous cross-talk in wide 2–3 person shots relies on relative mouth energy plus VAD and cannot perform audio beamforming or neural speaker diarization without external models.
 - **Processing Queue & Generated Clips UI/UX Refinement, Native Video Player & Apple Silicon Transcription Telemetry:**
   - **Processing Queue Responsive Layout & Job Cards (`autoclip_studio/gui.py`, `autoclip_studio/ui/queue_workspace.py`, `autoclip_studio/ui/theme.py`):** Removed outer nested `QScrollArea` on `_queue_page` so `JobQueuePanel` expands cleanly into available vertical space; eliminated dimmed/low-contrast text on failed/completed/cancelled cards in Light & Dark modes; added semantic status pills, contextual primary CTAs (`Retry AI Analysis`, `Retry Failed Stage`, `Cancel Job`, `View Generated Clips`, `Cancel`), far-right `⋯` overflow menu, copyable redacted error details, and fixed Qt deferred-delete ghosting on theme/list rebuilds (`hide()` + `setParent(None)` + `deleteLater()`).
   - **Recent Activity Sorting & Completion Popup (`autoclip_studio/ui/queue_workspace.py`, `autoclip_studio/gui.py`):** Set `"Recent Activity"` as the default queue sort (active processing → queued in execution order → newest completed/failed/cancelled by timestamp descending so newly completed jobs never appear buried below older failed jobs). Added non-modal, deduplicated `JobCompletedDialog` ("Your clips are ready!", clip count, combined duration, processing time, primary CTA "View Generated Clips" that switches to Generated Clips and filters by project, secondary "Stay on Processing Queue"; never shown on startup for historical jobs).
@@ -124,8 +150,8 @@
 
 ## Test Results
 - **macOS 27.2.1 (`arm64`, Apple Silicon):**
-  - `.venv/bin/python3 -m pytest -q`: **135 passed, 3 skipped, 0 failed** (includes `tests/test_ui_refinement_and_telemetry.py`, `tests/test_persistent_settings.py`, `tests/test_startup_and_downloader.py`, `tests/test_smart_reframe.py`, `tests/test_apple_silicon_perf.py`, `tests/test_theme_system.py`, `tests/test_heatmap_and_hybrid.py`; 3 Windows-only/environment skips).
-  - `.venv/bin/python3 -m tests.integration_smoke`: **Passed** (`Smart Reframing (auto, opencv-haar-multi)`, `h264_videotoolbox`, `1,264,264 bytes`, `6.30s`).
+  - `.venv/bin/python3 -m pytest -q`: **142 passed, 3 skipped, 0 failed** (includes `tests/test_auto_director.py`, `tests/test_ui_refinement_and_telemetry.py`, `tests/test_persistent_settings.py`, `tests/test_startup_and_downloader.py`, `tests/test_smart_reframe.py`, `tests/test_apple_silicon_perf.py`, `tests/test_theme_system.py`, `tests/test_heatmap_and_hybrid.py`; 3 Windows-only/environment skips).
+  - `.venv/bin/python3 -m tests.integration_smoke`: **Passed** (`Auto Director (auto/natural, opencv-haar-multi)`, `h264_videotoolbox`, `6.30s`).
   - `.venv/bin/python3 scripts/setup.py --check`: **Passed** (exit code 0).
 - **Windows 11 x64 Host (previous session):**
   - `.\.venv\Scripts\python.exe -m pytest -q`: **93 passed**.

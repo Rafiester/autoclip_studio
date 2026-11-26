@@ -26,7 +26,7 @@ from .models import ProjectOptions
 from .paths import APP_ROOT, OUTPUT_DIR, asset_path, ensure_directories
 from .pipeline import Pipeline
 from .providers import AIProvider, ProviderError
-from .smart_reframe import REFRAME_MODES
+from .smart_reframe import REFRAME_MODES, REFRAME_STYLES
 from .speech_engine import MODELS
 from .subtitles import SrtValidationError, SrtValidationResult, parse_srt_file
 from .thumbnails import export_thumbnail
@@ -462,6 +462,17 @@ class MainWindow(QMainWindow):
         saved_reframe = str(proj_defaults.get("reframe_mode", "auto"))
         reframe_idx = self.reframe_combo.findData(saved_reframe)
         self.reframe_combo.setCurrentIndex(reframe_idx if reframe_idx >= 0 else 0)
+        self.reframe_style_combo = configure_input(QComboBox())
+        for code, label in REFRAME_STYLES:
+            self.reframe_style_combo.addItem(label, code)
+        saved_style = str(proj_defaults.get("reframe_style", "natural"))
+        style_idx = self.reframe_style_combo.findData(saved_style)
+        self.reframe_style_combo.setCurrentIndex(style_idx if style_idx >= 0 else 0)
+        self.reframe_style_combo.setToolTip(
+            "Natural: balanced editorial switching · Stable: longer holds, fewer cuts · Dynamic: faster turns"
+        )
+        self.reframe_style_combo.setEnabled((self.reframe_combo.currentData() or "auto") not in ("off", "fit_original"))
+        self.reframe_style_combo.currentIndexChanged.connect(self._persist_project_preferences)
         self.face_tracking = QCheckBox("Auto face tracking")
         self.face_tracking.setChecked((self.reframe_combo.currentData() or "auto") != "off")
         self.face_tracking.hide()  # Preserved for API compatibility; synchronized with Smart Reframing selector
@@ -476,10 +487,12 @@ class MainWindow(QMainWindow):
         self.template_combo.currentTextChanged.connect(self._on_project_template_changed)
         auto_layout.addWidget(QLabel("Smart reframing"), 0, 0)
         auto_layout.addWidget(self.reframe_combo, 0, 1)
-        auto_layout.addWidget(self.captions, 1, 0)
-        auto_layout.addWidget(self.cache, 1, 1)
-        auto_layout.addWidget(QLabel("Caption template"), 2, 0)
-        auto_layout.addWidget(self.template_combo, 2, 1)
+        auto_layout.addWidget(QLabel("Reframing style"), 1, 0)
+        auto_layout.addWidget(self.reframe_style_combo, 1, 1)
+        auto_layout.addWidget(self.captions, 2, 0)
+        auto_layout.addWidget(self.cache, 2, 1)
+        auto_layout.addWidget(QLabel("Caption template"), 3, 0)
+        auto_layout.addWidget(self.template_combo, 3, 1)
         auto_layout.setColumnStretch(0, 1)
         auto_layout.setColumnStretch(1, 1)
         form.addWidget(automation)
@@ -932,6 +945,7 @@ class MainWindow(QMainWindow):
         local_meta = self.local_preview.result if using_local else None
         default_name = (metadata.title if metadata else (local_meta.path.stem if local_meta else (Path(source).stem if not youtube else "")))
         reframe_mode = str(self.reframe_combo.currentData() or "auto")
+        reframe_style = str(self.reframe_style_combo.currentData() or "natural")
         provider_name = self.project_provider.currentText()
         resolved_cfg = self.settings.resolve_provider_config(provider_name, model_override=self.project_model.text().strip())
         if resolved_cfg["api_key"] and not resolved_cfg["model"]:
@@ -947,6 +961,7 @@ class MainWindow(QMainWindow):
             max_duration=self.max_duration.value(), aspect_ratio=self.aspect.currentText(),
             resolution=self.resolution.currentText(), face_tracking=(reframe_mode != "off"),
             reframe_mode=reframe_mode,
+            reframe_style=reframe_style,
             captions=self.captions.isChecked(), caption_template=self.template_combo.currentText(),
             provider=provider_name, model=resolved_cfg["model"],
             multimodal=self.multimodal_check.isChecked(),
@@ -1557,7 +1572,10 @@ class MainWindow(QMainWindow):
             self.template_combo.setCurrentText(name)
 
     def _on_reframe_mode_changed(self) -> None:
-        self.face_tracking.setChecked((self.reframe_combo.currentData() or "auto") != "off")
+        mode = str(self.reframe_combo.currentData() or "auto")
+        self.face_tracking.setChecked(mode != "off")
+        if hasattr(self, "reframe_style_combo"):
+            self.reframe_style_combo.setEnabled(mode not in ("off", "fit_original"))
         self._persist_project_preferences()
 
     def _on_project_template_changed(self, name: str) -> None:
@@ -1600,6 +1618,7 @@ class MainWindow(QMainWindow):
             "aspect_ratio": self.aspect.currentText(),
             "resolution": self.resolution.currentText(),
             "reframe_mode": str(self.reframe_combo.currentData() or "auto"),
+            "reframe_style": str(self.reframe_style_combo.currentData() or "natural") if hasattr(self, "reframe_style_combo") else "natural",
             "captions": bool(self.captions.isChecked()),
             "cache_enabled": bool(self.cache.isChecked()),
             "highlight_mode": str(self.highlight_mode_combo.currentData() or "ai"),
