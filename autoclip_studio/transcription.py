@@ -82,6 +82,10 @@ class SpeechProgress:
     apple_telemetry: dict[str, Any] | None = None
     indeterminate: bool = False
     backend_kind: str = "local"  # "local" | "cloud" | "subtitle"
+    cpu_percent: float | None = None
+    ram_used_mib: int | None = None
+    ram_total_mib: int | None = None
+    fallback_reason: str = ""
 
 
 def sample_apple_memory_telemetry(profile_name: str = "") -> dict[str, Any] | None:
@@ -197,7 +201,12 @@ class _Reporter:
         self.device = self.compute = self.engine = ""
         self.gpu = None
         self.apple_telemetry: dict[str, Any] | None = None
+        self.cpu_percent: float | None = None
+        self.ram_used_mib: int | None = None
+        self.ram_total_mib: int | None = None
+        self.fallback_reason: str = ""
         self.last_hw_at = 0.0
+        self.last_device = ""
 
     def emit(self, stage: str, *, processed: float | None = None, duration: float | None = None,
              eta: float | None = None, speed: float | None = None, reliable: bool = False,
@@ -206,12 +215,21 @@ class _Reporter:
         if not self.callback:
             return
         now = perf_counter()
-        if now - self.last_hw_at >= 1.5 or self.last_hw_at == 0.0:
+        if self.device != self.last_device or now - self.last_hw_at >= 1.2 or self.last_hw_at == 0.0:
             if self.device == "cuda":
                 self.gpu = gpu_info()
             elif sys.platform == "darwin" and self.device == "mlx":
                 self.apple_telemetry = sample_apple_memory_telemetry(self.profile_name)
+            elif self.device == "cpu":
+                try:
+                    self.cpu_percent = float(psutil.cpu_percent(interval=None))
+                    vm = psutil.virtual_memory()
+                    self.ram_total_mib = int(vm.total // (1024 * 1024))
+                    self.ram_used_mib = int((vm.total - vm.available) // (1024 * 1024))
+                except Exception:
+                    pass
             self.last_hw_at = now
+            self.last_device = self.device
         computed_rtf = rtf if rtf is not None else ((1.0 / speed) if (speed is not None and speed > 0) else None)
         self.callback(SpeechProgress(
             stage, self.engine, self.model, self.device, self.compute, now - self.start,
@@ -223,6 +241,10 @@ class _Reporter:
             apple_telemetry=self.apple_telemetry if (sys.platform == "darwin" and self.device == "mlx") else None,
             indeterminate=indeterminate,
             backend_kind=backend_kind,
+            cpu_percent=self.cpu_percent if self.device == "cpu" else None,
+            ram_used_mib=self.ram_used_mib if self.device == "cpu" else None,
+            ram_total_mib=self.ram_total_mib if self.device == "cpu" else None,
+            fallback_reason=self.fallback_reason,
         ))
 
 
@@ -341,22 +363,44 @@ def transcribe(media_path: Path, model_name: str, device_preference: str,
     executable = find_executable(settings.executable) if settings.engine != "python" else None
     model_path = find_model(model_name, settings, executable)
     xxl = None
-    if executable and (settings.engine == "purfview" or (model_path and device_preference != "cpu")):
+    fallback_reasons: list[str] = []
+    if executable and (settings.engine == "purfview" or device_preference != "cpu"):
         try:
             xxl = inspect_purfview(executable)
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
             if settings.engine == "purfview":
                 raise
-            log(f"Purfview unavailable; using Python Faster-Whisper ({error})")
+            reason = f"Purfview unavailable; using Python Faster-Whisper ({error})"
+            fallback_reasons.append(reason)
+            log(reason)
+    elif settings.engine != "python" and device_preference != "cpu" and os.name == "nt":
+        reason = "Purfview Faster-Whisper-XXL executable not found; checking Python Faster-Whisper"
+        fallback_reasons.append(reason)
+        log(reason)
     if settings.engine == "purfview" and xxl is None:
         raise RuntimeError("Purfview XXL was not found. Select its executable in Speech-to-Text settings.")
     if settings.engine == "auto" and xxl and not xxl.cuda:
+        py_cuda_ok = _python_cuda()
+        reason = (
+            f"Purfview XXL CUDA unavailable ({xxl.version}); "
+            + ("switching to Python Faster-Whisper CUDA" if py_cuda_ok else "no Python CUDA runtime available")
+        )
+        fallback_reasons.append(reason)
+        log(reason)
         xxl = None
     cuda = (xxl.cuda if xxl else _python_cuda()) if device_preference != "cpu" else False
-    if device_preference == "cuda" and not cuda:
-        if not settings.cpu_fallback:
+    if not cuda and device_preference != "cpu":
+        if gpu is not None:
+            reason = "; ".join(fallback_reasons) or (
+                f"NVIDIA {gpu.name} detected, but CUDA inference runtime is unavailable; falling back to CPU"
+            )
+        else:
+            reason = "No compatible NVIDIA CUDA GPU detected; using CPU inference"
+        if device_preference == "cuda" and not settings.cpu_fallback:
             raise RuntimeError("CUDA is unavailable for the selected engine. Check its runtime libraries or allow CPU fallback.")
-        log("CUDA is unavailable for the selected engine; using CPU")
+        reporter.fallback_reason = reason
+        if reason not in fallback_reasons:
+            log(reason)
     device = "cuda" if cuda else "cpu"
     reporter.engine = "Purfview Faster-Whisper-XXL" if xxl else "Python Faster-Whisper"
     reporter.device = device
@@ -430,8 +474,10 @@ def transcribe(media_path: Path, model_name: str, device_preference: str,
             if index + 1 == len(attempts) or not _CUDA_ERROR.search(str(error)):
                 raise
             next_device, next_compute, next_batch = attempts[index + 1]
-            log(f"{device.upper()} transcription failed ({error}); retrying on {next_device.upper()} "
-                f"({next_compute}, batch {next_batch})")
+            reason = f"{device.upper()} transcription failed ({error}); retrying on {next_device.upper()} ({next_compute}, batch {next_batch})"
+            if next_device == "cpu":
+                reporter.fallback_reason = reason
+            log(reason)
             continue
         transcript = _validated_transcript(entries, detected, duration, offset, video_duration, log)
         manager.check_cancelled()

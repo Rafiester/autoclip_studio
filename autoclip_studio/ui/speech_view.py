@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from ..config import SettingsStore
 from ..paths import CACHE_DIR
+from ..performance import detect_acceleration_backends
 from ..speech_engine import (
     MODELS, XXL_RELEASES, SpeechSettings, download_speech_model, find_executable, inspect_speech,
     install_standalone, model_cache_root,
@@ -122,9 +123,12 @@ class SpeechProgressView(QWidget):
                 self.bar.setValue(0)
             self.percent.setText("—")
 
-        self.progress_header.set_subtitle(" · ".join(
+        sub_parts = [
             value for value in (progress.engine, progress.model, progress.device.upper(), progress.compute) if value
-        ))
+        ]
+        if progress.fallback_reason:
+            sub_parts.append(progress.fallback_reason)
+        self.progress_header.set_subtitle(" · ".join(sub_parts))
         self.bar.setAccessibleDescription("Percentage unavailable" if self.percent.text() == "—" else self.percent.text())
         self.elapsed = progress.elapsed
         self.clock.restart()
@@ -166,10 +170,29 @@ class SpeechProgressView(QWidget):
                 self.metrics_grid.set_value("GPU / VRAM", " · ".join(parts) if parts else "N/A")
             else:
                 self.metrics_grid.set_value("GPU / VRAM", "N/A")
+        elif progress.device == "cpu":
+            self.metrics_grid.set_label("GPU / VRAM", "CPU / RAM")
+            cpu_parts: list[str] = []
+            if progress.cpu_percent is not None:
+                cpu_parts.append(f"CPU {progress.cpu_percent:.0f}%")
+            if progress.ram_used_mib is not None and progress.ram_total_mib is not None:
+                cpu_parts.append(f"RAM {progress.ram_used_mib / 1024:.1f}/{progress.ram_total_mib / 1024:.1f} GB")
+            self.metrics_grid.set_value("GPU / VRAM", " · ".join(cpu_parts) if cpu_parts else "CPU inference active")
         else:
             self.metrics_grid.set_label("GPU / VRAM", "GPU / VRAM")
-            utilization = f"{gpu.utilization}% · " if gpu and gpu.utilization is not None else ""
-            self.metrics_grid.set_value("GPU / VRAM", f"{utilization}{gpu.used_mib:,}/{gpu.total_mib:,} MiB" if gpu else "—")
+            if gpu:
+                utilization = f"{gpu.utilization}% · " if gpu.utilization is not None else ""
+                app_txt = (
+                    f"App {gpu.app_used_mib:,} MiB"
+                    if gpu.app_used_mib is not None
+                    else ("App Active (WDDM)" if gpu.app_active else "App Idle")
+                )
+                self.metrics_grid.set_value(
+                    "GPU / VRAM",
+                    f"{utilization}System {gpu.used_mib:,}/{gpu.total_mib:,} MiB · {app_txt}",
+                )
+            else:
+                self.metrics_grid.set_value("GPU / VRAM", "CUDA active (GPU telemetry unavailable)" if progress.device == "cuda" else "—")
 
     def _tick(self) -> None:
         self.metrics_grid.set_value("Elapsed", _clock(self.elapsed + self.clock.elapsed() / 1000))
@@ -185,7 +208,7 @@ class SpeechSettingsView(QWidget):
         current = settings.speech()
         form = configure_form_layout(QFormLayout(self))
         self.engine = configure_input(QComboBox())
-        engines = [("Auto", "auto"), ("Purfview Faster-Whisper-XXL", "purfview"),
+        engines = [("Auto (Purfview CUDA preferred)", "auto"), ("Purfview Faster-Whisper-XXL", "purfview"),
                    ("Python Faster-Whisper", "python"), ("MLX Whisper (Apple Silicon)", "mlx")]
         for name, value in engines:
             self.engine.addItem(name, value)
@@ -292,6 +315,7 @@ class SpeechSettingsView(QWidget):
             self.status.setText(str(error))
             return
         self.update_project()
+        detect_acceleration_backends.cache_clear()
         self.status.setText("Speech-to-Text settings saved.")
 
     def _start(self, work: Callable, done: Callable, label: str) -> None:
@@ -330,6 +354,7 @@ class SpeechSettingsView(QWidget):
             self.exe_path.setText(str(executable))
             if not self.model_path.text() and (source / "_models").is_dir():
                 self.model_path.setText(str(source / "_models"))
+            detect_acceleration_backends.cache_clear()
             self.status.setText("Standalone engine imported. Save Speech Settings to use it for projects.")
 
         self._start(lambda: install_standalone(source), done, "Importing standalone engine…")

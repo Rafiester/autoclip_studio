@@ -58,6 +58,8 @@ class HardwareSnapshot:
     vram_total_mib: int | None = None
     vram_used_mib: int | None = None
     vram_free_mib: int | None = None
+    vram_app_mib: int | None = None
+    vram_app_active: bool = False
     gpu_temp_c: int | None = None
     gpu_power_w: float | None = None
     cpu_temp_c: float | None = None
@@ -189,10 +191,18 @@ def detect_acceleration_backends() -> tuple[str, ...]:
         except Exception:
             pass
     else:
+        cuda_added = False
         try:
-            from .speech_engine import python_cuda
+            from .speech_engine import find_executable, inspect_purfview, python_cuda
+            if exe := find_executable():
+                try:
+                    if inspect_purfview(exe).cuda:
+                        backends.append("CUDA (Purfview XXL)")
+                        cuda_added = True
+                except Exception:
+                    pass
             if python_cuda():
-                backends.append("CUDA")
+                backends.append("CUDA (Python)" if cuda_added else "CUDA")
         except Exception:
             pass
         try:
@@ -425,7 +435,8 @@ class HardwareMonitor:
                 pass
 
         gpu_name = None
-        gpu_util_percent = vram_total_mib = vram_used_mib = vram_free_mib = gpu_temp_c = None
+        gpu_util_percent = vram_total_mib = vram_used_mib = vram_free_mib = vram_app_mib = gpu_temp_c = None
+        vram_app_active = False
         gpu_power_w = None
         pinfo = detect_platform()
         unified_memory = pinfo.is_apple_silicon
@@ -474,6 +485,10 @@ class HardwareMonitor:
                         vram_total_mib = int(mem.total // (1024 * 1024))
                         vram_used_mib = int(mem.used // (1024 * 1024))
                         vram_free_mib = int(mem.free // (1024 * 1024))
+                        from .speech_engine import _nvml_process_vram, _tracked_pids
+                        vram_app_mib, vram_app_active = _nvml_process_vram(
+                            self._gpu_handle, int(mem.total), _tracked_pids(),
+                        )
                     except Exception:
                         pass
                     try:
@@ -503,6 +518,8 @@ class HardwareMonitor:
             vram_total_mib=vram_total_mib,
             vram_used_mib=vram_used_mib,
             vram_free_mib=vram_free_mib,
+            vram_app_mib=vram_app_mib,
+            vram_app_active=vram_app_active,
             gpu_temp_c=gpu_temp_c,
             gpu_power_w=gpu_power_w,
             cpu_temp_c=None,  # Unavailable via standard user-mode APIs without fabricating

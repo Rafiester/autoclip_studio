@@ -1,11 +1,31 @@
 # AutoClip Studio — Agent Handoff & Progress
 
 **Last Updated:** 2026-11-26  
-**Current Phase:** Detailed Native Setup Wizard & Bootstrap Progress Complete (Windows Validated; Native macOS Compile Pending Apple Silicon Hardware)
+**Current Phase:** Windows CUDA Transcription Regression Fixed (Purfview CUDA Restored & Benchmarked)
 
 ## Execution Status
 
 ### Completed Tasks
+- **Windows CUDA Transcription Regression Fix:** (Pre-modification checkpoint: `e43c90a`)
+  - **Confirmed Root Causes:**
+    1. **Primary Cause — Uncached Model Bypassed Purfview CUDA ([`autoclip_studio/transcription.py`](autoclip_studio/transcription.py)):** Under default `engine="auto"` / `whisper_device="auto"`, `transcribe()` only inspected Purfview (`xxl = inspect_purfview(executable)`) when `model_path` was already present on disk (`settings.engine == "purfview" or (model_path and device_preference != "cpu")`). Whenever a user picked a model size not yet cached (e.g., `small` on `2026-11-26 19:27:41` while Subtitle Edit `_models` only held `large-v2`), `find_model()` returned `None`, causing `xxl = None` -> `_python_cuda() == False` (Python `ctranslate2` lacks `cudnn64_9.dll` on Windows) -> silent fallback to `Python Faster-Whisper · CPU · int8` (taking `15m 47s` on a `3212s` video instead of Purfview CUDA!).
+    2. **Silent Fallback & Missing Diagnostics ([`autoclip_studio/transcription.py`](autoclip_studio/transcription.py), [`autoclip_studio/performance.py`](autoclip_studio/performance.py)):** `transcribe()` omitted log/progress reasons when falling back to CPU or clearing `xxl` on non-CUDA; `detect_acceleration_backends()` checked only `python_cuda()`, omitting `CUDA (Purfview XXL)` from the Performance page.
+    3. **GPU / VRAM Telemetry & CPU Telemetry Gaps ([`autoclip_studio/speech_engine.py`](autoclip_studio/speech_engine.py), [`autoclip_studio/ui/speech_view.py`](autoclip_studio/ui/speech_view.py), [`autoclip_studio/ui/performance_view.py`](autoclip_studio/ui/performance_view.py)):** `gpu_info()` spawned slow `nvidia-smi` CLI per poll, returned no application-specific GPU allocation/activity, and `SpeechProgressView` hid GPU telemetry on fallback without switching to `CPU / RAM`; `PerformanceView` labeled Windows VRAM `"Memory Pressure / Swap"`.
+  - **Implemented Fixes:**
+    - Removed the `model_path` precondition on `inspect_purfview(executable)` so `Auto` mode inspects and prefers **Purfview Faster-Whisper-XXL** CUDA on Windows whenever `device_preference != "cpu"` and downloads missing Whisper models into cache cleanly when needed.
+    - Extended `subtitle_edit_engine()` / `find_executable()` to search `%APPDATA%` and `%LOCALAPPDATA%` Subtitle Edit installs plus app-local `tools/` directories.
+    - Never silently falls back to CPU: emits explicit fallback diagnostic logs and populates `SpeechProgress.fallback_reason`.
+    - Upgraded `gpu_info()` to use in-process `pynvml` (`nvidia-ml-py`) first (with `nvidia-smi` fallback), tracking `[os.getpid()]` + recursive child subprocesses (`faster-whisper-xxl.exe`) to distinguish system-wide VRAM (`System X / Y MiB`) from app-specific VRAM / WDDM active state (`App Z MiB` / `App Active (WDDM)` / `App 0 MiB (Idle)`).
+    - Switched `SpeechProgressView` cleanly to live `CPU / RAM` telemetry when running CPU inference (`device="cpu"`), and updated `detect_acceleration_backends()` + `PerformanceView` to report `CUDA (Purfview XXL), NVENC H.264` and `VRAM (System / App)`.
+    - Exposed and verified `SettingsManager` (`SettingsStore`) persistence for Speech and Performance profiles; preserved macOS `MLX Whisper`, unified memory, and `VideoToolbox` untouched.
+  - **Actual Windows Benchmark (`RTX 3050 6GB Laptop GPU` + `AMD Ryzen 5 6600H`, `35.6s` Indonesian podcast clip, `small` model, `98` words):**
+    - `Python Faster-Whisper (CPU, int8)`: **`9.23s`** (`RTF = 0.259`, `3.86x` realtime, `98 words`).
+    - `Purfview Faster-Whisper-XXL (Auto Balanced, CUDA, float16, batch=4)`: **`4.34s`** (`RTF = 0.122`, **`8.21x` realtime**, `98 words`, **`2.13x` faster than CPU** including process startup; `System 1,032 / 6,144 MiB`, `app_active=True`, `43°C`, `12.7 W`, NVML).
+    - `Purfview Faster-Whisper-XXL (Auto Turbo, CUDA, float16, batch=4)`: **`4.51s`** (`RTF = 0.127`, **`7.89x` realtime**, `98 words`; `System 1,032 / 6,144 MiB`, `app_active=True`, `44°C`, `29.0 W`, NVML).
+  - **Test Results:**
+    - Added [`tests/test_windows_cuda_transcription.py`](tests/test_windows_cuda_transcription.py) (uncached-model Purfview CUDA selection, explicit fallback reporting, system vs app VRAM / WDDM distinction, CPU/RAM display, `SettingsManager` persistence, Windows `detect_acceleration_backends()`).
+    - Targeted CUDA, transcription, performance, dependency, setup, and cross-platform suites: **46 passed**.
+
 - **Detailed Native Setup Wizard & Bootstrap Progress (Windows x86-64 & macOS Apple Silicon ARM64):** (Pre-modification checkpoint: `f3c85de`)
   - **Bootstrap Architecture & Shared Event Protocol ([`scripts/setup.py`](scripts/setup.py), [`scripts/dependencies.json`](scripts/dependencies.json), [`autoclip_studio/dependencies.py`](autoclip_studio/dependencies.py)):**
     - Upgraded stdlib-only `scripts/setup.py` to execute and emit an explicit dynamic **8-Stage Setup Pipeline** (`system_compatibility` → `python_runtime` → `virtual_env` → `core_packages` → `media_tools` → `hardware_accel` → `transcription_models` → `final_validation`) with JSON-lines telemetry (`system_info`, `plan`, `stage`, `progress`, `log`, `complete`) requiring zero `PySide6` or app-venv dependencies before setup begins.

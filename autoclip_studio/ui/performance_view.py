@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import asdict
 from typing import Callable
 
@@ -85,10 +86,10 @@ class PerformanceView(QWidget):
         self._metric_values: dict[str, QLabel] = {}
         fields = [
             ("cpu", "CPU"),
-            ("ram", "Unified Memory / RAM"),
+            ("ram", "Unified Memory / RAM" if sys.platform == "darwin" else "System RAM"),
             ("gpu", "GPU"),
-            ("vram", "Memory Pressure / Swap"),
-            ("gpu_temp", "Thermal / Power"),
+            ("vram", "Memory Pressure / Swap" if sys.platform == "darwin" else "VRAM (System / App)"),
+            ("gpu_temp", "Thermal / Power" if sys.platform == "darwin" else "GPU Temp / Power"),
             ("cpu_temp", "CPU Temp"),
             ("power", "Power / Battery"),
             ("accel", "Acceleration"),
@@ -177,10 +178,17 @@ class PerformanceView(QWidget):
             sw = f" • Swap {snap.swap_used_mib / 1024:.1f} GB" if snap.swap_used_mib is not None else ""
             self._metric_values["vram"].setText(f"{mp}{sw}")
         else:
-            self._metric_values["vram"].setText(
-                f"{snap.vram_used_mib} / {snap.vram_total_mib} MiB"
-                if snap.vram_used_mib is not None and snap.vram_total_mib is not None else "N/A"
-            )
+            if snap.vram_used_mib is not None and snap.vram_total_mib is not None:
+                app_txt = (
+                    f"App {snap.vram_app_mib:,} MiB"
+                    if snap.vram_app_mib is not None
+                    else ("App Active (WDDM)" if snap.vram_app_active else "App 0 MiB (Idle)")
+                )
+                self._metric_values["vram"].setText(
+                    f"System {snap.vram_used_mib:,} / {snap.vram_total_mib:,} MiB  •  {app_txt}"
+                )
+            else:
+                self._metric_values["vram"].setText("N/A")
         if snap.unified_memory:
             self._metric_values["gpu_temp"].setText(snap.thermal_pressure or "N/A")
         else:
