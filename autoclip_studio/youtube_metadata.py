@@ -11,8 +11,9 @@ from urllib.parse import urlsplit
 
 import requests
 
+from .download_state import DEFAULT_AUTH_INSTRUCTIONS, download_coordinator, format_cooldown
 from .heatmap import parse_heatmap
-from .media import youtube_id, youtube_watch_url, yt_dlp_command
+from .media import parse_retry_after, youtube_id, youtube_watch_url, yt_dlp_command
 from .paths import CACHE_DIR
 from .process import ProcessManager
 
@@ -24,7 +25,20 @@ _METADATA_FIELDS = "%(.{id,title,channel,uploader,duration,view_count,upload_dat
 
 
 class YouTubeMetadataError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: str = "unknown",
+        temporary: bool = False,
+        retry_after_seconds: float | None = None,
+        retry_after_epoch: float | None = None,
+    ) -> None:
+        self.category = category
+        self.temporary = temporary
+        self.retry_after_seconds = retry_after_seconds
+        self.retry_after_epoch = retry_after_epoch
+        super().__init__(message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,19 +93,38 @@ def _date(value: str | None) -> str | None:
         return None
 
 
-def _extraction_error(output: str) -> str:
+def _is_bot_verification_error(output: str) -> bool:
     detail = output.casefold()
+    return any(
+        tok in detail
+        for tok in ("sign in to confirm", "confirm you’re not a bot", "confirm you're not a bot")
+    )
+
+
+def _classify_extraction_error(output: str) -> tuple[str, str, bool]:
+    """Return `(message, category, is_temporary)` keeping 429/auth separate from permanent unavailability."""
+    detail = output.casefold()
+    if any(word in detail for word in ("http error 429", "429: too many requests", "too many requests", "rate limit")):
+        return (
+            "YouTube temporarily rate-limited requests (HTTP 429 Too Many Requests). Wait briefly before retrying.",
+            "http_429",
+            True,
+        )
     if "private video" in detail or "this video is private" in detail:
-        return "This YouTube video is private."
-    if any(word in detail for word in ("sign in", "log in", "login required", "confirm you’re not a bot")):
-        return "YouTube requires sign-in or verification for this video."
+        return "This YouTube video is private.", "private", False
+    if any(word in detail for word in ("sign in", "log in", "login required", "confirm you’re not a bot", "confirm you're not a bot")):
+        return "YouTube requires sign-in or verification for this video.", "auth_required", True
     if any(word in detail for word in ("video unavailable", "video is unavailable", "not available", "removed", "copyright",
                                         "has been terminated", "members-only")):
-        return "This YouTube video is unavailable."
+        return "This YouTube video is unavailable.", "unavailable", False
     if any(word in detail for word in ("timed out", "network", "connection", "unable to download",
                                         "getaddrinfo", "certificate", "http error", "winerror")):
-        return "Could not reach YouTube. Check your connection and retry."
-    return "YouTube metadata could not be retrieved. Retry or check the link in your browser."
+        return "Could not reach YouTube. Check your connection and retry.", "network_error", True
+    return "YouTube metadata could not be retrieved. Retry or check the link in your browser.", "unknown", True
+
+
+def _extraction_error(output: str) -> str:
+    return _classify_extraction_error(output)[0]
 
 
 def _thumbnail_urls(info: dict) -> list[str]:
@@ -151,35 +184,86 @@ def _save_cache(path: Path, data: bytes) -> None:
                 pass
 
 
-def _extract(video_id: str, manager: ProcessManager) -> tuple[YouTubeMetadata, list[str]]:
+def _extract(video_id: str, manager: ProcessManager, *, explicit_retry: bool = False) -> tuple[YouTubeMetadata, list[str]]:
+    coordinator = download_coordinator()
+    allowed, block_cat, remaining, until = coordinator.check_request_allowed(
+        video_id, allow_explicit_auth_retry=explicit_retry,
+    )
+    if not allowed:
+        if block_cat == "http_429":
+            raise YouTubeMetadataError(
+                f"YouTube rate limit cooldown active. Retry available in {format_cooldown(remaining)}.",
+                category="http_429",
+                temporary=True,
+                retry_after_seconds=remaining,
+                retry_after_epoch=until,
+            )
+        raise YouTubeMetadataError(
+            "YouTube requires sign-in or verification. Automatic metadata lookups are paused.",
+            category="auth_required",
+            temporary=True,
+        )
+
     command = yt_dlp_command() + [
         "--ignore-config", "--no-playlist", "--skip-download", "--simulate", "--print", _METADATA_FIELDS,
         "--ignore-no-formats-error", "--socket-timeout", "8", "--retries", "1", "--extractor-retries", "1",
+        "--sleep-requests", "0.75",
         "--encoding", "utf-8", youtube_watch_url(video_id),
     ]
     try:
         output = manager.run(command, output_tail=24).stdout
     except CalledProcessError as error:
-        raise YouTubeMetadataError(_extraction_error(error.output or "")) from error
+        raw = error.output or ""
+        msg, category, temporary = _classify_extraction_error(raw)
+        if category == "http_429":
+            retry_after = parse_retry_after(raw)
+            until, cooldown = coordinator.record_rate_limit(video_id, retry_after_seconds=retry_after)
+            raise YouTubeMetadataError(
+                f"YouTube rate-limited metadata extraction (HTTP 429). Retry available in {format_cooldown(cooldown)}.",
+                category="http_429",
+                temporary=True,
+                retry_after_seconds=cooldown,
+                retry_after_epoch=until,
+            ) from error
+        if category == "auth_required" and _is_bot_verification_error(raw):
+            coordinator.record_auth_required(video_id, DEFAULT_AUTH_INSTRUCTIONS)
+        raise YouTubeMetadataError(msg, category=category, temporary=temporary) from error
     lines = output.splitlines()
     info = next((line for line in reversed(lines) if line.startswith("{")), "")
     diagnostics = "\n".join(line for line in lines if line != info)
     try:
         data = json.loads(info)
     except ValueError:
-        raise YouTubeMetadataError(_extraction_error(diagnostics)) from None
+        msg, category, temporary = _classify_extraction_error(diagnostics)
+        if category == "http_429":
+            until, cooldown = coordinator.record_rate_limit(video_id, retry_after_seconds=parse_retry_after(diagnostics))
+            raise YouTubeMetadataError(
+                f"YouTube rate-limited metadata extraction (HTTP 429). Retry available in {format_cooldown(cooldown)}.",
+                category="http_429",
+                temporary=True,
+                retry_after_seconds=cooldown,
+                retry_after_epoch=until,
+            ) from None
+        if category == "auth_required" and _is_bot_verification_error(diagnostics):
+            coordinator.record_auth_required(video_id, DEFAULT_AUTH_INSTRUCTIONS)
+        raise YouTubeMetadataError(msg, category=category, temporary=temporary) from None
     availability = data.get("availability")
     if availability == "private":
-        raise YouTubeMetadataError("This YouTube video is private.")
+        raise YouTubeMetadataError("This YouTube video is private.", category="private", temporary=False)
     if availability == "needs_auth":
-        raise YouTubeMetadataError("YouTube requires sign-in or verification for this video.")
+        raise YouTubeMetadataError(
+            "YouTube requires sign-in or verification for this video.", category="auth_required", temporary=True,
+        )
     if availability in {"subscriber_only", "premium_only"}:
-        raise YouTubeMetadataError("This YouTube video is unavailable without the required membership.")
+        raise YouTubeMetadataError(
+            "This YouTube video is unavailable without the required membership.", category="unavailable", temporary=False,
+        )
     if data.get("id") != video_id or "entries" in data or not data.get("title"):
-        raise YouTubeMetadataError("This YouTube video is unavailable.")
+        raise YouTubeMetadataError("This YouTube video is unavailable.", category="unavailable", temporary=False)
     title = " ".join(data["title"].split())
     if not title or title == f"youtube video #{video_id}":
-        raise YouTubeMetadataError(_extraction_error(diagnostics))
+        msg, category, temporary = _classify_extraction_error(diagnostics)
+        raise YouTubeMetadataError(msg, category=category, temporary=temporary)
     duration_val = _nonnegative_int(data.get("duration"))
     heatmap_points = parse_heatmap(data.get("heatmap"), duration=duration_val)
     heatmap_dicts = tuple(pt.to_dict() for pt in heatmap_points)
@@ -201,17 +285,24 @@ def _extract(video_id: str, manager: ProcessManager) -> tuple[YouTubeMetadata, l
         auto_caption_languages=_lang_keys(data.get("automatic_captions")),
         language=str(data.get("language") or "").strip(),
     )
+    coordinator.record_success(video_id)
     return metadata, _thumbnail_urls(data)
 
 
-def fetch_youtube_metadata(video_id: str, manager: ProcessManager, *,
-                           cache_dir: Path | None = None) -> tuple[YouTubeMetadata, bytes]:
+def fetch_youtube_metadata(
+    video_id: str,
+    manager: ProcessManager,
+    *,
+    cache_dir: Path | None = None,
+    explicit_retry: bool = False,
+) -> tuple[YouTubeMetadata, bytes]:
     if youtube_id(youtube_watch_url(video_id)) != video_id:
-        raise YouTubeMetadataError("Enter a complete link to a YouTube video or Short.")
+        raise YouTubeMetadataError("Enter a complete link to a YouTube video or Short.", category="invalid_url")
     manager.check_cancelled()
     cache = cache_dir if cache_dir is not None else CACHE_DIR / "youtube-metadata"
     record_path, thumbnail_path = cache / f"{video_id}.json", cache / f"{video_id}.thumb"
-    try:
+
+    def _read_cached_record() -> tuple[YouTubeMetadata, list[str]]:
         if time() - record_path.stat().st_mtime > _CACHE_TTL:
             raise ValueError("Expired metadata")
         record = json.loads(record_path.read_bytes())
@@ -224,9 +315,14 @@ def fetch_youtube_metadata(video_id: str, manager: ProcessManager, *,
         metadata = YouTubeMetadata(**raw_meta)
         if metadata.video_id != video_id:
             raise ValueError("Cached video ID mismatch")
-        urls = record["thumbnails"]
-    except (OSError, ValueError, TypeError, KeyError):
-        metadata, urls = _extract(video_id, manager)
+        return metadata, record["thumbnails"]
+
+    def _load_or_extract() -> tuple[YouTubeMetadata, list[str]]:
+        try:
+            return _read_cached_record()
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+        metadata, urls = _extract(video_id, manager, explicit_retry=explicit_retry)
         manager.check_cancelled()
         _save_cache(
             record_path,
@@ -236,6 +332,14 @@ def fetch_youtube_metadata(video_id: str, manager: ProcessManager, *,
                 "thumbnails": urls,
             }).encode("utf-8"),
         )
+        return metadata, urls
+
+    # Deduplicate simultaneous in-flight metadata extractions for the same video ID + cache root.
+    flight_key = f"meta:{cache.resolve()}:{video_id}"
+    try:
+        metadata, urls = _read_cached_record()
+    except (OSError, ValueError, TypeError, KeyError):
+        metadata, urls = download_coordinator().deduplicate_extraction(flight_key, _load_or_extract)
     try:
         thumbnail = thumbnail_path.read_bytes()
     except OSError:

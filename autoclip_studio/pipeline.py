@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import shutil
@@ -10,13 +11,14 @@ from typing import Callable
 from .config import SettingsStore
 from .database import Database
 from .diagnostics import LOG, SUCCESS, log_error, redact
+from .download_state import DownloadState, cleanup_workspace
 from .heatmap import HeatmapPoint, parse_heatmap
 from .highlights import select_highlights
-from .media import DownloadProgress, acquire_source, is_youtube_url, probe, youtube_id
+from .media import DownloadError, DownloadProgress, acquire_source, is_youtube_url, probe, youtube_id
 from .models import ProjectOptions, RenderedClip, Transcript
 from .paths import CACHE_DIR, OUTPUT_DIR
 from .performance import HardwareMonitor, resolve_profile_limits
-from .process import CancelledError, ProcessManager
+from .process import CancelledError, PausedError, ProcessManager
 from .providers import AIProvider, ProviderError
 from .rendering import render_clip, source_dimensions
 from .subtitles import parse_srt_file
@@ -39,7 +41,8 @@ class Pipeline:
         self.monitor = monitor or HardwareMonitor()
 
     def run(self, project_id: str, options: ProjectOptions, progress: Progress, *,
-            resume_analysis: bool = False, warning: Callable[[str], None] | None = None,
+            resume_analysis: bool = False, explicit_retry: bool = False,
+            warning: Callable[[str], None] | None = None,
             download_progress: Callable[[DownloadProgress], None] | None = None,
             download_log: Callable[[str], None] | None = None,
             speech_progress: Callable[[SpeechProgress], None] | None = None,
@@ -48,12 +51,18 @@ class Pipeline:
             if not self.database.claim_analysis_retry(project_id, asdict(options)):
                 raise RuntimeError("This project is no longer waiting for an AI analysis retry.")
         else:
-            self.database.update_project(project_id, status="processing", progress=1, error="")
+            self.database.update_project(project_id, status="processing", progress=1, error="", stage="Starting")
         LOG.info("Project %s %s", project_id, "retrying AI analysis" if resume_analysis else "started")
         job_dir = CACHE_DIR / "jobs" / project_id
         checkpoint = job_dir / "analysis.json"
         keep_job = False
         analysis_pending = resume_analysis
+        last_download_state: list[DownloadState | None] = [None]
+
+        def _on_download_state(dl_state: DownloadState) -> None:
+            last_download_state[0] = dl_state
+            self.database.update_project(project_id, download_state=dl_state.to_dict())
+
         try:
             speech = self.settings.speech()
             perf = self.settings.performance()
@@ -77,7 +86,7 @@ class Pipeline:
                     options.highlight_mode in {"hybrid", "most_replayed"} or options.use_youtube_subtitles
                 ):
                     try:
-                        yt_meta_obj, _ = fetch_youtube_metadata(vid_id, self.manager)
+                        yt_meta_obj, _ = fetch_youtube_metadata(vid_id, self.manager, explicit_retry=explicit_retry)
                     except YouTubeMetadataError as meta_err:
                         LOG.warning("YouTube metadata unavailable for %s: %s", vid_id, meta_err)
                 self._update(
@@ -85,10 +94,24 @@ class Pipeline:
                     "Downloading YouTube video" if youtube_source else "Importing local video (download skipped)",
                     progress,
                 )
+                acquire_kwargs: dict[str, object] = {
+                    "job_dir": job_dir,
+                    "progress": download_progress,
+                }
+                sig = inspect.signature(acquire_source)
+                if "project_id" in sig.parameters:
+                    acquire_kwargs["project_id"] = project_id
+                if "explicit_retry" in sig.parameters:
+                    acquire_kwargs["explicit_retry"] = explicit_retry
+                if "on_state" in sig.parameters:
+                    acquire_kwargs["on_state"] = _on_download_state
                 source = acquire_source(
                     options.source, options.cache_enabled, self.manager,
-                    download_log or self._logger(progress, 4), job_dir=job_dir, progress=download_progress,
+                    download_log or self._logger(progress, 4),
+                    **acquire_kwargs,
                 )
+                # Download succeeded — clear transient download recovery metadata.
+                self.database.update_project(project_id, download_state="")
                 dimensions = source_dimensions(source, self.manager)
                 self.monitor.wait_if_constrained(perf, self.manager.cancel_event, self._logger(progress, 11))
                 # Transcript priority: 1) User SRT -> 2) YouTube subtitles -> 3) Local/Cloud Speech-to-Text
@@ -239,16 +262,71 @@ class Pipeline:
             self.database.update_project(project_id, status="completed", progress=100)
             LOG.log(SUCCESS, "Project %s completed with %s clips", project_id, len(rendered))
             return rendered
+        except PausedError:
+            keep_job = True
+            dl_payload = last_download_state[0].to_dict() if last_download_state[0] else None
+            self.database.update_project(
+                project_id,
+                status="paused",
+                stage="Download paused",
+                error="",
+                download_state=dl_payload,
+            )
+            LOG.info("Project %s paused by user (partial download preserved).", project_id)
+            raise
         except CancelledError:
             if analysis_pending and checkpoint.exists():
                 keep_job = True
                 self.database.update_project(project_id, status="analysis_failed", error="AI analysis retry cancelled")
             else:
-                self.database.update_project(project_id, status="cancelled", error="Cancelled by user")
+                if last_download_state[0] and last_download_state[0].workspace_dir:
+                    cleanup_workspace(last_download_state[0].workspace_dir)
+                self.database.update_project(
+                    project_id, status="cancelled", stage="Cancelled", error="Cancelled by user", download_state="",
+                )
+            raise
+        except DownloadError as error:
+            if keep_job:
+                raise
+            if self.manager.pause_event.is_set():
+                keep_job = True
+                dl_payload = last_download_state[0].to_dict() if last_download_state[0] else None
+                self.database.update_project(
+                    project_id, status="paused", stage="Download paused", error="", download_state=dl_payload,
+                )
+                raise PausedError("Download paused") from error
+            if self.manager.cancel_event.is_set():
+                if error.workspace:
+                    cleanup_workspace(error.workspace)
+                self.database.update_project(
+                    project_id, status="cancelled", stage="Cancelled", error="Cancelled by user", download_state="",
+                )
+                raise CancelledError("Processing cancelled") from error
+            log_error(f"Project {project_id} download failed ({error.category})", error)
+            if error.category == "http_429":
+                keep_job = True
+                self.database.update_project(
+                    project_id, status="rate_limited", stage="Rate Limited", error=redact(str(error)),
+                )
+            elif error.category == "auth_required":
+                keep_job = True
+                self.database.update_project(
+                    project_id, status="auth_required", stage="Authentication Required", error=redact(str(error)),
+                )
+            else:
+                if error.partial_bytes > 0:
+                    keep_job = True
+                self.database.update_project(
+                    project_id, status="failed", stage="Download failed", error=redact(str(error)),
+                )
             raise
         except Exception as error:
             if keep_job:
                 raise
+            if self.manager.pause_event.is_set():
+                keep_job = True
+                self.database.update_project(project_id, status="paused", stage="Download paused", error="")
+                raise PausedError("Download paused") from error
             if self.manager.cancel_event.is_set():
                 self.database.update_project(project_id, status="cancelled", error="Cancelled by user")
                 raise CancelledError("Processing cancelled") from error

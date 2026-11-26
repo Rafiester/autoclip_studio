@@ -9,15 +9,30 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from math import isfinite
 from pathlib import Path
-from tempfile import TemporaryDirectory, mkdtemp
+from tempfile import mkdtemp
 from typing import Callable
 from urllib.parse import parse_qs, urlparse
 
 from .diagnostics import LOG, redact
+from .download_state import (
+    DEFAULT_AUTH_INSTRUCTIONS,
+    DownloadConflictError,
+    DownloadState,
+    cleanup_workspace,
+    download_coordinator,
+    format_cooldown,
+    format_preserved_bytes,
+    inspect_partial_files,
+    save_download_state,
+    verify_workspace_identity,
+    workspace_key_for,
+    workspace_path_for,
+)
 from .paths import CACHE_DIR, bundled_binary
-from .process import CancelledError, ProcessManager, find_media_tool
+from .process import CancelledError, PausedError, ProcessManager, find_media_tool
 
 
 YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
@@ -45,6 +60,11 @@ class DownloadError(RuntimeError):
         retryable: bool = False,
         needs_dependency_repair: bool = False,
         exit_code: int | None = None,
+        retry_after_seconds: float | None = None,
+        retry_after_epoch: float | None = None,
+        partial_bytes: int = 0,
+        workspace: str = "",
+        auth_instructions: str = "",
     ) -> None:
         self.summary = redact(summary).strip()
         self.category = category
@@ -52,10 +72,49 @@ class DownloadError(RuntimeError):
         self.retryable = retryable
         self.needs_dependency_repair = needs_dependency_repair
         self.exit_code = exit_code
+        self.retry_after_seconds = retry_after_seconds
+        self.retry_after_epoch = retry_after_epoch
+        self.partial_bytes = max(0, int(partial_bytes or 0))
+        self.workspace = workspace
+        self.auth_instructions = auth_instructions
         full = self.summary
         if self.details:
             full = f"{self.summary}\n\nTechnical details:\n{self.details}"
         super().__init__(full)
+
+
+_RETRY_AFTER_HEADER_RE = re.compile(r"retry-after\s*[:=]\s*([^\r\n;]+)", re.IGNORECASE)
+_WAIT_SECONDS_RE = re.compile(
+    r"(?:retry|wait|try again)\s+(?:in|after)\s+(\d+(?:\.\d+)?)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes)\b",
+    re.IGNORECASE,
+)
+
+
+def parse_retry_after(output: str) -> float | None:
+    """Parse Retry-After header (seconds or HTTP-date) or explicit wait hint from yt-dlp output."""
+    if not output:
+        return None
+    header = _RETRY_AFTER_HEADER_RE.search(output)
+    if header:
+        raw = header.group(1).strip().strip("'\"")
+        if raw.isdigit():
+            val = float(raw)
+            return val if val > 0 else None
+        try:
+            dt = parsedate_to_datetime(raw)
+            delta = dt.timestamp() - time.time()
+            if delta > 0:
+                return delta
+        except (TypeError, ValueError, OverflowError):
+            pass
+    hint = _WAIT_SECONDS_RE.search(output)
+    if hint:
+        amount = float(hint.group(1))
+        unit = hint.group(2).lower()
+        if unit.startswith("m"):
+            amount *= 60.0
+        return amount if amount > 0 else None
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -229,12 +288,19 @@ def classify_download_error(
             exit_code=exit_code,
         )
     if any(tok in low for tok in ("http error 429", "429: too many requests", "too many requests", "rate limit")):
+        retry_after = parse_retry_after(redacted_out)
+        wait_note = (
+            f" Retry available after {format_cooldown(retry_after)}."
+            if retry_after
+            else " Automatic retries have been paused; wait for cooldown before resuming."
+        )
         return DownloadError(
-            "YouTube temporarily rate-limited downloads (HTTP 429 Too Many Requests). Wait briefly and retry.",
+            f"YouTube temporarily rate-limited downloads (HTTP 429 Too Many Requests).{wait_note}",
             category="http_429",
             details=diag,
             retryable=True,
             exit_code=exit_code,
+            retry_after_seconds=retry_after,
         )
     if any(tok in low for tok in (
         "sign in to confirm", "confirm you’re not a bot", "confirm you're not a bot",
@@ -242,11 +308,12 @@ def classify_download_error(
         "members-only", "join this channel", "age-restricted", "confirm your age",
     )):
         return DownloadError(
-            "YouTube requires authentication or restricts access to this video (private, age-restricted, members-only, or bot check).",
+            "YouTube requires authentication or verification before allowing this download.",
             category="auth_required",
             details=diag,
             retryable=False,
             exit_code=exit_code,
+            auth_instructions=DEFAULT_AUTH_INSTRUCTIONS,
         )
     if any(tok in low for tok in (
         "no supported javascript runtime", "js challenge", "yt-dlp-ejs", "ejs", "deno", "quickjs",
@@ -362,9 +429,18 @@ def _verify_downloaded_file(path: Path, manager: ProcessManager) -> bool:
         return False
 
 
-def acquire_source(source: str, cache: bool, manager: ProcessManager,
-                   log: Callable[[str], None] = lambda _line: None, *, job_dir: Path | None = None,
-                   progress: Callable[[DownloadProgress], None] | None = None) -> Path:
+def acquire_source(
+    source: str,
+    cache: bool,
+    manager: ProcessManager,
+    log: Callable[[str], None] = lambda _line: None,
+    *,
+    job_dir: Path | None = None,
+    progress: Callable[[DownloadProgress], None] | None = None,
+    project_id: str | None = None,
+    explicit_retry: bool = False,
+    on_state: Callable[[DownloadState], None] | None = None,
+) -> Path:
     local = Path(source).expanduser()
     if local.is_file():
         return local.resolve()
@@ -373,35 +449,148 @@ def acquire_source(source: str, cache: bool, manager: ProcessManager,
     if error := youtube_source_error(source):
         raise ValueError(error)
     manager.check_cancelled()
-    key = youtube_id(source) or "url-" + hashlib.sha256(source.encode()).hexdigest()[:24]
-    if not cache:
-        target = job_dir / "download" if job_dir else Path(mkdtemp(prefix="autoclip-download-"))
-        target.mkdir(parents=True, exist_ok=True)
-        return _download_youtube(source, target, key, manager, log, progress=progress)
+    vid = youtube_id(source) or ""
+    key = vid or "url-" + hashlib.sha256(source.encode()).hexdigest()[:24]
 
     downloads = CACHE_DIR / "downloads"
-    downloads.mkdir(parents=True, exist_ok=True)
-    for item in sorted(downloads.glob(f"{key}.*")):
-        if item.suffix.lower() in MEDIA_EXTENSIONS and item.is_file() and item.stat().st_size:
-            if _verify_downloaded_file(item, manager):
-                log(f"Using cached download: {item.name}")
-                return item
-            log(f"Ignoring corrupted cached file {item.name}; re-downloading…")
-            try:
-                item.unlink(missing_ok=True)
-            except OSError:
-                pass
+    if cache:
+        downloads.mkdir(parents=True, exist_ok=True)
+        for item in sorted(downloads.glob(f"{key}.*")):
+            if item.suffix.lower() in MEDIA_EXTENSIONS and item.is_file() and item.stat().st_size:
+                if _verify_downloaded_file(item, manager):
+                    log(f"Using cached download: {item.name}")
+                    return item
+                log(f"Ignoring corrupted cached file {item.name}; re-downloading…")
+                try:
+                    item.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
-    # Preserve partial download folder across bounded retries, then clean up on completion.
-    with TemporaryDirectory(prefix=f"incoming-{key}-", dir=downloads) as staging:
-        video = _download_youtube(source, Path(staging), key, manager, log, progress=progress)
-        destination = downloads / video.name
-        video.replace(destination)
-        return destination
+    workspace = workspace_path_for(
+        source,
+        video_id=vid or None,
+        project_id=project_id,
+        cache_enabled=cache,
+        base_dir=CACHE_DIR,
+    )
+    workspace_key = workspace_key_for(
+        source,
+        video_id=vid or None,
+        project_id=project_id,
+        cache_enabled=cache,
+    )
+    coordinator = download_coordinator()
+    allowed, block_cat, remaining, until = coordinator.check_request_allowed(
+        vid, allow_explicit_auth_retry=explicit_retry,
+    )
+    if not allowed:
+        disk_bytes, partial_files = inspect_partial_files(workspace)
+        if block_cat == "http_429":
+            summary = (
+                f"YouTube rate limit cooldown active. Retry available in {format_cooldown(remaining)}."
+                + (f" ({format_preserved_bytes(disk_bytes)} preserved)" if disk_bytes > 0 else "")
+            )
+            state = DownloadState(
+                workspace_key=workspace_key,
+                workspace_dir=str(workspace),
+                project_id=project_id or "",
+                video_id=vid,
+                source_url=source,
+                selected_format=DEFAULT_FORMAT,
+                status="rate_limited",
+                downloaded_bytes=disk_bytes,
+                partial_files=partial_files,
+                retry_after_epoch=until,
+                cooldown_seconds=remaining,
+                error_category="http_429",
+                error_summary=summary,
+            )
+            save_download_state(workspace, state)
+            if on_state:
+                on_state(state)
+            raise DownloadError(
+                summary,
+                category="http_429",
+                retryable=True,
+                retry_after_seconds=remaining,
+                retry_after_epoch=until,
+                partial_bytes=disk_bytes,
+                workspace=str(workspace),
+            )
+        summary = "YouTube requires sign-in or verification. Automatic downloads are paused until you verify and retry."
+        state = DownloadState(
+            workspace_key=workspace_key,
+            workspace_dir=str(workspace),
+            project_id=project_id or "",
+            video_id=vid,
+            source_url=source,
+            selected_format=DEFAULT_FORMAT,
+            status="auth_required",
+            downloaded_bytes=disk_bytes,
+            partial_files=partial_files,
+            error_category="auth_required",
+            error_summary=summary,
+            auth_instructions=DEFAULT_AUTH_INSTRUCTIONS,
+        )
+        save_download_state(workspace, state)
+        if on_state:
+            on_state(state)
+        raise DownloadError(
+            summary,
+            category="auth_required",
+            retryable=False,
+            partial_bytes=disk_bytes,
+            workspace=str(workspace),
+            auth_instructions=DEFAULT_AUTH_INSTRUCTIONS,
+        )
+
+    try:
+        with coordinator.acquire_download_slot(project_id=project_id or "", video_id=vid):
+            video = _download_youtube(
+                source,
+                workspace,
+                key,
+                manager,
+                log,
+                progress=progress,
+                project_id=project_id or "",
+                video_id=vid,
+                workspace_key=workspace_key,
+                on_state=on_state,
+            )
+            if cache:
+                destination = downloads / video.name
+                video.replace(destination)
+            else:
+                dest_dir = job_dir / "download" if job_dir else Path(mkdtemp(prefix="autoclip-download-"))
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                destination = dest_dir / video.name
+                video.replace(destination)
+            cleanup_workspace(workspace)
+            coordinator.record_success(vid)
+            return destination
+    except DownloadConflictError as exc:
+        raise DownloadError(
+            str(exc),
+            category="duplicate_download",
+            retryable=False,
+            workspace=str(workspace),
+        ) from exc
 
 
-def _download_youtube(source: str, target: Path, key: str, manager: ProcessManager,
-                      log: Callable[[str], None], *, progress: Callable[[DownloadProgress], None] | None = None) -> Path:
+def _download_youtube(
+    source: str,
+    target: Path,
+    key: str,
+    manager: ProcessManager,
+    log: Callable[[str], None],
+    *,
+    progress: Callable[[DownloadProgress], None] | None = None,
+    project_id: str = "",
+    video_id: str = "",
+    workspace_key: str = "",
+    on_state: Callable[[DownloadState], None] | None = None,
+) -> Path:
     try:
         ffmpeg_dir = str(Path(find_media_tool("ffmpeg")).parent)
     except FileNotFoundError as exc:
@@ -413,37 +602,103 @@ def _download_youtube(source: str, target: Path, key: str, manager: ProcessManag
             needs_dependency_repair=True,
         ) from exc
 
+    target.mkdir(parents=True, exist_ok=True)
     template = str(target / f"{key}.%(ext)s")
     receipt = target / "downloaded-path.txt"
     format_plan = (DEFAULT_FORMAT, DEFAULT_FORMAT, FALLBACK_FORMAT)
     last_error: DownloadError | None = None
+    coordinator = download_coordinator()
+    seen_downloaded: list[int] = [0]
+    seen_total: list[int | None] = [None]
+
+    def _persist_state(
+        status: str,
+        fmt: str,
+        *,
+        retry_after_epoch: float | None = None,
+        cooldown_seconds: float | None = None,
+        error_category: str = "",
+        error_summary: str = "",
+        auth_instructions: str = "",
+    ) -> DownloadState:
+        disk_bytes, partial_files = inspect_partial_files(target)
+        preserved = max(disk_bytes, seen_downloaded[0]) if status == "downloading" else disk_bytes
+        if preserved == 0 and seen_downloaded[0] > 0 and partial_files:
+            preserved = seen_downloaded[0]
+        state = DownloadState(
+            workspace_key=workspace_key or target.name,
+            workspace_dir=str(target),
+            project_id=project_id,
+            video_id=video_id,
+            source_url=source,
+            selected_format=fmt,
+            status=status,
+            downloaded_bytes=preserved,
+            total_bytes=seen_total[0],
+            partial_files=partial_files,
+            retry_after_epoch=retry_after_epoch,
+            cooldown_seconds=cooldown_seconds,
+            error_category=error_category,
+            error_summary=error_summary,
+            auth_instructions=auth_instructions,
+        )
+        save_download_state(target, state)
+        if on_state:
+            on_state(state)
+        return state
 
     for attempt, fmt in enumerate(format_plan):
         manager.check_cancelled()
+        reused, reason, preserved_bytes = verify_workspace_identity(
+            target, video_id=video_id, source_url=source, selected_format=fmt,
+        )
+        if reused and preserved_bytes > 0:
+            log(f"Resuming download from preserved partial files ({format_preserved_bytes(preserved_bytes)})…")
+        elif reason in ("video_id_mismatch", "source_url_mismatch", "format_mismatch"):
+            log(f"Cleared incompatible partial files ({reason}) before starting download.")
+
+        _persist_state("downloading", fmt)
         receipt.unlink(missing_ok=True)
         command = yt_dlp_command()
+
+        def _track_progress(item: DownloadProgress) -> None:
+            if item.downloaded is not None and item.downloaded > seen_downloaded[0]:
+                seen_downloaded[0] = int(item.downloaded)
+            if item.total is not None and item.total > 0:
+                seen_total[0] = int(item.total)
+            if progress is not None:
+                progress(item)
+
         on_output = log
         if progress is not None:
             command += ["--progress", "--progress-delta", "0.2", "--progress-template", _TRANSFER_TEMPLATE]
-            on_output = lambda line: _log_transfer(line, log, progress)
+            on_output = lambda line: _log_transfer(line, log, _track_progress)
         command += [
             "--no-playlist", "--no-simulate", "--newline", "--restrict-filenames",
-            "--continue", "--retries", "3", "--fragment-retries", "3",
+            "--continue", "--part", "--retries", "1", "--fragment-retries", "2",
+            "--sleep-requests", "1",
             "--ffmpeg-location", ffmpeg_dir,
             "--merge-output-format", "mp4", "-f", fmt, "-o", template,
             "--print-to-file", "after_move:filepath", str(receipt), source,
         ]
         try:
             manager.run(command, on_output=on_output, output_tail=80)
+        except PausedError:
+            state = _persist_state("paused", fmt, error_summary="Download paused by user")
+            log(f"Download paused ({format_preserved_bytes(state.downloaded_bytes)} preserved).")
+            raise
         except CancelledError:
+            cleanup_workspace(target)
             raise
         except FileNotFoundError as exc:
+            _persist_state("failed", fmt, error_category="missing_media_tool", error_summary=str(exc))
             raise DownloadError(
                 f"Required downloader executable is missing: {exc}",
                 category="missing_media_tool",
                 details=str(exc),
                 retryable=False,
                 needs_dependency_repair=True,
+                workspace=str(target),
             ) from exc
         except subprocess.CalledProcessError as exc:
             err = classify_download_error(
@@ -456,13 +711,78 @@ def _download_youtube(source: str, target: Path, key: str, manager: ProcessManag
                 "YouTube download attempt %d/%d failed (%s): %s",
                 attempt + 1, len(format_plan), err.category, err.summary,
             )
+            # NEVER hammer YouTube with automatic retries on HTTP 429 or auth/bot verification!
+            if err.category == "http_429":
+                until, cooldown = coordinator.record_rate_limit(
+                    video_id, retry_after_seconds=err.retry_after_seconds,
+                )
+                state = _persist_state(
+                    "rate_limited",
+                    fmt,
+                    retry_after_epoch=until,
+                    cooldown_seconds=cooldown,
+                    error_category="http_429",
+                    error_summary=err.summary,
+                )
+                preserved_note = (
+                    f" Preserved {format_preserved_bytes(state.downloaded_bytes)} on disk."
+                    if state.downloaded_bytes > 0
+                    else ""
+                )
+                raise DownloadError(
+                    f"YouTube rate-limited this download (HTTP 429 Too Many Requests). "
+                    f"Retry available in {format_cooldown(cooldown)}.{preserved_note}",
+                    category="http_429",
+                    details=err.details,
+                    retryable=True,
+                    exit_code=err.exit_code,
+                    retry_after_seconds=cooldown,
+                    retry_after_epoch=until,
+                    partial_bytes=state.downloaded_bytes,
+                    workspace=str(target),
+                ) from exc
+            if err.category == "auth_required":
+                coordinator.record_auth_required(video_id, err.auth_instructions)
+                state = _persist_state(
+                    "auth_required",
+                    fmt,
+                    error_category="auth_required",
+                    error_summary=err.summary,
+                    auth_instructions=err.auth_instructions or DEFAULT_AUTH_INSTRUCTIONS,
+                )
+                raise DownloadError(
+                    err.summary,
+                    category="auth_required",
+                    details=err.details,
+                    retryable=False,
+                    exit_code=err.exit_code,
+                    partial_bytes=state.downloaded_bytes,
+                    workspace=str(target),
+                    auth_instructions=err.auth_instructions or DEFAULT_AUTH_INSTRUCTIONS,
+                ) from exc
+
             can_retry = err.retryable and attempt + 1 < len(format_plan)
             if not can_retry:
+                state = _persist_state(
+                    "failed",
+                    fmt,
+                    error_category=err.category,
+                    error_summary=err.summary,
+                )
+                err.partial_bytes = state.downloaded_bytes
+                err.workspace = str(target)
                 raise err from exc
             wait_s = 2 ** attempt
             log(f"Download interrupted ({err.category}); retrying in {wait_s}s ({attempt + 2}/{len(format_plan)})…")
             for _ in range(wait_s * 5):
-                manager.check_cancelled()
+                try:
+                    manager.check_cancelled()
+                except PausedError:
+                    _persist_state("paused", fmt, error_summary="Download paused by user")
+                    raise
+                except CancelledError:
+                    cleanup_workspace(target)
+                    raise
                 time.sleep(0.2)
             continue
 
@@ -479,6 +799,7 @@ def _download_youtube(source: str, target: Path, key: str, manager: ProcessManag
                     details=f"Expected playable video at: {result}",
                     retryable=True,
                     needs_dependency_repair=True,
+                    workspace=str(target),
                 )
                 if attempt + 1 < len(format_plan):
                     try:
@@ -486,6 +807,7 @@ def _download_youtube(source: str, target: Path, key: str, manager: ProcessManag
                     except OSError:
                         pass
                     continue
+                _persist_state("failed", fmt, error_category="merge_error", error_summary=last_error.summary)
                 raise last_error
         last_error = DownloadError(
             "yt-dlp completed without producing a playable video file.",
@@ -493,7 +815,9 @@ def _download_youtube(source: str, target: Path, key: str, manager: ProcessManag
             details=f"Staging directory: {target}",
             retryable=False,
             needs_dependency_repair=True,
+            workspace=str(target),
         )
+        _persist_state("failed", fmt, error_category="unknown", error_summary=last_error.summary)
         raise last_error
 
     raise last_error or DownloadError("YouTube download failed after retries.", category="unknown")

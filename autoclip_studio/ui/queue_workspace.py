@@ -11,12 +11,20 @@ from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout,
-    QHBoxLayout, QLabel, QLineEdit, QMenu, QPlainTextEdit, QProgressBar, QPushButton,
+    QHBoxLayout, QLabel, QLayout, QLineEdit, QMenu, QPlainTextEdit, QProgressBar, QPushButton,
     QScrollArea, QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from ..diagnostics import redact
+from ..download_state import (
+    DEFAULT_AUTH_INSTRUCTIONS,
+    DownloadState,
+    download_coordinator,
+    format_cooldown,
+    format_preserved_bytes,
+)
 from ..media import is_youtube_url
+from .components import make_button, sync_button_icon
 from .download_view import DownloadView
 from .icons import lucide_icon
 from .log_view import LogView
@@ -26,6 +34,9 @@ from .theme import theme_manager
 QUEUE_STATUS_META: dict[str, tuple[str, str, str, str]] = {
     "processing": ("Processing", "#E53935", "rgba(229, 57, 53, 0.16)", "#FF8A80"),
     "queued": ("Queued", "#F5A623", "rgba(245, 166, 35, 0.14)", "#FFD07D"),
+    "paused": ("Paused", "#F5A623", "rgba(245, 166, 35, 0.16)", "#FFD07D"),
+    "rate_limited": ("Rate Limited", "#F59E0B", "rgba(245, 158, 11, 0.16)", "#FCD34D"),
+    "auth_required": ("Auth Required", "#FF6B7A", "rgba(255, 107, 122, 0.16)", "#FF9EA8"),
     "completed": ("Completed", "#2ECC71", "rgba(46, 204, 113, 0.14)", "#7BE3A6"),
     "failed": ("Failed", "#FF6B7A", "rgba(255, 107, 122, 0.14)", "#FF9EA8"),
     "analysis_failed": ("Failed", "#FF6B7A", "rgba(255, 107, 122, 0.14)", "#FF9EA8"),
@@ -38,12 +49,31 @@ def _status_chip_style(status: str) -> tuple[str, str]:
     mapping = {
         "processing": ("Processing", "info"),
         "queued": ("Queued", "warning"),
+        "paused": ("Paused", "warning"),
+        "rate_limited": ("Rate Limited", "warning"),
+        "auth_required": ("Auth Required", "danger"),
         "completed": ("Completed", "success"),
         "failed": ("Failed", "danger"),
         "analysis_failed": ("Failed", "danger"),
         "cancelled": ("Cancelled", ""),
     }
     return mapping.get(status, ("Queued", ""))
+
+
+def parse_download_state(project: dict[str, Any] | None) -> DownloadState | None:
+    """Safely parse persisted download recovery metadata from a project row."""
+    if not project:
+        return None
+    raw = project.get("download_state")
+    if isinstance(raw, dict):
+        return DownloadState.from_dict(raw)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return DownloadState.from_dict(parsed) if isinstance(parsed, dict) else None
 
 
 def _stage_palette(state: str) -> tuple[str, str, str, str]:
@@ -282,8 +312,12 @@ def compute_pipeline_stages(
             else:
                 state, sub = "completed", "Done"
         elif idx == active_idx:
-            if status in ("failed", "analysis_failed"):
-                state, sub = "failed", "Failed"
+            if status in ("failed", "analysis_failed", "auth_required"):
+                state, sub = "failed", "Auth Req." if status == "auth_required" else "Failed"
+            elif status == "rate_limited":
+                state, sub = "waiting", "Rate Ltd."
+            elif status == "paused":
+                state, sub = "waiting", "Paused"
             elif status == "cancelled":
                 state, sub = "cancelled", "Cancelled"
             elif is_skipped:
@@ -453,11 +487,11 @@ class QueueOverviewBar(QFrame):
             st = str(row.get("status") or "")
             if st == "processing":
                 counts["processing"] += 1
-            elif st == "queued":
+            elif st in ("queued", "paused"):
                 counts["queued"] += 1
             elif st == "completed":
                 counts["completed"] += 1
-            elif st in ("failed", "analysis_failed"):
+            elif st in ("failed", "analysis_failed", "rate_limited", "auth_required"):
                 counts["failed"] += 1
         for key, label in self._counters.items():
             label.setText(str(counts[key]))
@@ -559,7 +593,7 @@ class ActiveJobCard(QFrame):
 
     new_project_requested = Signal()
 
-    def __init__(self, on_cancel, parent: QWidget | None = None) -> None:
+    def __init__(self, on_cancel, on_pause=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("card")
         self._started_at: float | None = None
@@ -568,6 +602,7 @@ class ActiveJobCard(QFrame):
         self._stage_has_reliable_progress: bool = False
         self._progress_value: int = 0
         self._status: str = "idle"
+        self._stage_mode: str = "generic"
         self._options: dict[str, Any] = {}
         self._stage_message: str = ""
         self._tick = QTimer(self)
@@ -635,12 +670,34 @@ class ActiveJobCard(QFrame):
         meta_col.addWidget(self.media_label)
         header.addLayout(meta_col, 1)
 
-        self.cancel_button = QPushButton("Cancel Job", objectName="danger")
-        self.cancel_button.setIcon(lucide_icon("x", theme_manager().tokens["semantic_danger_fg"], 14))
-        self.cancel_button.setIconSize(QSize(14, 14))
+        header_actions = QHBoxLayout()
+        header_actions.setContentsMargins(0, 0, 0, 0)
+        header_actions.setSpacing(8)
+
+        self.pause_button = make_button(
+            "Pause Download",
+            variant="secondary",
+            icon_name="pause",
+            icon_size=14,
+            parent=self,
+        )
+        self.pause_button.setEnabled(False)
+        self.pause_button.setVisible(False)
+        if on_pause is not None:
+            self.pause_button.clicked.connect(on_pause)
+
+        self.cancel_button = make_button(
+            "Cancel Job",
+            variant="destructive",
+            icon_name="x",
+            icon_size=14,
+            parent=self,
+        )
         self.cancel_button.setEnabled(False)
         self.cancel_button.clicked.connect(on_cancel)
-        header.addWidget(self.cancel_button, 0, Qt.AlignmentFlag.AlignTop)
+        header_actions.addWidget(self.pause_button, 0, Qt.AlignmentFlag.AlignTop)
+        header_actions.addWidget(self.cancel_button, 0, Qt.AlignmentFlag.AlignTop)
+        header.addLayout(header_actions)
         active_lay.addLayout(header)
 
         self.stepper = PipelineStepperWidget()
@@ -707,18 +764,23 @@ class ActiveJobCard(QFrame):
         self._set_active_page(False)
 
     def set_stage_mode(self, mode: str) -> None:
-        """Update the single header contextual Cancel CTA so there are never duplicate cancel buttons."""
+        """Update header contextual Pause/Cancel CTAs so download pause is distinct from cancel."""
+        self._stage_mode = mode
         labels = {
             "download": "Cancel Download",
             "speech": "Cancel Transcription",
             "generic": "Cancel Job",
         }
         self.cancel_button.setText(labels.get(mode, "Cancel Job"))
+        can_pause = mode == "download" and self._status == "processing"
+        self.pause_button.setVisible(mode == "download")
+        self.pause_button.setEnabled(can_pause)
 
     def apply_theme(self, _resolved: str = "") -> None:
         t = theme_manager().tokens
         self._idle_icon.setPixmap(lucide_icon("clock", t["text_secondary"], 20).pixmap(20, 20))
-        self.cancel_button.setIcon(lucide_icon("x", t["semantic_danger_fg"], 14))
+        sync_button_icon(self.pause_button, "pause", "secondary", 14)
+        sync_button_icon(self.cancel_button, "x", "destructive", 14)
         self.stepper.apply_theme(_resolved)
         self.download_view.apply_theme(_resolved)
         self.speech_progress.apply_theme(_resolved)
@@ -789,6 +851,7 @@ class ActiveJobCard(QFrame):
         self.progress_text.setText(f"{self._progress_value}%")
         nice_profile = (profile_name or "Auto").replace("_", " ").title()
         self.profile_label.setText(f"Profile: {nice_profile}")
+        self.pause_button.setEnabled(self._stage_mode == "download")
         self.cancel_button.setEnabled(True)
         self.stepper.set_stages(compute_pipeline_stages(self._options, "processing", self._progress_value, status_message))
         self._refresh_timing()
@@ -819,6 +882,8 @@ class ActiveJobCard(QFrame):
             self._progress_value = 100
             self.progress_bar.setValue(100)
             self.progress_text.setText("100%")
+        self.pause_button.setEnabled(False)
+        self.pause_button.setVisible(False)
         self.cancel_button.setEnabled(False)
         self.queue_status.setText(summary)
         self.stepper.set_stages(
@@ -830,6 +895,8 @@ class ActiveJobCard(QFrame):
         self._tick.stop()
         self._status = "idle"
         self._started_at = None
+        self.pause_button.setEnabled(False)
+        self.pause_button.setVisible(False)
         self.cancel_button.setEnabled(False)
         self._set_active_page(False)
 
@@ -901,6 +968,24 @@ class JobDetailsDialog(QDialog):
             compute_pipeline_stages(options, status, int(project.get("progress") or 0), str(project.get("stage") or ""))
         )
         layout.addWidget(stepper)
+
+        dl_state = parse_download_state(project)
+        if dl_state is not None:
+            dl_parts = [f"Download status: {dl_state.status}"]
+            if dl_state.downloaded_bytes > 0:
+                dl_parts.append(f"Preserved data: {format_preserved_bytes(dl_state.downloaded_bytes)}")
+            rem = dl_state.remaining_cooldown()
+            if rem > 0:
+                dl_parts.append(f"Retry available in: {format_cooldown(rem)}")
+            if dl_state.auth_instructions:
+                dl_parts.append(dl_state.auth_instructions)
+            dl_box = QLabel("\n".join(dl_parts))
+            dl_box.setWordWrap(True)
+            dl_box.setStyleSheet(
+                f"background-color: {t['bg_elevated']}; border: 1px solid {t['border_subtle']}; border-radius: 8px; "
+                f"padding: 8px 10px; font-size: 12px; color: {t['text_primary']};"
+            )
+            layout.addWidget(dl_box)
 
         err = redact(str(project.get("error") or "")).strip()
         if err:
@@ -1112,19 +1197,22 @@ class JobRowCard(QFrame):
         self.project_id = str(project["id"])
         self.setObjectName("queueRowCard")
         self.setProperty("selected", "true" if selected else "false")
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-        self.setMinimumHeight(66)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        self.setMinimumHeight(74)
         self.setMinimumWidth(0)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         t = theme_manager().tokens
         status = str(project.get("status") or "queued")
+        self._status = status
+        self._dl_state = parse_download_state(project)
         progress = int(project.get("progress") or 0)
         src_type, src_detail = project_source_info(project)
         is_yt = src_type == "YouTube"
         status_label, status_tone = _status_chip_style(status)
 
         root = QVBoxLayout(self)
+        root.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         root.setContentsMargins(14, 11, 12, 11)
         root.setSpacing(8)
 
@@ -1147,6 +1235,8 @@ class JobRowCard(QFrame):
         sub_parts = [src_type, project_media_summary(project), format_timestamp_short(project.get("created_at"))]
         if status == "processing":
             sub_parts.append(f"{progress}%")
+        if self._dl_state and self._dl_state.downloaded_bytes > 0 and status in ("paused", "rate_limited", "auth_required", "failed"):
+            sub_parts.append(f"{format_preserved_bytes(self._dl_state.downloaded_bytes)} preserved")
         if clip_count:
             sub_parts.append(f"{clip_count} clip{'s' if clip_count != 1 else ''}")
         sub_lbl = QLabel(" • ".join(p for p in sub_parts if p), objectName="muted")
@@ -1166,24 +1256,40 @@ class JobRowCard(QFrame):
 
         # Contextual primary action per job state
         self.primary_action_btn: QPushButton | None = None
-        if status == "analysis_failed":
-            btn = QPushButton("Retry AI Analysis", objectName="primary")
+        self._recovery_banner_lbl: QLabel | None = None
+        if status == "paused":
+            btn = make_button("Resume Download", variant="primary", icon_name="play", icon_size=14, parent=self)
+            btn.clicked.connect(lambda: self.action_triggered.emit("resume_download", self.project_id))
+            self.primary_action_btn = btn
+        elif status == "rate_limited":
+            btn = make_button("Resume Download", variant="primary", icon_name="play", icon_size=14, parent=self)
+            btn.clicked.connect(lambda: self.action_triggered.emit("resume_download", self.project_id))
+            self.primary_action_btn = btn
+        elif status == "auth_required":
+            btn = make_button("Retry After Verification", variant="secondary", icon_name="refresh-cw", icon_size=14, parent=self)
+            btn.clicked.connect(lambda: self.action_triggered.emit("retry_auth", self.project_id))
+            self.primary_action_btn = btn
+        elif status == "analysis_failed":
+            btn = make_button("Retry AI Analysis", variant="primary", parent=self)
             btn.clicked.connect(lambda: self.action_triggered.emit("retry_analysis", self.project_id))
             self.primary_action_btn = btn
         elif status == "failed":
-            btn = QPushButton("Retry Failed Stage")
-            btn.clicked.connect(lambda: self.action_triggered.emit("retry_failed", self.project_id))
+            has_partial = bool(self._dl_state and self._dl_state.downloaded_bytes > 0)
+            btn = make_button("Resume Download" if has_partial else "Retry Failed Stage", variant="secondary", parent=self)
+            btn.clicked.connect(
+                lambda: self.action_triggered.emit("resume_download" if has_partial else "retry_failed", self.project_id)
+            )
             self.primary_action_btn = btn
         elif status == "processing":
-            btn = QPushButton("Cancel Job", objectName="danger")
+            btn = make_button("Cancel Job", variant="destructive", parent=self)
             btn.clicked.connect(lambda: self.action_triggered.emit("cancel_active", self.project_id))
             self.primary_action_btn = btn
         elif status == "completed":
-            btn = QPushButton("View Generated Clips")
+            btn = make_button("View Generated Clips", variant="secondary", parent=self)
             btn.clicked.connect(lambda: self.action_triggered.emit("view_clips", self.project_id))
             self.primary_action_btn = btn
         elif status == "queued":
-            btn = QPushButton("Cancel")
+            btn = make_button("Cancel", variant="secondary", parent=self)
             btn.clicked.connect(lambda: self.action_triggered.emit("cancel_queued", self.project_id))
             self.primary_action_btn = btn
 
@@ -1204,8 +1310,18 @@ class JobRowCard(QFrame):
         main.addLayout(right)
         root.addLayout(main)
 
+        if status in ("paused", "rate_limited", "auth_required"):
+            banner = QLabel()
+            banner.setMinimumWidth(0)
+            banner.setWordWrap(True)
+            accent_fg = t["semantic_danger_fg"] if status == "auth_required" else t["semantic_warning"]
+            banner.setStyleSheet(f"font-size: 12px; color: {accent_fg}; margin-left: 56px; background: transparent;")
+            self._recovery_banner_lbl = banner
+            root.addWidget(banner)
+            self.refresh_cooldown()
+
         err_full = redact(str(project.get("error") or "")).strip()
-        if err_full:
+        if err_full and status not in ("paused", "rate_limited", "auth_required"):
             err_summary = err_full.splitlines()[0]
             if len(err_summary) > 110:
                 err_summary = err_summary[:107] + "…"
@@ -1243,6 +1359,51 @@ class JobRowCard(QFrame):
             root.addLayout(err_bar)
             root.addWidget(self.details_box)
 
+    def remaining_cooldown_seconds(self) -> float:
+        if self._status != "rate_limited":
+            return 0.0
+        rem = self._dl_state.remaining_cooldown() if self._dl_state else 0.0
+        vid = self._dl_state.video_id if self._dl_state else ""
+        coord_rem, _ = download_coordinator().cooldown_remaining(vid)
+        return max(rem, coord_rem)
+
+    def refresh_cooldown(self) -> bool:
+        """Update preserved-bytes / cooldown countdown text and button availability. Returns True if still counting down."""
+        if self._recovery_banner_lbl is None:
+            return False
+        preserved = self._dl_state.downloaded_bytes if self._dl_state else 0
+        preserved_txt = f"{format_preserved_bytes(preserved)} preserved on disk" if preserved > 0 else "Partial state saved"
+        if self._status == "paused":
+            self._recovery_banner_lbl.setText(f"Download paused · {preserved_txt}. Click Resume Download to continue.")
+            return False
+        if self._status == "auth_required":
+            instructions = (
+                self._dl_state.auth_instructions
+                if (self._dl_state and self._dl_state.auth_instructions)
+                else DEFAULT_AUTH_INSTRUCTIONS
+            )
+            prefix = f"{preserved_txt} · " if preserved > 0 else ""
+            self._recovery_banner_lbl.setText(f"{prefix}{instructions}")
+            return False
+        if self._status == "rate_limited":
+            rem = self.remaining_cooldown_seconds()
+            if rem > 0.5:
+                self._recovery_banner_lbl.setText(
+                    f"YouTube HTTP 429 rate limit active · Retry available in {format_cooldown(rem)} · {preserved_txt}"
+                )
+                if self.primary_action_btn is not None:
+                    self.primary_action_btn.setEnabled(False)
+                    self.primary_action_btn.setText(f"Retry in {format_cooldown(rem)}")
+                return True
+            self._recovery_banner_lbl.setText(
+                f"Rate limit cooldown finished · {preserved_txt}. Ready to resume."
+            )
+            if self.primary_action_btn is not None:
+                self.primary_action_btn.setEnabled(True)
+                self.primary_action_btn.setText("Resume Download")
+            return False
+        return False
+
     def _toggle_error_details(self) -> None:
         showing = not self.details_box.isVisible()
         self.details_box.setVisible(showing)
@@ -1272,8 +1433,26 @@ class JobRowCard(QFrame):
 
         menu.addSeparator()
         if status == "processing":
+            act_pause_active = menu.addAction(lucide_icon("pause", fg, 14), "Pause Download")
+            act_pause_active.triggered.connect(lambda: self.action_triggered.emit("pause_active", self.project_id))
             act_cancel_active = menu.addAction(lucide_icon("x", danger, 14), "Cancel Job")
             act_cancel_active.triggered.connect(lambda: self.action_triggered.emit("cancel_active", self.project_id))
+        elif status == "paused":
+            act_resume = menu.addAction(lucide_icon("play", t["brand_accent"], 14), "Resume Download")
+            act_resume.triggered.connect(lambda: self.action_triggered.emit("resume_download", self.project_id))
+            act_cancel_p = menu.addAction(lucide_icon("x", danger, 14), "Cancel & Clean Partials")
+            act_cancel_p.triggered.connect(lambda: self.action_triggered.emit("cancel_paused", self.project_id))
+        elif status == "rate_limited":
+            act_resume = menu.addAction(lucide_icon("play", t["brand_accent"], 14), "Resume Download")
+            act_resume.setEnabled(self.remaining_cooldown_seconds() <= 0.5)
+            act_resume.triggered.connect(lambda: self.action_triggered.emit("resume_download", self.project_id))
+            act_cancel_p = menu.addAction(lucide_icon("x", danger, 14), "Cancel & Clean Partials")
+            act_cancel_p.triggered.connect(lambda: self.action_triggered.emit("cancel_paused", self.project_id))
+        elif status == "auth_required":
+            act_auth = menu.addAction(lucide_icon("refresh-cw", t["brand_accent"], 14), "Retry After Verification")
+            act_auth.triggered.connect(lambda: self.action_triggered.emit("retry_auth", self.project_id))
+            act_cancel_p = menu.addAction(lucide_icon("x", danger, 14), "Cancel & Clean Partials")
+            act_cancel_p.triggered.connect(lambda: self.action_triggered.emit("cancel_paused", self.project_id))
         elif status == "queued":
             if can_move_up:
                 act_up = menu.addAction(lucide_icon("arrow-up", fg, 14), "Move Up in Queue")
@@ -1327,6 +1506,9 @@ class JobQueuePanel(QFrame):
         self._selected_id: str | None = None
         self._cards: dict[str, JobRowCard] = {}
         self._filter_key = "all"
+        self._cooldown_timer = QTimer(self)
+        self._cooldown_timer.setInterval(1000)
+        self._cooldown_timer.timeout.connect(self._tick_cooldowns)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 10, 12, 10)
@@ -1390,11 +1572,12 @@ class JobQueuePanel(QFrame):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll.setMinimumHeight(96)
+        self.scroll.setMinimumHeight(180)
         self.list_container = QWidget()
-        self.list_container.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
+        self.list_container.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         self.list_layout = QVBoxLayout(self.list_container)
-        self.list_layout.setContentsMargins(0, 0, 2, 0)
+        self.list_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        self.list_layout.setContentsMargins(0, 0, 4, 0)
         self.list_layout.setSpacing(8)
         self.list_layout.addStretch()
         self.scroll.setWidget(self.list_container)
@@ -1415,7 +1598,10 @@ class JobQueuePanel(QFrame):
         for row in self._projects:
             status = str(row.get("status") or "")
             if self._filter_key == "failed":
-                if status not in ("failed", "analysis_failed"):
+                if status not in ("failed", "analysis_failed", "rate_limited", "auth_required"):
+                    continue
+            elif self._filter_key == "queued":
+                if status not in ("queued", "paused"):
                     continue
             elif self._filter_key != "all" and status != self._filter_key:
                 continue
@@ -1444,21 +1630,25 @@ class JobQueuePanel(QFrame):
                 return (2, 0, "")
 
             active = [r for r in items if str(r.get("status") or "") == "processing"]
+            paused = [r for r in items if str(r.get("status") or "") == "paused"]
             queued = sorted(
                 (r for r in items if str(r.get("status") or "") == "queued"),
                 key=lambda r: (int(r.get("queue_order") or 0), str(r.get("created_at") or "")),
             )
             history = sorted(
-                (r for r in items if str(r.get("status") or "") not in ("processing", "queued")),
+                (r for r in items if str(r.get("status") or "") not in ("processing", "paused", "queued")),
                 key=lambda r: (
                     str(r.get("updated_at") or r.get("created_at") or ""),
                     1 if str(r.get("status") or "") == "completed" else 0,
                 ),
                 reverse=True,
             )
-            items = active + queued + history
+            items = active + paused + queued + history
         elif mode == "Queue Order":
-            rank = {"processing": 0, "queued": 1, "completed": 2, "analysis_failed": 3, "failed": 4, "cancelled": 5}
+            rank = {
+                "processing": 0, "paused": 1, "queued": 2, "rate_limited": 3, "auth_required": 4,
+                "completed": 5, "analysis_failed": 6, "failed": 7, "cancelled": 8,
+            }
             items.sort(
                 key=lambda r: (
                     rank.get(str(r.get("status") or ""), 9),
@@ -1536,7 +1726,24 @@ class JobQueuePanel(QFrame):
         self.list_layout.addStretch()
         self.list_container.adjustSize()
         self.list_container.updateGeometry()
+        self._sync_cooldown_timer()
         self.selection_changed.emit()
+
+    def _sync_cooldown_timer(self) -> None:
+        has_active_cooldown = any(card.remaining_cooldown_seconds() > 0.5 for card in self._cards.values())
+        if has_active_cooldown:
+            if not self._cooldown_timer.isActive():
+                self._cooldown_timer.start()
+        elif self._cooldown_timer.isActive():
+            self._cooldown_timer.stop()
+
+    def _tick_cooldowns(self) -> None:
+        any_counting = False
+        for card in self._cards.values():
+            if card.refresh_cooldown():
+                any_counting = True
+        if not any_counting:
+            self._cooldown_timer.stop()
 
     def select_project(self, project_id: str | None) -> None:
         self._selected_id = project_id

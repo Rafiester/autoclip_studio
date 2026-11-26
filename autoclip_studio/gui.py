@@ -21,9 +21,10 @@ from .captions import TEMPLATE_DEFAULT, TEMPLATES
 from .config import SettingsStore, credential_store_name
 from .database import Database
 from .diagnostics import LOG, SUCCESS, log_error, redact
+from .download_state import cleanup_workspace, download_coordinator, format_cooldown
 from .media import DownloadProgress, is_youtube_url, youtube_id, youtube_source_error
 from .models import ProjectOptions
-from .paths import APP_ROOT, OUTPUT_DIR, asset_path, ensure_directories
+from .paths import APP_ROOT, CACHE_DIR, OUTPUT_DIR, asset_path, ensure_directories
 from .pipeline import Pipeline
 from .providers import AIProvider, ProviderError
 from .smart_reframe import REFRAME_MODES, REFRAME_STYLES
@@ -43,7 +44,7 @@ from .ui.log_view import LogView
 from .ui.performance_view import PerformanceView
 from .ui.queue_workspace import (
     ActiveJobCard, CollapsibleLogsPanel, ErrorDetailsDialog, JobCompletedDialog, JobDetailsDialog,
-    JobQueuePanel, QueueOverviewBar, project_display_name, project_thumbnail_path,
+    JobQueuePanel, QueueOverviewBar, parse_download_state, project_display_name, project_thumbnail_path,
 )
 from .ui.speech_view import SpeechProgressView, SpeechSettingsView
 from .ui.style import STYLESHEET, SectionCard, configure_form_layout, configure_input, theme_manager
@@ -61,6 +62,7 @@ class MainWindow(QMainWindow):
         ensure_directories()
         self.settings = SettingsStore()
         self.database = Database()
+        self.database.recover_interrupted_projects()
         self.pipeline = Pipeline(self.database, self.settings)
         self.worker_thread: QThread | None = None
         self.worker: PipelineWorker | None = None
@@ -557,13 +559,14 @@ class MainWindow(QMainWindow):
         self.queue_overview.pause_toggled.connect(self.toggle_queue_paused)
         page.addWidget(self.queue_overview)
 
-        self.active_job_card = ActiveJobCard(self.cancel_processing)
+        self.active_job_card = ActiveJobCard(self.cancel_processing, self.pause_processing)
         self.active_job_card.new_project_requested.connect(lambda: self.show_page(1))
         page.addWidget(self.active_job_card)
 
         self.processing_status_row = self.active_job_card.processing_status_row
         self.processing_progress_row = self.active_job_card.processing_progress_row
         self.queue_status = self.active_job_card.queue_status
+        self.pause_button = self.active_job_card.pause_button
         self.cancel_button = self.active_job_card.cancel_button
         self.progress_bar = self.active_job_card.progress_bar
         self.progress_text = self.active_job_card.progress_text
@@ -988,11 +991,27 @@ class MainWindow(QMainWindow):
             return
         self._start_worker(project_id, options)
 
-    def _start_worker(self, project_id: str, options: ProjectOptions, *, resume_analysis: bool = False) -> None:
+    def _start_worker(
+        self,
+        project_id: str,
+        options: ProjectOptions,
+        *,
+        resume_analysis: bool = False,
+        explicit_retry: bool = False,
+    ) -> None:
+        if self.worker_thread is not None:
+            self._log("WARNING", f"Skipped duplicate start for {project_id}: another job is already running.")
+            return
+        vid = youtube_id(options.source) if is_youtube_url(options.source) else ""
+        if download_coordinator().is_download_active(project_id=project_id, video_id=vid or ""):
+            self._log("WARNING", f"Download for {project_id} is already in progress.")
+            return
         self.pipeline.manager.reset()
         self._active_project_id = project_id
         self.worker_thread = QThread(self)
-        self.worker = PipelineWorker(self.pipeline, project_id, options, resume_analysis=resume_analysis)
+        self.worker = PipelineWorker(
+            self.pipeline, project_id, options, resume_analysis=resume_analysis, explicit_retry=explicit_retry,
+        )
         self.worker.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.on_progress)
@@ -1002,6 +1021,7 @@ class MainWindow(QMainWindow):
         self.worker.speech_log.connect(self.on_download_log)
         self.worker.warning.connect(self._provider_warning)
         self.worker.completed.connect(self.on_completed)
+        self.worker.paused.connect(self.on_paused)
         self.worker.failed.connect(self.on_failed)
         self.worker.finished.connect(self.worker_thread.quit)
         self.worker.finished.connect(self.worker.deleteLater)
@@ -1116,6 +1136,8 @@ class MainWindow(QMainWindow):
                 self.clips_library.filter_by_project(project_id, project_display_name(project))
                 if clips:
                     self.clips_library.select_clip(str(clips[0]["id"]))
+        elif action == "pause_active":
+            self.pause_processing()
         elif action == "cancel_active":
             self.cancel_processing()
         elif action == "move_up":
@@ -1129,22 +1151,54 @@ class MainWindow(QMainWindow):
                 self.database.update_project(project_id, status="cancelled", error="Cancelled by user", stage="Cancelled")
                 self._log("WARNING", f"Cancelled queued job {project_id}.")
                 self.refresh_all()
+        elif action == "cancel_paused":
+            dl_state = parse_download_state(project)
+            if dl_state and dl_state.workspace_dir:
+                cleanup_workspace(dl_state.workspace_dir)
+            shutil.rmtree(CACHE_DIR / "jobs" / project_id, ignore_errors=True)
+            self.database.update_project(
+                project_id, status="cancelled", error="Cancelled by user", stage="Cancelled", download_state="",
+            )
+            self._log("WARNING", f"Cancelled job {project_id} and cleaned partial files.")
+            self.refresh_all()
         elif action == "retry_analysis":
             self.queue_panel.select_project(project_id)
             self.retry_analysis()
-        elif action == "retry_failed":
+        elif action in ("resume_download", "retry_auth", "retry_failed"):
             try:
                 options = ProjectOptions(**json.loads(project["options"]))
             except (ValueError, TypeError):
                 QMessageBox.warning(self, "Cannot retry job", "This project's saved settings could not be read.")
                 return
-            self.database.update_project(project_id, status="queued", progress=0, error="", stage="Queued")
+            vid = youtube_id(options.source) if is_youtube_url(options.source) else ""
+            coordinator = download_coordinator()
+            if coordinator.is_download_active(project_id=project_id, video_id=vid or ""):
+                self._log("WARNING", f"Job {project_id} is already actively downloading.")
+                return
+            dl_state = parse_download_state(project)
+            rem_state = dl_state.remaining_cooldown() if dl_state else 0.0
+            rem_coord, _ = coordinator.cooldown_remaining(vid or "")
+            remaining = max(rem_state, rem_coord)
+            if remaining > 0.5:
+                self._log("WARNING", f"Rate limit cooldown active: retry available in {format_cooldown(remaining)}.")
+                return
+            explicit = action == "retry_auth"
+            if explicit:
+                coordinator.clear_auth_suspension(vid or "")
+            if self.worker_thread or self.queue_paused or self.speech_utility_active:
+                self.database.update_project(project_id, status="queued", error="", stage="Queued")
+                self._log("INFO", f"Queued {project_id} to resume when the current task finishes.")
+                self.refresh_all()
+                return
+            self.database.update_project(project_id, status="queued", error="", stage="Resuming")
             self.refresh_all()
-            if not self.worker_thread and not self.queue_paused and not self.speech_utility_active:
-                self._start_worker(project_id, options)
+            self._start_worker(project_id, options, explicit_retry=explicit)
         elif action == "remove_history":
             if project.get("status") == "processing":
                 return
+            dl_state = parse_download_state(project)
+            if dl_state and dl_state.workspace_dir:
+                cleanup_workspace(dl_state.workspace_dir)
             if self.database.delete_project_history(project_id):
                 self.refresh_all()
 
@@ -1172,10 +1226,21 @@ class MainWindow(QMainWindow):
             paused=self.queue_paused,
         )
 
+    def pause_processing(self) -> None:
+        downloading = not self.download_view.isHidden()
+        if self.worker and downloading and self.pause_button.isEnabled():
+            self.pause_button.setEnabled(False)
+            self.cancel_button.setEnabled(False)
+            self.download_view.cancel_button.setEnabled(False)
+            self.download_view.status.setText("Pausing download (preserving partial files)…")
+            self._log("INFO", "Pausing active download and preserving partial files…")
+            self.pipeline.manager.pause()
+
     def cancel_processing(self) -> None:
         downloading = not self.download_view.isHidden()
         transcribing = not self.speech_progress.isHidden()
         if self.worker and (self.cancel_button.isEnabled() or self.download_view.cancel_button.isEnabled() or self.speech_progress.cancel_button.isEnabled()):
+            self.pause_button.setEnabled(False)
             self.cancel_button.setEnabled(False)
             self.download_view.cancel_button.setEnabled(False)
             self.speech_progress.cancel_button.setEnabled(False)
@@ -1216,7 +1281,11 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def on_download_progress(self, progress: DownloadProgress) -> None:
-        if not self.download_view.isHidden() and not self.pipeline.manager.cancel_event.is_set():
+        if (
+            not self.download_view.isHidden()
+            and not self.pipeline.manager.cancel_event.is_set()
+            and not self.pipeline.manager.pause_event.is_set()
+        ):
             self.download_view.update_transfer(progress)
             reliable = bool(progress.total and progress.downloaded is not None and progress.eta_seconds is not None)
             self.active_job_card.set_stage_telemetry(eta_seconds=progress.eta_seconds, reliable=reliable)
@@ -1227,7 +1296,11 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def on_speech_progress(self, progress: SpeechProgress) -> None:
-        if not self.speech_progress.isHidden() and not self.pipeline.manager.cancel_event.is_set():
+        if (
+            not self.speech_progress.isHidden()
+            and not self.pipeline.manager.cancel_event.is_set()
+            and not self.pipeline.manager.pause_event.is_set()
+        ):
             self.speech_progress.update_transcription(progress)
             self.active_job_card.set_stage_telemetry(
                 eta_seconds=progress.eta,
@@ -1235,7 +1308,7 @@ class MainWindow(QMainWindow):
             )
 
     def on_progress(self, value: int, message: str) -> None:
-        if self.pipeline.manager.cancel_event.is_set():
+        if self.pipeline.manager.cancel_event.is_set() or self.pipeline.manager.pause_event.is_set():
             return
         if value >= 12 and not self.download_view.isHidden():
             self.show_download(False)
@@ -1293,29 +1366,57 @@ class MainWindow(QMainWindow):
             if clips:
                 self.clips_library.select_clip(str(clips[0]["id"]))
 
+    def on_paused(self, project_id: str, message: str) -> None:
+        self.show_download(False)
+        self.show_speech(False)
+        self.refresh_all()
+        self.active_job_card.mark_finished("paused", message)
+        self._log("INFO", f"{message} (job {project_id}). Click Resume Download to continue.")
+        self.metric_active.findChild(QLabel, "metricValue").setText("Paused")
+
     def on_failed(self, project_id: str, message: str) -> None:
         self.show_download(False)
         self.show_speech(False)
         self.refresh_all()
         cancelled = message == "Processing cancelled"
-        retryable = False
+        project_status = "failed"
         for project in self.project_rows or []:
-            if project["id"] == project_id and project["status"] == "analysis_failed":
-                self.queue_panel.select_project(project_id)
-                retryable = True
+            if project["id"] == project_id:
+                project_status = str(project.get("status") or "failed")
+                if project_status in ("analysis_failed", "rate_limited", "auth_required"):
+                    self.queue_panel.select_project(project_id)
                 break
+        retryable = project_status == "analysis_failed"
+        rate_limited = project_status == "rate_limited"
+        auth_required = project_status == "auth_required"
         summary = message.partition("\n")[0]
         display_msg = f"{summary}\nSelect Retry AI Analysis to continue." if retryable else summary
-        self.active_job_card.mark_finished("cancelled" if cancelled else ("analysis_failed" if retryable else "failed"), display_msg)
-        self._log("WARNING" if cancelled else "ERROR", message)
-        state = "Cancelled" if cancelled else "Error"
+        card_status = (
+            "cancelled" if cancelled
+            else ("analysis_failed" if retryable else (project_status if (rate_limited or auth_required) else "failed"))
+        )
+        self.active_job_card.mark_finished(card_status, display_msg)
+        self._log("WARNING" if (cancelled or rate_limited or auth_required) else "ERROR", message)
+        state = (
+            "Cancelled" if cancelled
+            else ("Rate Limited" if rate_limited else ("Auth Required" if auth_required else "Error"))
+        )
         self.metric_active.findChild(QLabel, "metricValue").setText(state)
         if not cancelled and not retryable and not self.closing:
             low = message.lower()
-            needs_deps = any(tok in low for tok in ("yt-dlp", "ffmpeg", "ffprobe", "dependency manager", "javascript runtime", "403"))
-            can_retry = any(tok in low for tok in ("retry", "403", "429", "network", "timed out", "format", "merging"))
+            needs_deps = (not rate_limited and not auth_required) and any(
+                tok in low for tok in ("yt-dlp", "ffmpeg", "ffprobe", "dependency manager", "javascript runtime", "403")
+            )
+            # Never offer immediate retry inside modal for active HTTP 429 cooldown or auth verification!
+            can_retry = (not rate_limited and not auth_required) and any(
+                tok in low for tok in ("retry", "403", "network", "timed out", "format", "merging")
+            )
+            title = (
+                "YouTube Rate Limit Active" if rate_limited
+                else ("YouTube Verification Required" if auth_required else "Processing failed")
+            )
             dlg = ErrorDetailsDialog(
-                "Processing failed",
+                title,
                 message,
                 allow_retry=can_retry,
                 allow_dependencies=needs_deps,
@@ -1325,9 +1426,10 @@ class MainWindow(QMainWindow):
             if dlg.chosen_action == "dependencies" and "Dependencies" in self.NAV_ITEMS:
                 self.show_page(self.NAV_ITEMS.index("Dependencies"))
             elif dlg.chosen_action == "retry":
-                self._handle_queue_action("retry_failed", project_id)
+                self._handle_queue_action("resume_download", project_id)
 
     def _worker_finished(self) -> None:
+        self.pause_button.setEnabled(False)
         self.cancel_button.setEnabled(False)
         if self.worker_thread:
             self.worker_thread.deleteLater()

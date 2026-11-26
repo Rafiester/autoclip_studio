@@ -34,7 +34,8 @@ class Database:
                     error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     queue_order INTEGER NOT NULL DEFAULT 0,
-                    stage TEXT NOT NULL DEFAULT ''
+                    stage TEXT NOT NULL DEFAULT '',
+                    download_state TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS clips (
                     id TEXT PRIMARY KEY, project_id TEXT NOT NULL, path TEXT NOT NULL,
@@ -48,7 +49,11 @@ class Database:
                 );
             """)
             proj_existing = {row["name"] for row in db.execute("PRAGMA table_info(projects)")}
-            for col, defn in (("queue_order", "INTEGER NOT NULL DEFAULT 0"), ("stage", "TEXT NOT NULL DEFAULT ''")):
+            for col, defn in (
+                ("queue_order", "INTEGER NOT NULL DEFAULT 0"),
+                ("stage", "TEXT NOT NULL DEFAULT ''"),
+                ("download_state", "TEXT NOT NULL DEFAULT ''"),
+            ):
                 if col not in proj_existing:
                     db.execute(f"ALTER TABLE projects ADD COLUMN {col} {defn}")
             existing = {row["name"] for row in db.execute("PRAGMA table_info(clips)")}
@@ -80,16 +85,98 @@ class Database:
 
     def update_project(self, project_id: str, *, status: str | None = None,
                        progress: int | None = None, error: str | None = None,
-                       stage: str | None = None) -> None:
+                       stage: str | None = None,
+                       download_state: dict[str, Any] | str | None = None) -> None:
         changes: list[str] = ["updated_at = ?"]
         values: list[Any] = [datetime.now(timezone.utc).isoformat()]
-        for column, value in (("status", status), ("progress", progress), ("error", error), ("stage", stage)):
+        serialized_dl: str | None = None
+        if download_state is not None:
+            serialized_dl = (
+                json.dumps(download_state, ensure_ascii=False)
+                if isinstance(download_state, dict)
+                else str(download_state)
+            )
+        for column, value in (
+            ("status", status),
+            ("progress", progress),
+            ("error", error),
+            ("stage", stage),
+            ("download_state", serialized_dl),
+        ):
             if value is not None:
                 changes.append(f"{column} = ?")
                 values.append(value)
         values.append(project_id)
         with self._lock, closing(self._connect()) as db, db:
             db.execute(f"UPDATE projects SET {', '.join(changes)} WHERE id = ?", values)
+
+    def get_project(self, project_id: str) -> dict[str, Any] | None:
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+            return dict(row) if row else None
+
+    def recover_interrupted_projects(self) -> list[dict[str, Any]]:
+        """Restore persisted download recovery state across restarts without auto-restarting requests."""
+        from .download_state import DownloadState, download_coordinator, inspect_partial_files, load_download_state
+
+        recovered: list[dict[str, Any]] = []
+        coordinator = download_coordinator()
+        for row in self.projects():
+            pid = str(row["id"])
+            status = str(row.get("status") or "")
+            raw_dl = str(row.get("download_state") or "").strip()
+            dl_dict: dict[str, Any] = {}
+            if raw_dl:
+                try:
+                    parsed = json.loads(raw_dl)
+                    if isinstance(parsed, dict):
+                        dl_dict = parsed
+                except ValueError:
+                    dl_dict = {}
+
+            ws_dir = Path(str(dl_dict.get("workspace_dir") or "")) if dl_dict.get("workspace_dir") else None
+            if ws_dir and ws_dir.is_dir():
+                disk_state = load_download_state(ws_dir)
+                disk_bytes, partial_files = inspect_partial_files(ws_dir)
+                if disk_state is not None:
+                    dl_dict = disk_state.to_dict()
+                dl_dict["downloaded_bytes"] = disk_bytes
+                dl_dict["partial_files"] = partial_files
+
+            if status == "processing":
+                if dl_dict and (dl_dict.get("downloaded_bytes") or dl_dict.get("workspace_dir")):
+                    dl_dict["status"] = "paused"
+                    self.update_project(
+                        pid,
+                        status="paused",
+                        stage="Download paused (recovered)",
+                        error="",
+                        download_state=dl_dict,
+                    )
+                    recovered.append({"id": pid, "status": "paused", "download_state": dl_dict})
+                else:
+                    self.update_project(
+                        pid,
+                        status="failed",
+                        stage="Interrupted",
+                        error="Processing was interrupted before completion. Click Retry Failed Stage to continue.",
+                    )
+                    recovered.append({"id": pid, "status": "failed"})
+            elif status == "rate_limited":
+                state = DownloadState.from_dict(dl_dict)
+                if state and state.retry_after_epoch:
+                    coordinator.restore_rate_limit(state.video_id, float(state.retry_after_epoch))
+                if dl_dict:
+                    self.update_project(pid, download_state=dl_dict)
+            elif status == "auth_required":
+                state = DownloadState.from_dict(dl_dict)
+                if state:
+                    coordinator.record_auth_required(state.video_id, state.auth_instructions)
+                if dl_dict:
+                    self.update_project(pid, download_state=dl_dict)
+            elif status == "paused" and dl_dict:
+                self.update_project(pid, download_state=dl_dict)
+        return recovered
 
     def reorder_queued_project(self, project_id: str, direction: int) -> bool:
         """Move a queued project up (direction < 0) or down (direction > 0) in queue_order."""

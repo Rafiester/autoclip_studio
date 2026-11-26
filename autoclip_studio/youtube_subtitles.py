@@ -9,7 +9,8 @@ from subprocess import CalledProcessError
 from tempfile import TemporaryDirectory
 from typing import Callable
 
-from .media import youtube_watch_url, yt_dlp_command
+from .download_state import DEFAULT_AUTH_INSTRUCTIONS, download_coordinator, format_cooldown
+from .media import parse_retry_after, youtube_watch_url, yt_dlp_command
 from .models import Segment, Transcript
 from .paths import CACHE_DIR
 from .process import ProcessManager
@@ -208,27 +209,52 @@ def fetch_youtube_transcript(
         except (OSError, ValueError, KeyError, TypeError):
             pass
 
-    with TemporaryDirectory(prefix="autoclip-ytsub-") as tmp_dir:
-        out_tpl = str(Path(tmp_dir) / "%(id)s.%(ext)s")
-        sub_flag = "--write-auto-subs" if is_auto else "--write-subs"
-        command = yt_dlp_command() + [
-            "--ignore-config", "--no-playlist", "--skip-download",
-            sub_flag, "--sub-langs", lang_code, "--sub-format", "vtt",
-            "--socket-timeout", "10", "--retries", "1", "--extractor-retries", "1",
-            "-o", out_tpl, youtube_watch_url(video_id),
-        ]
-        try:
-            manager.run(command, output_tail=20)
-        except CalledProcessError as error:
-            if log:
-                log(f"Could not download YouTube {kind_label} ({lang_code}): {error.output or error}")
-            return None
-        vtt_files = sorted(Path(tmp_dir).glob("*.vtt"))
-        if not vtt_files:
-            if log:
-                log(f"YouTube returned no VTT file for {kind_label} ({lang_code}); falling back to Speech-to-Text.")
-            return None
-        vtt_text = vtt_files[0].read_text(encoding="utf-8", errors="replace")
+    coordinator = download_coordinator()
+    allowed, block_cat, remaining, _until = coordinator.check_request_allowed(video_id)
+    if not allowed:
+        if log:
+            if block_cat == "http_429":
+                log(
+                    f"Skipping YouTube subtitle request during rate-limit cooldown ({format_cooldown(remaining)}); "
+                    "falling back to local Speech-to-Text."
+                )
+            else:
+                log("Skipping YouTube subtitle request while verification is required; falling back to local Speech-to-Text.")
+        return None
+
+    def _download_vtt() -> str | None:
+        with TemporaryDirectory(prefix="autoclip-ytsub-") as tmp_dir:
+            out_tpl = str(Path(tmp_dir) / "%(id)s.%(ext)s")
+            sub_flag = "--write-auto-subs" if is_auto else "--write-subs"
+            command = yt_dlp_command() + [
+                "--ignore-config", "--no-playlist", "--skip-download",
+                sub_flag, "--sub-langs", lang_code, "--sub-format", "vtt",
+                "--socket-timeout", "10", "--retries", "1", "--extractor-retries", "1",
+                "--sleep-requests", "0.75",
+                "-o", out_tpl, youtube_watch_url(video_id),
+            ]
+            try:
+                manager.run(command, output_tail=20)
+            except CalledProcessError as error:
+                raw = error.output or ""
+                low = raw.casefold()
+                if any(tok in low for tok in ("http error 429", "too many requests", "rate limit")):
+                    coordinator.record_rate_limit(video_id, retry_after_seconds=parse_retry_after(raw))
+                elif any(tok in low for tok in ("sign in to confirm", "confirm you're not a bot", "confirm you’re not a bot")):
+                    coordinator.record_auth_required(video_id, DEFAULT_AUTH_INSTRUCTIONS)
+                if log:
+                    log(f"Could not download YouTube {kind_label} ({lang_code}): {raw or error}")
+                return None
+            vtt_files = sorted(Path(tmp_dir).glob("*.vtt"))
+            if not vtt_files:
+                if log:
+                    log(f"YouTube returned no VTT file for {kind_label} ({lang_code}); falling back to Speech-to-Text.")
+                return None
+            return vtt_files[0].read_text(encoding="utf-8", errors="replace")
+
+    vtt_text = coordinator.deduplicate_extraction(f"sub:{video_id}:{lang_code}:{'auto' if is_auto else 'manual'}", _download_vtt)
+    if not vtt_text:
+        return None
 
     segments = parse_vtt_text(vtt_text, is_auto=is_auto)
     effective_duration = max(float(video_duration or 0.0), max((seg.end for seg in segments), default=0.0))

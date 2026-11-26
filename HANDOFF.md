@@ -1,12 +1,32 @@
 # AutoClip Studio — Agent Handoff & Progress
 
 **Last Updated:** 2026-11-26  
-**Current Phase:** Global UI Regression Stabilization Complete
+**Current Phase:** Download Pause, Resume & Rate Limit Recovery Complete
 
 ## Execution Status
 
 ### Completed Tasks
-- **Global UI Regression Stabilization** (Pre-modification checkpoint: `77dc1b6`):
+- **Download Pause, Resume & Rate Limit Recovery** (Pre-modification checkpoint: `957350f`):
+  - **Confirmed Root Causes of Recurring YouTube HTTP 429 & Bot-Check Errors:**
+    1. **Partial files destroyed on every cancel/failure (`media.py`, `pipeline.py`):** Cached downloads ran inside `TemporaryDirectory(prefix="incoming-<key>-")` and uncached downloads were wiped in `pipeline.py`'s `finally: shutil.rmtree(job_dir)`. Every retry started in a brand-new folder at 0%, so `yt-dlp --continue` never reused a single downloaded byte.
+    2. **Aggressive retry multiplication into HTTP 429 (`media.py`):** `classify_download_error` let `http_429` enter the 3-attempt `format_plan` loop with `--retries 3 --fragment-retries 3`, no `Retry-After` parsing, and no `--sleep-requests` spacing — escalating transient 429 limits into `"Sign in to confirm you're not a bot"`.
+    3. **No Pause/Resume lifecycle or restart persistence (`process.py`, `pipeline.py`, `database.py`, `worker.py`):** Only destructive `Cancel` existed; paused or rate-limited download state was never persisted to disk or SQLite.
+    4. **Duplicate concurrent extraction & download requests (`youtube_metadata.py`, `youtube_subtitles.py`, `media.py`, `gui.py`):** Simultaneous URL preview, pipeline metadata, subtitle lookup, and media download could launch overlapping `yt-dlp` subprocesses for the same `video_id`, and rapid Retry clicks were not blocked by a single-flight lock or cooldown gate.
+    5. **POSIX child process cleanup gap (`process.py`):** `_terminate()` fell back to `process.kill()` instead of `os.killpg(pgid, signal.SIGKILL)` after `SIGTERM` timeout, risking orphaned `node`/`ffmpeg` children.
+  - **Persistent Download State & Single-Flight Coordinator (`autoclip_studio/download_state.py`):**
+    - Assigned deterministic persistent workspaces (`CACHE_DIR/downloads/workspaces/<yt-<id> | job-<project_id>>`) with atomic `state.json` metadata (`DownloadState`), actual on-disk partial byte inspection (`inspect_partial_files`), and pre-resume `video_id` / `selected_format` identity verification (`verify_workspace_identity`) that safely cleans mismatched partials while preserving compatible `.part` files.
+    - Added thread-safe `DownloadCoordinator` providing single-flight download locks per `project_id` and `video_id` (`acquire_download_slot`), in-flight extraction deduplication (`deduplicate_extraction`), conservative bounded HTTP 429 cooldown gating (`Retry-After` or `60s → 180s → 300s → 600s`), and session-wide bot-verification suspension without attempting any anti-bot bypass.
+  - **Downloader, Process Cleanup & Request Optimization (`autoclip_studio/process.py`, `autoclip_studio/media.py`, `autoclip_studio/youtube_metadata.py`, `autoclip_studio/youtube_subtitles.py`):**
+    - Added `PausedError(CancelledError)` and `ProcessManager.pause()` plus POSIX `os.killpg(..., signal.SIGKILL)` timeout fallback (preserving Windows Job Object termination).
+    - Replaced `TemporaryDirectory` in `acquire_source` with persistent workspaces, passed `--continue --part --retries 1 --fragment-retries 2 --sleep-requests 1`, added `parse_retry_after()` (seconds, HTTP-date, wait hints), stopped retries immediately on `http_429` and `auth_required`, cleaned workspaces on verified completion or explicit Cancel Job, and preserved partials on Pause/429/Auth/Network interruption.
+    - Deduplicated concurrent `fetch_youtube_metadata` and subtitle requests, added `--sleep-requests 0.75`, kept temporary 429/auth errors separate from permanent unavailability (never caching 429/auth failures), and skipped YouTube subtitle calls during active cooldowns to fall back cleanly to Speech-to-Text.
+  - **Pipeline, Database & Shared UI Integration (`autoclip_studio/database.py`, `autoclip_studio/pipeline.py`, `autoclip_studio/worker.py`, `autoclip_studio/ui/queue_workspace.py`, `autoclip_studio/gui.py`):**
+    - Added `download_state` JSON column (safe SQLite `ALTER TABLE` migration) and `Database.recover_interrupted_projects()` to restore paused partials, active 429 cooldowns, and auth-required states across app restarts without auto-triggering YouTube requests.
+    - Added `Pause Download` alongside `Cancel Download` on `ActiveJobCard`, `Paused` / `Rate Limited` / `Auth Required` status chips, `Resume Download` / disabled live countdown `Retry in MM:SS` / `Retry After Verification` primary CTAs, preserved byte counts, actionable verification guidance, `Cancel & Clean Partials` overflow action, and `JobRowCard` layout sizing (`SetMinimumSize`) verified in Light and Dark themes.
+  - **Validation (`Apple M1`, `macOS 27.2.1`, `yt-dlp 2026.11.23`, Node.js):**
+    - Added `tests/test_download_recovery.py` (10 tests covering all 9 required scenarios) and `tests/conftest.py` (coordinator test isolation).
+    - Full pytest suite: **155 passed, 3 skipped (Windows-only), 0 failed**; `tests.integration_smoke`: **passed** (`1235100 bytes, 6.30s`, `h264_videotoolbox` + Auto Director).
+- **Global UI Regression Stabilization** (`957350f`):
   - **Confirmed Root Causes:**
     1. **Divergent control heights & macOS native metrics (`theme.py`):** `QSpinBox` rendered at `42px` vs `QLineEdit`/`QComboBox` (`37px`), `QPushButton#primary` (`38px`), and `QCheckBox` (`20px`) with faint Light-mode checkbox borders and a split `QComboBox::drop-down` border.
     2. **Spurious sidebar focus ring (`theme.py`):** `QPushButton#nav:focus` drew an active red border/bar on `Dashboard` when opening other pages.

@@ -24,23 +24,42 @@ class CancelledError(RuntimeError):
     pass
 
 
+class PausedError(CancelledError):
+    """Raised when the user pauses an active download while preserving partial files."""
+
+
 class ProcessManager:
     """Tracks only subprocesses owned by this application."""
 
     def __init__(self) -> None:
         self.cancel_event = threading.Event()
+        self.pause_event = threading.Event()
         self._processes: dict[subprocess.Popen[str], object] = {}
         self._lock = threading.Lock()
         self.default_creationflags = 0
 
     def reset(self) -> None:
         self.cancel_event.clear()
+        self.pause_event.clear()
+
+    def pause(self) -> None:
+        """Gracefully terminate active subprocesses for pause while preserving partial files."""
+        self.pause_event.set()
+        self.terminate_all()
 
     def cancel(self) -> None:
         self.cancel_event.set()
         self.terminate_all()
 
+    def is_paused(self) -> bool:
+        return self.pause_event.is_set()
+
+    def is_cancelled(self) -> bool:
+        return self.cancel_event.is_set()
+
     def check_cancelled(self) -> None:
+        if self.pause_event.is_set():
+            raise PausedError("Download paused")
         if self.cancel_event.is_set():
             raise CancelledError("Processing cancelled")
 
@@ -132,14 +151,26 @@ class ProcessManager:
     def _terminate(process: subprocess.Popen[str]) -> None:
         if process.poll() is not None:
             return
+        pgid: int | None = None
         try:
             if os.name != "nt":
-                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                pgid = os.getpgid(process.pid)
+                os.killpg(pgid, signal.SIGTERM)
             else:
                 process.send_signal(signal.SIGTERM)
             process.wait(timeout=4)
         except (OSError, subprocess.TimeoutExpired):
-            process.kill()
+            if os.name != "nt" and pgid is not None:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except OSError:
+                    process.kill()
+            else:
+                process.kill()
+            try:
+                process.wait(timeout=2)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
 
 
 def find_media_tool(name: str) -> str:
