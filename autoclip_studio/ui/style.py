@@ -474,6 +474,37 @@ QPushButton#sourceTab:checked {{
     border-color: {t["brand_primary"]};
     color: {t["text_primary"]};
 }}
+QFrame#queueRowCard {{
+    background: {t["bg_surface"]};
+    border: 1px solid {t["border_subtle"]};
+    border-radius: 10px;
+}}
+QFrame#queueRowCard:hover {{
+    background: #1F222B;
+    border-color: {t["border_strong"]};
+}}
+QFrame#queueRowCard[selected="true"] {{
+    background: #23181B;
+    border: 1px solid #8A3331;
+}}
+QPushButton#filterTab {{
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 5px 10px;
+    color: {t["text_secondary"]};
+    font-weight: 500;
+}}
+QPushButton#filterTab:hover {{
+    background: {t["bg_elevated"]};
+    color: {t["text_primary"]};
+}}
+QPushButton#filterTab:checked {{
+    background: {t["brand_tint"]};
+    border-color: #8A3331;
+    color: {t["text_primary"]};
+    font-weight: 600;
+}}
 QFrame#playerStage {{
     background: #0B0C10;
     border: 1px solid {t["border_subtle"]};

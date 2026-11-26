@@ -194,7 +194,7 @@ def test_retry_button_switches_to_saved_custom_provider_and_keeps_clip_options(a
     monkeypatch.setattr(window, "_start_worker", lambda *args, **kwargs: dispatched.append((args, kwargs)))
     window.show_page(2)
     assert not window.retry_analysis_button.isEnabled()
-    window.queue_table.selectRow(0)
+    window.queue_panel.select_row(0)
     assert window.retry_analysis_button.isEnabled()
     window.retry_analysis_button.click()
     switched = replace(options, provider="custom", model="custom-model", multimodal=False)

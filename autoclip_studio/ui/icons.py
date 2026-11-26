@@ -139,6 +139,52 @@ def lucide_icon(name: str, color: str = "#F5F5F7", size: int = 16) -> QIcon:
         painter.drawPath(p)
         painter.drawLine(QPointF(10, 11), QPointF(10, 16))
         painter.drawLine(QPointF(14, 11), QPointF(14, 16))
+    elif name == "chevron-down":
+        p = QPainterPath()
+        p.moveTo(6, 9); p.lineTo(12, 15); p.lineTo(18, 9)
+        painter.drawPath(p)
+    elif name == "chevron-right":
+        p = QPainterPath()
+        p.moveTo(9, 6); p.lineTo(15, 12); p.lineTo(9, 18)
+        painter.drawPath(p)
+    elif name == "arrow-up":
+        painter.drawLine(QPointF(12, 19), QPointF(12, 5))
+        p = QPainterPath()
+        p.moveTo(6, 11); p.lineTo(12, 5); p.lineTo(18, 11)
+        painter.drawPath(p)
+    elif name == "arrow-down":
+        painter.drawLine(QPointF(12, 5), QPointF(12, 19))
+        p = QPainterPath()
+        p.moveTo(6, 13); p.lineTo(12, 19); p.lineTo(18, 13)
+        painter.drawPath(p)
+    elif name == "film":
+        painter.drawRoundedRect(QRectF(3, 4, 18, 16), 2, 2)
+        painter.drawLine(QPointF(7, 4), QPointF(7, 20))
+        painter.drawLine(QPointF(17, 4), QPointF(17, 20))
+        painter.drawLine(QPointF(3, 9), QPointF(7, 9))
+        painter.drawLine(QPointF(3, 15), QPointF(7, 15))
+        painter.drawLine(QPointF(17, 9), QPointF(21, 9))
+        painter.drawLine(QPointF(17, 15), QPointF(21, 15))
+    elif name == "globe":
+        painter.drawEllipse(QPointF(12, 12), 9, 9)
+        painter.drawEllipse(QPointF(12, 12), 4, 9)
+        painter.drawLine(QPointF(3, 12), QPointF(21, 12))
+    elif name == "x":
+        painter.drawLine(QPointF(6, 6), QPointF(18, 18))
+        painter.drawLine(QPointF(18, 6), QPointF(6, 18))
+    elif name == "alert-circle":
+        painter.drawEllipse(QPointF(12, 12), 9, 9)
+        painter.drawLine(QPointF(12, 8), QPointF(12, 13))
+        painter.drawPoint(QPointF(12, 16.5))
+    elif name == "check":
+        p = QPainterPath()
+        p.moveTo(5, 13); p.lineTo(9.5, 17.5); p.lineTo(19, 7)
+        painter.drawPath(p)
+    elif name == "clock":
+        painter.drawEllipse(QPointF(12, 12), 9, 9)
+        p = QPainterPath()
+        p.moveTo(12, 7); p.lineTo(12, 12); p.lineTo(15.5, 14)
+        painter.drawPath(p)
 
     painter.end()
     pixmap.setDevicePixelRatio(dpr)

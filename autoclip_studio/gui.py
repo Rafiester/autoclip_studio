@@ -38,6 +38,10 @@ from .ui.download_view import DownloadView
 from .ui.local_preview import LocalVideoDropZone, LocalVideoMetadata, LocalVideoPreview
 from .ui.log_view import LogView
 from .ui.performance_view import PerformanceView
+from .ui.queue_workspace import (
+    ActiveJobCard, CollapsibleLogsPanel, JobDetailsDialog, JobQueuePanel,
+    QueueOverviewBar, project_thumbnail_path,
+)
 from .ui.speech_view import SpeechProgressView, SpeechSettingsView
 from .ui.style import STYLESHEET
 from .ui.youtube_preview import YouTubePreview
@@ -63,6 +67,8 @@ class MainWindow(QMainWindow):
         self.speech_utility_active = False
         self.project_rows: list[dict] | None = None
         self.clip_rows: list[dict] | None = None
+        self.queue_paused = False
+        self._active_project_id: str | None = None
         self.closing = False
         self.thumb_runner = ThumbnailTaskRunner(self.settings.performance().profile, self)
         self.thumb_runner.completed.connect(self._on_thumbnail_ready)
@@ -363,62 +369,41 @@ class MainWindow(QMainWindow):
         return outer
 
     def _queue_page(self) -> QWidget:
-        outer, page = self._page("Processing Queue", "Heavy media tasks run one at a time")
-        status_card = QFrame(objectName="card")
-        layout = QVBoxLayout(status_card)
-        self.processing_status_row = QWidget()
-        row = QHBoxLayout(self.processing_status_row)
-        row.setContentsMargins(0, 0, 0, 0)
-        self.queue_status = self._wrapping_label("Idle")
-        self.queue_status.setTextFormat(Qt.TextFormat.PlainText)
-        self.cancel_button = QPushButton("Cancel processing", objectName="danger")
-        self.cancel_button.setEnabled(False)
-        self.cancel_button.clicked.connect(self.cancel_processing)
-        row.addWidget(self.queue_status, 1); row.addWidget(self.cancel_button)
-        self.progress_bar = QProgressBar(); self.progress_bar.setRange(0, 100)
-        self.progress_bar.setAccessibleName("Project progress")
-        self.progress_text = QLabel("0%")
-        self.download_view = DownloadView()
-        self.download_view.cancel_button.clicked.connect(self.cancel_processing)
-        self.download_view.hide()
-        self.speech_progress = SpeechProgressView()
-        self.speech_progress.cancel_button.clicked.connect(self.cancel_processing)
-        self.speech_progress.hide()
-        self.live_logs = LogView()
-        log_actions = QHBoxLayout()
-        copy_logs = QPushButton("Copy Logs")
-        clear_logs = QPushButton("Clear Logs")
-        export_logs = QPushButton("Export Logs")
-        copy_logs.clicked.connect(self.live_logs.copy_all)
-        clear_logs.clicked.connect(self.live_logs.clear)
-        export_logs.clicked.connect(self.export_logs)
-        for button in (copy_logs, clear_logs, export_logs):
-            log_actions.addWidget(button)
-        log_actions.addStretch()
-        self.processing_progress_row = QWidget()
-        progress_row = QHBoxLayout(self.processing_progress_row)
-        progress_row.setContentsMargins(0, 0, 0, 0)
-        progress_row.addWidget(self.progress_bar, 1)
-        progress_row.addWidget(self.progress_text)
-        layout.addWidget(self.processing_status_row)
-        layout.addWidget(self.processing_progress_row)
-        layout.addWidget(self.download_view)
-        layout.addWidget(self.speech_progress)
-        layout.addWidget(self.live_logs, 1)
-        layout.addLayout(log_actions)
-        page.addWidget(status_card, 2)
-        history = QHBoxLayout()
-        history.addWidget(QLabel("Project history", objectName="sectionTitle"), 1)
-        self.retry_analysis_button = QPushButton("Retry AI Analysis")
-        self.retry_analysis_button.setEnabled(False)
+        outer, page = self._page(
+            "Processing Queue",
+            "Monitor active media rendering, queued jobs, pipeline progress, and activity logs",
+        )
+        page.setSpacing(12)
+
+        self.queue_overview = QueueOverviewBar()
+        self.queue_overview.pause_toggled.connect(self.toggle_queue_paused)
+        page.addWidget(self.queue_overview)
+
+        self.active_job_card = ActiveJobCard(self.cancel_processing)
+        self.active_job_card.new_project_requested.connect(lambda: self.show_page(1))
+        page.addWidget(self.active_job_card)
+
+        self.processing_status_row = self.active_job_card.processing_status_row
+        self.processing_progress_row = self.active_job_card.processing_progress_row
+        self.queue_status = self.active_job_card.queue_status
+        self.cancel_button = self.active_job_card.cancel_button
+        self.progress_bar = self.active_job_card.progress_bar
+        self.progress_text = self.active_job_card.progress_text
+        self.download_view = self.active_job_card.download_view
+        self.speech_progress = self.active_job_card.speech_progress
+
+        self.queue_panel = JobQueuePanel()
+        self.queue_panel.selection_changed.connect(self._update_retry_button)
+        self.queue_panel.action_triggered.connect(self._handle_queue_action)
+        self.retry_analysis_button = self.queue_panel.retry_analysis_button
         self.retry_analysis_button.clicked.connect(self.retry_analysis)
-        history.addWidget(self.retry_analysis_button)
-        page.addLayout(history)
-        self.queue_table = self._table(["Project", "Status", "Progress", "Error"])
-        self.queue_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self.queue_table.itemSelectionChanged.connect(self._update_retry_button)
-        page.addWidget(self.queue_table, 1)
-        return outer
+        page.addWidget(self.queue_panel, 1)
+
+        self.logs_panel = CollapsibleLogsPanel(self.export_logs)
+        self.live_logs = self.logs_panel.live_logs
+        page.addWidget(self.logs_panel)
+
+        return self._scroll_page(outer)
 
     def export_logs(self) -> None:
         filename, _ = QFileDialog.getSaveFileName(self, "Export logs", "autoclip-logs.txt", "Text files (*.txt)")
@@ -644,8 +629,8 @@ class MainWindow(QMainWindow):
         self._auto_project_name = suggestion
 
     def generate(self) -> None:
-        if self.worker_thread or self.speech_utility_active:
-            QMessageBox.information(self, "Processing active", "Wait for or cancel the current project first.")
+        if self.speech_utility_active:
+            QMessageBox.information(self, "Speech task active", "Wait for the current speech task to finish first.")
             return
         using_local = self.source_stack.currentIndex() == 1
         source = (self.local_source_input.text() if using_local else self.source_input.text()).strip()
@@ -697,10 +682,17 @@ class MainWindow(QMainWindow):
         )
         project_id = self.database.create_project(source, asdict(options))
         self.template_combo.setCurrentText(self.default_template())
+        if self.worker_thread or self.queue_paused:
+            reason = "queue paused" if self.queue_paused else "added to queue"
+            self._log("INFO", f"Queued project {options.project_name or project_id} ({reason}).")
+            self.refresh_all()
+            self.show_page(2)
+            return
         self._start_worker(project_id, options)
 
     def _start_worker(self, project_id: str, options: ProjectOptions, *, resume_analysis: bool = False) -> None:
         self.pipeline.manager.reset()
+        self._active_project_id = project_id
         self.worker_thread = QThread(self)
         self.worker = PipelineWorker(self.pipeline, project_id, options, resume_analysis=resume_analysis)
         self.worker.moveToThread(self.worker_thread)
@@ -716,18 +708,26 @@ class MainWindow(QMainWindow):
         self.worker.finished.connect(self.worker_thread.quit)
         self.worker.finished.connect(self.worker.deleteLater)
         self.worker_thread.finished.connect(self._worker_finished)
-        self.generate_button.setEnabled(False); self.cancel_button.setEnabled(True)
+        self.cancel_button.setEnabled(True)
         self.retry_analysis_button.setEnabled(False)
         progress = 40 if resume_analysis else 0
-        self.progress_bar.setValue(progress)
-        self.progress_text.setText(f"{progress}%")
+        project_row = next((p for p in self.database.projects() if p["id"] == project_id), None)
+        thumb_path = project_thumbnail_path(project_row, self.clip_rows or self.database.clips())
+        self.active_job_card.start_job(
+            project_row,
+            options_dict=asdict(options),
+            profile_name=self.settings.performance().profile,
+            initial_progress=progress,
+            status_message="Retrying AI analysis" if resume_analysis else "Starting pipeline",
+            thumb_path=thumb_path,
+        )
         self.show_speech(False)
         self.show_download(not resume_analysis and is_youtube_url(options.source))
         self.worker_thread.start(); self.show_page(2)
+        self.refresh_all()
 
     def _selected_project(self) -> dict | None:
-        rows = self.queue_table.selectionModel().selectedRows()
-        return rows[0].data(Qt.ItemDataRole.UserRole) if rows else None
+        return self.queue_panel.selected_project()
 
     def _update_retry_button(self) -> None:
         project = self._selected_project()
@@ -750,6 +750,118 @@ class MainWindow(QMainWindow):
         options.multimodal = options.multimodal and options.provider == "gemini"
         self._start_worker(project["id"], options, resume_analysis=True)
 
+    def toggle_queue_paused(self, paused: bool) -> None:
+        self.queue_paused = bool(paused)
+        self.queue_overview.set_paused(self.queue_paused)
+        self._log("INFO", "Queue paused by user." if self.queue_paused else "Queue resumed by user.")
+        self._refresh_queue_overview()
+        if not self.queue_paused and not self.worker_thread and not self.speech_utility_active and not self.closing:
+            self.dispatch_next_queued_job()
+
+    def dispatch_next_queued_job(self) -> bool:
+        if self.queue_paused or self.worker_thread or self.speech_utility_active or self.closing:
+            return False
+        queued = self.database.next_queued_project()
+        if not queued:
+            return False
+        try:
+            options = ProjectOptions(**json.loads(queued["options"]))
+        except (ValueError, TypeError):
+            self.database.update_project(queued["id"], status="failed", error="Saved project options could not be read.")
+            self.refresh_all()
+            return False
+        self._start_worker(queued["id"], options)
+        return True
+
+    def _project_output_folder(self, project: dict) -> Path:
+        try:
+            options = json.loads(project.get("options") or "{}")
+        except (TypeError, ValueError):
+            options = {}
+        custom_root = str(options.get("output_dir") or "").strip() if isinstance(options, dict) else ""
+        root = Path(custom_root) if custom_root else OUTPUT_DIR
+        folder = root / str(project["id"])
+        if folder.exists():
+            return folder
+        source = str(project.get("source") or "").strip()
+        if source and not is_youtube_url(source):
+            src_parent = Path(source).parent
+            if src_parent.exists():
+                return src_parent
+        return root if root.exists() else OUTPUT_DIR
+
+    @Slot(str, str)
+    def _handle_queue_action(self, action: str, project_id: str) -> None:
+        projects = self.project_rows or self.database.projects()
+        project = next((p for p in projects if str(p["id"]) == project_id), None)
+        if not project:
+            return
+        if action == "view_details":
+            clips = [c for c in (self.clip_rows or self.database.clips()) if str(c.get("project_id") or "") == project_id]
+            JobDetailsDialog(project, len(clips), self).exec()
+        elif action == "open_folder":
+            folder = self._project_output_folder(project)
+            if folder.exists():
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        elif action == "view_clips":
+            clips = [c for c in (self.clip_rows or self.database.clips()) if str(c.get("project_id") or "") == project_id]
+            self.show_page(3)
+            if clips and hasattr(self, "clips_library"):
+                self.clips_library.select_clip(str(clips[0]["id"]))
+        elif action == "move_up":
+            if self.database.reorder_queued_project(project_id, -1):
+                self.refresh_all()
+        elif action == "move_down":
+            if self.database.reorder_queued_project(project_id, 1):
+                self.refresh_all()
+        elif action == "cancel_queued":
+            if project.get("status") == "queued":
+                self.database.update_project(project_id, status="cancelled", error="Cancelled by user", stage="Cancelled")
+                self._log("WARNING", f"Cancelled queued job {project_id}.")
+                self.refresh_all()
+        elif action == "retry_analysis":
+            self.queue_panel.select_project(project_id)
+            self.retry_analysis()
+        elif action == "retry_failed":
+            try:
+                options = ProjectOptions(**json.loads(project["options"]))
+            except (ValueError, TypeError):
+                QMessageBox.warning(self, "Cannot retry job", "This project's saved settings could not be read.")
+                return
+            self.database.update_project(project_id, status="queued", progress=0, error="", stage="Queued")
+            self.refresh_all()
+            if not self.worker_thread and not self.queue_paused and not self.speech_utility_active:
+                self._start_worker(project_id, options)
+        elif action == "remove_history":
+            if project.get("status") == "processing":
+                return
+            if self.database.delete_project_history(project_id):
+                self.refresh_all()
+
+    def _log(self, level: str, message: str) -> None:
+        self.live_logs.add_entry(level, message)
+        self.logs_panel.refresh_count()
+
+    def _refresh_queue_overview(self, stage_message: str = "") -> None:
+        projects = self.project_rows or self.database.projects()
+        msg_lower = stage_message.lower()
+        if self.worker_thread:
+            engine_state = (
+                "Waiting"
+                if any(tok in msg_lower for tok in ("waiting", "gaming mode", "thermal", "cooling", "throttl"))
+                else "Processing"
+            )
+        elif self.queue_paused:
+            engine_state = "Paused"
+        else:
+            engine_state = "Idle"
+        self.queue_overview.update_summary(
+            projects,
+            engine_state=engine_state,
+            profile_name=self.settings.performance().profile,
+            paused=self.queue_paused,
+        )
+
     def cancel_processing(self) -> None:
         downloading = not self.download_view.isHidden()
         transcribing = not self.speech_progress.isHidden()
@@ -767,6 +879,7 @@ class MainWindow(QMainWindow):
 
     def show_download(self, active: bool) -> None:
         if active:
+            self.active_job_card.ensure_active_visible()
             self.download_view.reset()
         else:
             self.download_view.animation.stop()
@@ -775,6 +888,7 @@ class MainWindow(QMainWindow):
 
     def show_speech(self, active: bool) -> None:
         if active:
+            self.active_job_card.ensure_active_visible()
             self.speech_progress.begin()
         else:
             self.speech_progress.timer.stop()
@@ -793,7 +907,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def on_download_log(self, message: str) -> None:
-        self.live_logs.add_entry("INFO", message)
+        self._log("INFO", message)
 
     @Slot(object)
     def on_speech_progress(self, progress: SpeechProgress) -> None:
@@ -809,18 +923,16 @@ class MainWindow(QMainWindow):
             self.show_speech(True)
         elif value >= 40 and not self.speech_progress.isHidden():
             self.show_speech(False)
-        if value:
-            self.progress_bar.setValue(value)
-            self.progress_text.setText(f"{value}%")
-        self.queue_status.setText(redact(message).partition("\n")[0])
-        self.live_logs.add_entry("INFO", message)
+        self.active_job_card.update_stage(value, message)
+        self._log("INFO", message)
         self.metric_active.findChild(QLabel, "metricValue").setText(f"{value}%")
+        self._refresh_queue_overview(message)
 
     def on_completed(self, _project_id: str, count: int) -> None:
         self.show_download(False)
         self.show_speech(False)
-        self.queue_status.setText(f"Completed {count} clips")
-        self.live_logs.add_entry("SUCCESS", "All outputs passed MP4 validation.")
+        self.active_job_card.mark_finished("completed", f"Completed {count} clips")
+        self._log("SUCCESS", "All outputs passed MP4 validation.")
         self.refresh_all()
 
     def on_failed(self, project_id: str, message: str) -> None:
@@ -829,45 +941,50 @@ class MainWindow(QMainWindow):
         self.refresh_all()
         cancelled = message == "Processing cancelled"
         retryable = False
-        for index, project in enumerate(self.project_rows or []):
+        for project in self.project_rows or []:
             if project["id"] == project_id and project["status"] == "analysis_failed":
-                self.queue_table.selectRow(index)
+                self.queue_panel.select_project(project_id)
                 retryable = True
                 break
         summary = message.partition("\n")[0]
-        self.queue_status.setText(f"{summary}\nSelect Retry AI Analysis to continue." if retryable else summary)
-        self.live_logs.add_entry("WARNING" if cancelled else "ERROR", message)
+        display_msg = f"{summary}\nSelect Retry AI Analysis to continue." if retryable else summary
+        self.active_job_card.mark_finished("cancelled" if cancelled else ("analysis_failed" if retryable else "failed"), display_msg)
+        self._log("WARNING" if cancelled else "ERROR", message)
         state = "Cancelled" if cancelled else "Error"
         self.metric_active.findChild(QLabel, "metricValue").setText(state)
         if not cancelled and not retryable and not self.closing:
             QMessageBox.critical(self, "Processing failed", message)
 
     def _worker_finished(self) -> None:
-        self.generate_button.setEnabled(True); self.cancel_button.setEnabled(False)
+        self.cancel_button.setEnabled(False)
         if self.worker_thread:
             self.worker_thread.deleteLater()
-        self.worker_thread = None; self.worker = None
+        self.worker_thread = None; self.worker = None; self._active_project_id = None
+        self.refresh_all()
+        started_next = self.dispatch_next_queued_job()
+        if not started_next:
+            self.active_job_card.show_idle()
+            self.metric_active.findChild(QLabel, "metricValue").setText("Paused" if self.queue_paused else "Idle")
         self._update_retry_button()
-        self.metric_active.findChild(QLabel, "metricValue").setText("Idle")
+        self._refresh_queue_overview()
         self._finish_close()
 
     def refresh_all(self) -> None:
         projects, clips = self.database.projects(), self.database.clips()
-        if projects != self.project_rows:
+        projects_changed = projects != self.project_rows
+        clips_changed = clips != self.clip_rows
+        if projects_changed or clips_changed:
             selected_project = self._selected_project()
             self._fill_projects(self.recent_table, projects[:8], compact=True)
-            with QSignalBlocker(self.queue_table):
-                self.queue_table.clearSelection()
-                self._fill_projects(self.queue_table, projects, compact=False)
+            with QSignalBlocker(self.queue_panel):
+                self.queue_panel.set_data(projects, clips)
                 if selected_project:
-                    for row, item in enumerate(projects):
-                        if item["id"] == selected_project["id"]:
-                            self.queue_table.selectRow(row)
-                            break
+                    self.queue_panel.select_project(str(selected_project["id"]))
             self.metric_projects.findChild(QLabel, "metricValue").setText(str(self.database.project_count()))
             self.project_rows = projects
             self._update_retry_button()
-        if clips == self.clip_rows:
+            self._refresh_queue_overview()
+        if not clips_changed:
             return
         busy_ids: set[str] = set()
         for clip in clips:
@@ -1233,7 +1350,7 @@ class MainWindow(QMainWindow):
         if self.speech_utility_active:
             self.speech_utility_active = False
             self.speech_settings.setEnabled(True)
-            self.generate_button.setEnabled(self.worker_thread is None)
+            self.generate_button.setEnabled(True)
             self._update_retry_button()
         self._finish_close()
 
