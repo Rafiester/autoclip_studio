@@ -1,7 +1,7 @@
 # AutoClip Studio — Agent Handoff & Progress
 
 **Last Updated:** 2026-11-26  
-**Current Phase:** Centralized Design System, Poppins Typography & Light/Dark/System Theme System Complete
+**Current Phase:** Native Apple Silicon Performance Optimization Complete
 
 ## Execution Status
 
@@ -13,6 +13,16 @@
 - **Generated Clips SaaS Master-Detail Redesign** (`a2f2bc6`)
 - **First-Time Setup Wizard & Dependency Manager** (`fed338b`)
 - **Local Video Import & Optional External SRT Import** (`3121a88`)
+- **Native Apple Silicon Performance Optimization:**
+  - **Dynamic Hardware & Rosetta Detection (`autoclip_studio/platform_utils.py`, `autoclip_studio/performance.py`, `autoclip_studio/ui/performance_view.py`):** Added cached `detect_platform()` with Rosetta translation detection (`sysctl.proc_translated`), P-core / E-core counts (`hw.perflevel0/1.physicalcpu`), GPU core count (`ioreg -rc AGXAccelerator`), swap usage (`psutil.swap_memory()`), throttled `memory_pressure -Q` & `pmset -g batt` (power source, battery %, charging), zero-sudo Objective-C `NSProcessInfo.processInfo.thermalState` (`Nominal`/`Fair`/`Serious`/`Critical`), and runtime-verified acceleration backends (`MLX Metal`, `VideoToolbox H.264`, `VideoToolbox HEVC`). Displays `N/A` whenever a sensor is unavailable (never fabricates metrics).
+  - **Unified Memory & Power-Aware Profile Engine (`autoclip_studio/performance.py`):** Dynamically scales Eco / Balanced / Turbo threads, Whisper batch sizes, and face-tracking intervals based on detected P/E cores, available unified memory ratio, memory pressure, swap growth, thermal pressure, and battery power (pausing safely at stage boundaries on `Critical` thermal or memory pressure). No hardcoded chip or RAM capacities.
+  - **MLX Whisper Optimization (`autoclip_studio/transcription.py`, `autoclip_studio/speech_engine.py`):** Added configurable quantized MLX model options (`large-v3-turbo-q4`, `small-q4`) without silently downgrading user-selected quality, single-model residency lock (`_MLX_INFERENCE_LOCK`), and `release_mlx_memory()` (`mx.clear_cache()` + `gc.collect()`).
+  - **FFmpeg & VideoToolbox Optimization (`autoclip_studio/rendering.py`):** Added process-wide `_ENCODER_PROBE_CACHE` to eliminate repeated startup probes, added `hevc_videotoolbox` (`-tag:v hvc1`) alongside `h264_videotoolbox` with `libx264` CPU fallback, and kept SW decode → CPU `crop`/`scale`/`subtitles` → VT encode as the validated fastest path.
+  - **Real Apple M1 (`8 GB`, `4P+4E`, `7-core GPU`, `macOS 27.2.1`) Cold/Warm Benchmarks (`1920×1080` 10s → `1080×1920` crop + Lanczos):**
+    - `h264_videotoolbox` (SW decode → VT encode): **1.77s cold / 1.76s warm** (`4.89 MB`) — **22% faster** than `libx264`.
+    - `h264_videotoolbox` (`-hwaccel videotoolbox` decode): `1.84s` cold / `1.85s` warm (4.5% slower due to GPU→CPU readback for CPU filters, avoided by default).
+    - `hevc_videotoolbox` (`-tag:v hvc1`): `1.88s` cold / `1.84s` warm (`4.14 MB`, **15% smaller**).
+    - `libx264` (`medium`, CRF 20 CPU fallback): `2.33s` cold / `2.25s` warm (`4.24 MB`).
 - **Centralized Design System, Poppins Typography & Light/Dark/System Theme System:**
   - **Bundled Poppins Typography (`autoclip_studio/assets/fonts/poppins/`):** Bundled official Google Fonts Poppins TTF weights (`Regular`, `Medium`, `SemiBold`, `Bold`) + `OFL.txt` license, loaded via `QFontDatabase` (`load_bundled_fonts()`) across all UI text, dialogs, menus, and tooltips (with monospace retained for `LogView` diagnostic logs and caption/subtitle/export fonts untouched).
   - **Centralized ThemeManager & Design Tokens (`autoclip_studio/ui/theme.py`, `autoclip_studio/ui/style.py`, `autoclip_studio/config.py`):** Implemented semantic Light & Dark color palettes, 4px spacing scale, typography hierarchy, border radius tokens, `QPalette`, cached QSS stylesheets, and `ThemeManager` with instant live switching (no restart, preserves active jobs/navigation/playback), persisted `appearance` setting (defaulting to Dark Mode), and native OS `QStyleHints.colorSchemeChanged` synchronization in `System` mode.
@@ -106,7 +116,7 @@
 
 ## Test Results
 - **macOS 27.2.1 (`arm64`, Apple Silicon):**
-  - `.venv/bin/python3 -m pytest -q`: **98 passed, 3 skipped, 0 failed** (includes `tests/test_theme_system.py` and `tests/test_heatmap_and_hybrid.py`; 3 Windows-only/environment skips).
+  - `.venv/bin/python3 -m pytest -q`: **101 passed, 3 skipped, 0 failed** (includes `tests/test_apple_silicon_perf.py`, `tests/test_theme_system.py`, `tests/test_heatmap_and_hybrid.py`; 3 Windows-only/environment skips).
   - `.venv/bin/python3 -m tests.integration_smoke`: **Passed** (`h264_videotoolbox`, 9 face-tracking sample points, `948,804 bytes`, `6.30s`).
   - `.venv/bin/python3 scripts/setup.py --check`: **Passed** (exit code 0).
 - **Windows 11 x64 Host (previous session):**

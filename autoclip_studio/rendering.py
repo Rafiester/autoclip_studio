@@ -28,6 +28,9 @@ def source_dimensions(source: Path, manager: ProcessManager) -> tuple[int, int]:
     return width, height
 
 
+_ENCODER_PROBE_CACHE: dict[tuple[str, str], bool] = {}
+
+
 def render_clip(source: Path, highlight: Highlight, transcript: Transcript,
                 output: Path, work_dir: Path, output_size: tuple[int, int],
                 aspect_ratio: str, face_tracking: bool, captions: bool,
@@ -36,7 +39,8 @@ def render_clip(source: Path, highlight: Highlight, transcript: Transcript,
                 dimensions: tuple[int, int] | None = None,
                 encoder_support: dict[str, bool] | None = None,
                 profile_limits: ProfileLimits | None = None,
-                cache_enabled: bool = False) -> float:
+                cache_enabled: bool = False,
+                video_codec: str = "h264") -> float:
     work_dir.mkdir(parents=True, exist_ok=True)
     output.parent.mkdir(parents=True, exist_ok=True)
     src_width, src_height = dimensions or source_dimensions(source, manager)
@@ -99,9 +103,15 @@ def render_clip(source: Path, highlight: Highlight, transcript: Transcript,
                 log(f"NVENC failed; retrying with CPU encoder ({_last_line(error.output)})")
                 _render_cpu(base, staging, work_dir, manager, log, preset=cpu_preset)
         elif encoder == "videotoolbox":
-            command = base + ["-c:v", "h264_videotoolbox", "-q:v", "65", str(staging)]
+            use_hevc = video_codec.lower() in {"hevc", "h265"} and hevc_videotoolbox_available(manager)
+            vt_args = (
+                ["-c:v", "hevc_videotoolbox", "-q:v", "65", "-tag:v", "hvc1"]
+                if use_hevc else ["-c:v", "h264_videotoolbox", "-q:v", "65"]
+            )
+            vt_name = "hevc_videotoolbox" if use_hevc else "h264_videotoolbox"
+            command = base + vt_args + [str(staging)]
             try:
-                log("Rendering with Apple VideoToolbox (h264_videotoolbox)")
+                log(f"Rendering with Apple VideoToolbox ({vt_name})")
                 manager.run(command, cwd=work_dir, on_output=_ffmpeg_logger(log), output_tail=50)
             except subprocess.CalledProcessError as error:
                 log(f"VideoToolbox failed; retrying with CPU encoder ({_last_line(error.output)})")
@@ -125,34 +135,44 @@ def _render_cpu(base: list[str], output: Path, work_dir: Path,
     )
 
 
+def _probe_encoder(manager: ProcessManager, codec: str, extra_args: tuple[str, ...] = ()) -> bool:
+    try:
+        ffmpeg = find_media_tool("ffmpeg")
+    except FileNotFoundError:
+        return False
+    cache_key = (ffmpeg, codec)
+    if cache_key in _ENCODER_PROBE_CACHE:
+        return _ENCODER_PROBE_CACHE[cache_key]
+    try:
+        manager.run([
+            ffmpeg, "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=size=640x480:rate=30", "-frames:v", "1",
+            "-pix_fmt", "yuv420p", "-c:v", codec, *extra_args,
+            "-f", "null", "-",
+        ], output_tail=20)
+        ok = True
+    except (OSError, subprocess.CalledProcessError):
+        ok = False
+    _ENCODER_PROBE_CACHE[cache_key] = ok
+    return ok
+
+
 def nvenc_available(manager: ProcessManager) -> bool:
     if sys.platform == "darwin":
         return False
-    try:
-        manager.run([
-            find_media_tool("ffmpeg"), "-hide_banner", "-loglevel", "error",
-            "-f", "lavfi", "-i", "color=size=640x480:rate=30", "-frames:v", "1",
-            "-pix_fmt", "yuv420p", "-c:v", "h264_nvenc", "-preset", "p5",
-            "-f", "null", "-",
-        ], output_tail=20)
-    except (OSError, subprocess.CalledProcessError):
-        return False
-    return True
+    return _probe_encoder(manager, "h264_nvenc", ("-preset", "p5"))
 
 
 def videotoolbox_available(manager: ProcessManager) -> bool:
     if sys.platform != "darwin":
         return False
-    try:
-        manager.run([
-            find_media_tool("ffmpeg"), "-hide_banner", "-loglevel", "error",
-            "-f", "lavfi", "-i", "color=size=640x480:rate=30", "-frames:v", "1",
-            "-pix_fmt", "yuv420p", "-c:v", "h264_videotoolbox",
-            "-f", "null", "-",
-        ], output_tail=20)
-    except (OSError, subprocess.CalledProcessError):
+    return _probe_encoder(manager, "h264_videotoolbox")
+
+
+def hevc_videotoolbox_available(manager: ProcessManager) -> bool:
+    if sys.platform != "darwin":
         return False
-    return True
+    return _probe_encoder(manager, "hevc_videotoolbox")
 
 
 def detect_hw_encoder(manager: ProcessManager) -> str:

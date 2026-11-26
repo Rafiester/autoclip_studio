@@ -13,7 +13,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory, mkdtemp
 
 from .paths import DATA_ROOT, MODEL_CACHE
-MODELS = ("tiny", "base", "small", "medium", "large-v2", "large-v3", "large-v3-turbo")
+MODELS = ("tiny", "base", "small", "small-q4", "medium", "large-v2", "large-v3", "large-v3-turbo", "large-v3-turbo-q4")
 XXL_NAME = "faster-whisper-xxl.exe"
 XXL_RELEASES = "https://github.com/Purfview/whisper-standalone-win/releases"
 XXL_INSTALLS = DATA_ROOT / "speech-engines"

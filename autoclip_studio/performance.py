@@ -1,12 +1,15 @@
 """Adaptive performance profiles, hardware monitoring, thermal guard, and Gaming Mode."""
 from __future__ import annotations
 
+import ctypes
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Callable
 
 from .platform_utils import detect_platform
@@ -61,6 +64,145 @@ class HardwareSnapshot:
     gaming_active: bool = False
     unified_memory: bool = False
     gpu_backend: str = "none"
+    cpu_perf_cores: int | None = None
+    cpu_eff_cores: int | None = None
+    gpu_cores: int | None = None
+    swap_total_mib: int | None = None
+    swap_used_mib: int | None = None
+    memory_pressure: str | None = None
+    memory_pressure_level: str = "normal"   # normal | warning | critical
+    thermal_pressure: str | None = None     # Nominal | Fair | Serious | Critical
+    battery_percent: int | None = None
+    battery_charging: bool | None = None
+    power_source: str | None = None         # AC Power | Battery Power
+    rosetta_active: bool = False
+    accel_backends: tuple[str, ...] = ()
+
+
+def _sysctl_int(name: str) -> int | None:
+    if sys.platform != "darwin":
+        return None
+    try:
+        out = subprocess.run(["sysctl", "-n", name], capture_output=True, text=True, timeout=2).stdout.strip()
+        return int(out) if out.isdigit() else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+@lru_cache(maxsize=1)
+def _apple_static_hardware() -> tuple[int | None, int | None, int | None]:
+    """Read static Apple Silicon P-core, E-core, and GPU core counts once (zero sudo)."""
+    if sys.platform != "darwin":
+        return None, None, None
+    p_cores = _sysctl_int("hw.perflevel0.physicalcpu")
+    e_cores = _sysctl_int("hw.perflevel1.physicalcpu")
+    gpu_cores = None
+    try:
+        out = subprocess.run(
+            ["ioreg", "-rc", "AGXAccelerator"],
+            capture_output=True, text=True, timeout=2,
+        ).stdout
+        match = re.search(r'"gpu-core-count"\s*=\s*(\d+)', out)
+        if match:
+            gpu_cores = int(match.group(1))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return p_cores, e_cores, gpu_cores
+
+
+def parse_memory_pressure_output(output: str) -> tuple[str | None, str]:
+    """Parse `memory_pressure -Q` output into (display_label, severity_level)."""
+    match = re.search(r"memory free percentage:\s*(\d+)%", output, re.IGNORECASE)
+    if not match:
+        return None, "normal"
+    free_pct = int(match.group(1))
+    if free_pct <= 12:
+        return f"Critical ({free_pct}% free)", "critical"
+    if free_pct <= 25:
+        return f"Warning ({free_pct}% free)", "warning"
+    return f"Nominal ({free_pct}% free)", "normal"
+
+
+def parse_pmset_battery_output(output: str) -> tuple[str | None, int | None, bool | None]:
+    """Parse `pmset -g batt` output into (power_source, battery_percent, is_charging)."""
+    power_source = None
+    if "AC Power" in output:
+        power_source = "AC Power"
+    elif "Battery Power" in output:
+        power_source = "Battery Power"
+    pct_match = re.search(r"(\d{1,3})%", output)
+    pct = int(pct_match.group(1)) if pct_match else None
+    charging = None
+    lowered = output.lower()
+    if "discharging" in lowered:
+        charging = False
+    elif "charging" in lowered or "charged" in lowered or "finishing charge" in lowered:
+        charging = True
+    return power_source, pct, charging
+
+
+def _read_macos_thermal_state() -> str | None:
+    """Read NSProcessInfo.processInfo.thermalState via Objective-C runtime (zero subprocess, zero sudo)."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.A.dylib")
+        ctypes.cdll.LoadLibrary("/System/Library/Frameworks/Foundation.framework/Foundation")
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        msg_ptr = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+        msg_int = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)(("objc_msgSend", objc))
+        cls = objc.objc_getClass(b"NSProcessInfo")
+        if not cls:
+            return None
+        info = msg_ptr(cls, objc.sel_registerName(b"processInfo"))
+        if not info:
+            return None
+        state = int(msg_int(info, objc.sel_registerName(b"thermalState")))
+        return {0: "Nominal", 1: "Fair", 2: "Serious", 3: "Critical"}.get(state)
+    except Exception:
+        return None
+
+
+@lru_cache(maxsize=1)
+def detect_acceleration_backends() -> tuple[str, ...]:
+    """Detect available hardware acceleration backends once without fabricating support."""
+    pinfo = detect_platform()
+    backends: list[str] = []
+    if pinfo.is_macos:
+        try:
+            from .speech_engine import mlx_whisper_available
+            if mlx_whisper_available():
+                backends.append("MLX Metal")
+        except Exception:
+            pass
+        try:
+            from .process import ProcessManager
+            from .rendering import hevc_videotoolbox_available, videotoolbox_available
+            mgr = ProcessManager()
+            if videotoolbox_available(mgr):
+                backends.append("VideoToolbox H.264")
+            if hevc_videotoolbox_available(mgr):
+                backends.append("VideoToolbox HEVC")
+        except Exception:
+            pass
+    else:
+        try:
+            from .speech_engine import python_cuda
+            if python_cuda():
+                backends.append("CUDA")
+        except Exception:
+            pass
+        try:
+            from .process import ProcessManager
+            from .rendering import nvenc_available
+            if nvenc_available(ProcessManager()):
+                backends.append("NVENC H.264")
+        except Exception:
+            pass
+    return tuple(backends)
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,34 +228,65 @@ def resolve_profile_limits(profile: str, snapshot: HardwareSnapshot) -> ProfileL
     total_ram_mib = snapshot.ram_total_mib if snapshot.ram_total_mib is not None else 16384
 
     if snapshot.unified_memory:
-        if selected == "eco":
+        perf_cores = max(2, snapshot.cpu_perf_cores or max(2, physical // 2))
+        avail_ratio = (avail_ram_mib / max(1, total_ram_mib)) if total_ram_mib else 0.5
+        high_pressure = (
+            snapshot.memory_pressure_level == "critical"
+            or snapshot.thermal_pressure == "Critical"
+        )
+        elevated_pressure = (
+            snapshot.memory_pressure_level == "warning"
+            or snapshot.thermal_pressure == "Serious"
+            or avail_ratio < 0.20
+            or (snapshot.swap_used_mib is not None and snapshot.swap_used_mib >= 2048)
+        )
+        on_battery = snapshot.power_source == "Battery Power"
+
+        if high_pressure:
             return ProfileLimits(
-                profile="eco",
-                cpu_threads=max(2, physical // 2),
-                ffmpeg_threads=max(2, physical // 2),
-                whisper_batch_size=2,
+                profile=selected,
+                cpu_threads=max(2, perf_cores // 2),
+                ffmpeg_threads=max(2, perf_cores // 2),
+                whisper_batch_size=1,
+                tracking_sample_interval=1.25,
+                nvenc_preset="videotoolbox",
+                cpu_preset="medium",
+                subprocess_priority_flags=0,
+            )
+
+        if selected == "eco" or (on_battery and selected == "balanced" and elevated_pressure):
+            return ProfileLimits(
+                profile=selected,
+                cpu_threads=max(2, min(perf_cores, physical // 2)),
+                ffmpeg_threads=max(2, min(perf_cores, physical // 2)),
+                whisper_batch_size=1 if elevated_pressure else 2,
                 tracking_sample_interval=1.0,
                 nvenc_preset="videotoolbox",
                 cpu_preset="medium",
                 subprocess_priority_flags=0,
             )
         if selected == "turbo":
+            threads = max(2, perf_cores if (elevated_pressure or on_battery) else logical)
+            batch = 2 if elevated_pressure else (6 if avail_ram_mib >= 6000 else (4 if avail_ram_mib >= 3500 else 2))
             return ProfileLimits(
                 profile="turbo",
-                cpu_threads=max(2, logical),
-                ffmpeg_threads=max(2, logical),
-                whisper_batch_size=6 if total_ram_mib >= 15000 and avail_ram_mib >= 4000 else 4,
-                tracking_sample_interval=0.5,
+                cpu_threads=threads,
+                ffmpeg_threads=threads,
+                whisper_batch_size=batch,
+                tracking_sample_interval=0.75 if elevated_pressure else 0.5,
                 nvenc_preset="videotoolbox",
                 cpu_preset="fast",
                 subprocess_priority_flags=0,
             )
+        # Balanced (default)
+        threads = max(2, perf_cores if (elevated_pressure or on_battery) else physical)
+        batch = 1 if elevated_pressure else (4 if avail_ram_mib >= 4500 else 2)
         return ProfileLimits(
             profile="balanced",
-            cpu_threads=max(2, physical),
-            ffmpeg_threads=max(2, physical),
-            whisper_batch_size=4 if total_ram_mib >= 15000 and avail_ram_mib >= 3000 else 2,
-            tracking_sample_interval=0.75,
+            cpu_threads=threads,
+            ffmpeg_threads=threads,
+            whisper_batch_size=batch,
+            tracking_sample_interval=0.85 if elevated_pressure else 0.75,
             nvenc_preset="videotoolbox",
             cpu_preset="medium",
             subprocess_priority_flags=0,
@@ -205,6 +378,9 @@ class HardwareMonitor:
         self._nvml_failed = False
         self._gpu_handle = None
         self._thermal_paused = False
+        self._macos_probe_ts = 0.0
+        self._macos_mem_pressure: tuple[str | None, str] = (None, "normal")
+        self._macos_power: tuple[str | None, int | None, bool | None] = (None, None, None)
         if psutil is not None:
             try:
                 psutil.cpu_percent(interval=None)
@@ -231,6 +407,7 @@ class HardwareMonitor:
         cpu_physical = os.cpu_count() or 1
         cpu_logical = os.cpu_count() or 1
         ram_total_mib = ram_used_mib = ram_available_mib = None
+        swap_total_mib = swap_used_mib = None
 
         if psutil is not None:
             try:
@@ -241,6 +418,9 @@ class HardwareMonitor:
                 ram_total_mib = int(vm.total // (1024 * 1024))
                 ram_used_mib = int((vm.total - vm.available) // (1024 * 1024))
                 ram_available_mib = int(vm.available // (1024 * 1024))
+                sw = psutil.swap_memory()
+                swap_total_mib = int(sw.total // (1024 * 1024))
+                swap_used_mib = int(sw.used // (1024 * 1024))
             except Exception:
                 pass
 
@@ -250,8 +430,35 @@ class HardwareMonitor:
         pinfo = detect_platform()
         unified_memory = pinfo.is_apple_silicon
         gpu_backend = "apple-silicon" if pinfo.is_apple_silicon else "none"
-        if pinfo.is_apple_silicon:
-            gpu_name = f"{pinfo.cpu_brand} (Apple Silicon GPU)"
+        cpu_perf_cores = cpu_eff_cores = gpu_cores = None
+        memory_pressure = None
+        memory_pressure_level = "normal"
+        thermal_pressure = None
+        battery_percent = None
+        battery_charging = None
+        power_source = None
+
+        if pinfo.is_macos:
+            cpu_perf_cores, cpu_eff_cores, gpu_cores = _apple_static_hardware()
+            if pinfo.is_apple_silicon:
+                core_suffix = f", {gpu_cores}-core GPU" if gpu_cores else ""
+                gpu_name = f"{pinfo.cpu_brand} (Apple Silicon{core_suffix})"
+            thermal_pressure = _read_macos_thermal_state()
+            now = time.monotonic()
+            if now - self._macos_probe_ts >= 5.0:
+                self._macos_probe_ts = now
+                try:
+                    mp_out = subprocess.run(["memory_pressure", "-Q"], capture_output=True, text=True, timeout=2).stdout
+                    self._macos_mem_pressure = parse_memory_pressure_output(mp_out)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+                try:
+                    pm_out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=2).stdout
+                    self._macos_power = parse_pmset_battery_output(pm_out)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            memory_pressure, memory_pressure_level = self._macos_mem_pressure
+            power_source, battery_percent, battery_charging = self._macos_power
 
         if not pinfo.is_macos:
             with self._lock:
@@ -302,10 +509,32 @@ class HardwareMonitor:
             gaming_active=gaming_active,
             unified_memory=unified_memory,
             gpu_backend=gpu_backend,
+            cpu_perf_cores=cpu_perf_cores,
+            cpu_eff_cores=cpu_eff_cores,
+            gpu_cores=gpu_cores,
+            swap_total_mib=swap_total_mib,
+            swap_used_mib=swap_used_mib,
+            memory_pressure=memory_pressure,
+            memory_pressure_level=memory_pressure_level,
+            thermal_pressure=thermal_pressure,
+            battery_percent=battery_percent,
+            battery_charging=battery_charging,
+            power_source=power_source,
+            rosetta_active=pinfo.is_rosetta,
+            accel_backends=detect_acceleration_backends(),
         )
 
     def should_pause_for_thermal(self, settings: PerformanceSettings, snap: HardwareSnapshot) -> bool:
-        if not settings.thermal_protection or snap.gpu_temp_c is None:
+        if not settings.thermal_protection:
+            self._thermal_paused = False
+            return False
+        if snap.unified_memory:
+            if snap.thermal_pressure == "Critical" or snap.memory_pressure_level == "critical":
+                self._thermal_paused = True
+            elif snap.thermal_pressure in (None, "Nominal", "Fair") and snap.memory_pressure_level != "critical":
+                self._thermal_paused = False
+            return self._thermal_paused
+        if snap.gpu_temp_c is None:
             self._thermal_paused = False
             return False
         if not self._thermal_paused and snap.gpu_temp_c >= settings.gpu_temp_limit_c:

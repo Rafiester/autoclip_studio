@@ -85,11 +85,13 @@ class PerformanceView(QWidget):
         self._metric_values: dict[str, QLabel] = {}
         fields = [
             ("cpu", "CPU"),
-            ("ram", "RAM"),
+            ("ram", "Unified Memory / RAM"),
             ("gpu", "GPU"),
-            ("vram", "VRAM"),
-            ("gpu_temp", "GPU Temp / Power"),
+            ("vram", "Memory Pressure / Swap"),
+            ("gpu_temp", "Thermal / Power"),
             ("cpu_temp", "CPU Temp"),
+            ("power", "Power / Battery"),
+            ("accel", "Acceleration"),
             ("gaming", "Gaming Mode"),
         ]
         for idx, (key, title) in enumerate(fields):
@@ -150,8 +152,14 @@ class PerformanceView(QWidget):
             f"Whisper batch: {limits.whisper_batch_size}  |  Tracking step: {limits.tracking_sample_interval:.2f}s  |  "
             f"{hw_enc_label}"
         )
+        core_detail = (
+            f"{snap.cpu_perf_cores}P+{snap.cpu_eff_cores}E"
+            if snap.cpu_perf_cores is not None and snap.cpu_eff_cores is not None
+            else f"{snap.cpu_physical}C/{snap.cpu_logical}T"
+        )
+        rosetta_warn = " [Rosetta x86_64!]" if snap.rosetta_active else ""
         self._metric_values["cpu"].setText(
-            f"{snap.cpu_percent:.0f}% ({snap.cpu_physical}C/{snap.cpu_logical}T)"
+            f"{snap.cpu_percent:.0f}% ({core_detail}){rosetta_warn}"
             if snap.cpu_percent is not None else "N/A"
         )
         mem_suffix = " (Unified)" if snap.unified_memory else ""
@@ -160,21 +168,34 @@ class PerformanceView(QWidget):
             if snap.ram_used_mib is not None and snap.ram_total_mib is not None else "N/A"
         )
         if snap.gpu_name:
-            util = f"{snap.gpu_util_percent}%" if snap.gpu_util_percent is not None else "N/A"
-            self._metric_values["gpu"].setText(f"{snap.gpu_name} ({util})")
+            util = f" ({snap.gpu_util_percent}%)" if snap.gpu_util_percent is not None else ""
+            self._metric_values["gpu"].setText(f"{snap.gpu_name}{util}")
         else:
             self._metric_values["gpu"].setText("N/A")
         if snap.unified_memory:
-            self._metric_values["vram"].setText("Unified Memory")
+            mp = snap.memory_pressure or "N/A"
+            sw = f" • Swap {snap.swap_used_mib / 1024:.1f} GB" if snap.swap_used_mib is not None else ""
+            self._metric_values["vram"].setText(f"{mp}{sw}")
         else:
             self._metric_values["vram"].setText(
                 f"{snap.vram_used_mib} / {snap.vram_total_mib} MiB"
                 if snap.vram_used_mib is not None and snap.vram_total_mib is not None else "N/A"
             )
-        temp_text = f"{snap.gpu_temp_c} °C" if snap.gpu_temp_c is not None else "N/A"
-        power_text = f"{snap.gpu_power_w:.1f} W" if snap.gpu_power_w is not None else "N/A"
-        self._metric_values["gpu_temp"].setText(f"{temp_text} / {power_text}")
+        if snap.unified_memory:
+            self._metric_values["gpu_temp"].setText(snap.thermal_pressure or "N/A")
+        else:
+            temp_text = f"{snap.gpu_temp_c} °C" if snap.gpu_temp_c is not None else "N/A"
+            power_text = f"{snap.gpu_power_w:.1f} W" if snap.gpu_power_w is not None else "N/A"
+            self._metric_values["gpu_temp"].setText(f"{temp_text} / {power_text}")
         self._metric_values["cpu_temp"].setText(f"{snap.cpu_temp_c:.0f} °C" if snap.cpu_temp_c is not None else "N/A")
+        if snap.power_source or snap.battery_percent is not None:
+            src = snap.power_source or "Power"
+            batt = f" • {snap.battery_percent}%" if snap.battery_percent is not None else ""
+            chg = " (Charging)" if snap.battery_charging is True else (" (Discharging)" if snap.battery_charging is False else "")
+            self._metric_values["power"].setText(f"{src}{batt}{chg}")
+        else:
+            self._metric_values["power"].setText("N/A")
+        self._metric_values["accel"].setText(", ".join(snap.accel_backends) if snap.accel_backends else "CPU")
         if not settings.gaming_mode:
             self._metric_values["gaming"].setText("Off")
         else:

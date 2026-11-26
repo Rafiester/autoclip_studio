@@ -6,6 +6,7 @@ import platform
 import subprocess
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -17,8 +18,24 @@ class PlatformInfo:
     is_macos: bool
     is_apple_silicon: bool
     cpu_brand: str
+    is_rosetta: bool = False
+    os_version: str = ""
 
 
+def _is_rosetta_translated() -> bool:
+    if sys.platform != "darwin":
+        return False
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", "sysctl.proc_translated"],
+            capture_output=True, text=True, timeout=2,
+        ).stdout.strip()
+        return out == "1"
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+@lru_cache(maxsize=1)
 def detect_platform() -> PlatformInfo:
     raw_sys = sys.platform.lower()
     if raw_sys.startswith("win"):
@@ -38,7 +55,9 @@ def detect_platform() -> PlatformInfo:
 
     is_windows = system == "windows"
     is_macos = system == "macos"
-    is_apple_silicon = is_macos and arch == "arm64"
+    is_rosetta = _is_rosetta_translated() if is_macos else False
+    is_apple_silicon = is_macos and (arch == "arm64" or is_rosetta)
+    os_version = platform.mac_ver()[0] if is_macos else platform.release()
 
     brand = platform.processor() or ""
     if is_macos:
@@ -58,6 +77,8 @@ def detect_platform() -> PlatformInfo:
         is_macos=is_macos,
         is_apple_silicon=is_apple_silicon,
         cpu_brand=brand or arch,
+        is_rosetta=is_rosetta,
+        os_version=os_version,
     )
 
 

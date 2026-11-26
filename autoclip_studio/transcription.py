@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from dataclasses import asdict, dataclass
 from importlib.metadata import version
 from pathlib import Path
@@ -30,11 +31,27 @@ MLX_REPOS = {
     "tiny": "mlx-community/whisper-tiny-mlx",
     "base": "mlx-community/whisper-base-mlx",
     "small": "mlx-community/whisper-small-mlx",
+    "small-q4": "mlx-community/whisper-small-mlx-q4",
     "medium": "mlx-community/whisper-medium-mlx",
     "large-v2": "mlx-community/whisper-large-v2-mlx",
     "large-v3": "mlx-community/whisper-large-v3-mlx",
     "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+    "large-v3-turbo-q4": "mlx-community/whisper-large-v3-turbo-q4",
 }
+
+_MLX_INFERENCE_LOCK = threading.Lock()
+
+
+def release_mlx_memory() -> None:
+    """Release Apple Silicon MLX Metal cache and Python references safely."""
+    try:
+        import mlx.core as mx
+        clear_cache = getattr(mx, "clear_cache", None) or getattr(mx.metal, "clear_cache", None)
+        if clear_cache is not None:
+            clear_cache()
+    except Exception:
+        pass
+    gc.collect()
 
 
 _XXL_PROGRESS = re.compile(r"^\s*\d+%\s*\|\s*(\d+)\s*/\s*(\d+)\s*\|\s*([\d:]+)<<([\d:]+)\s*\|\s*([\d.]+)\s+audio seconds/s")
@@ -353,7 +370,8 @@ def _run_mlx_whisper(repo: str, media_path: Path, language: str | None, settings
         }
         if language:
             kwargs["language"] = language
-        result = mlx_whisper.transcribe(str(media_path), **kwargs)
+        with _MLX_INFERENCE_LOCK:
+            result = mlx_whisper.transcribe(str(media_path), **kwargs)
         manager.check_cancelled()
         segments = result.get("segments") or []
         entries = []
@@ -374,14 +392,7 @@ def _run_mlx_whisper(repo: str, media_path: Path, language: str | None, settings
             })
         return entries, str(result.get("language") or language or "unknown"), last_end
     finally:
-        try:
-            import mlx.core as mx
-            clear_cache = getattr(mx, "clear_cache", None) or getattr(mx.metal, "clear_cache", None)
-            if clear_cache is not None:
-                clear_cache()
-        except Exception:
-            pass
-        gc.collect()
+        release_mlx_memory()
 
 
 def _run_purfview(engine: Purfview, model: Path, model_name: str, media: Path, device: str, compute: str,
