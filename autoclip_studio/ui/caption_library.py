@@ -27,6 +27,7 @@ from ..captions import (
 )
 from ..diagnostics import log_error
 from ..process import CancelledError, ProcessManager
+from .style import protect_from_wheel
 
 
 CATEGORIES = ("All", "Minimal", "Viral", "Animated", "Cinematic")
@@ -430,11 +431,11 @@ class CaptionLibrary(QWidget):
         toolbar.setSpacing(8)
         self.search = QLineEdit(placeholderText="Search templates…", clearButtonEnabled=True)
         self.search.setAccessibleName("Search caption templates")
-        self.category = QComboBox()
+        self.category = protect_from_wheel(QComboBox())
         self.category.setAccessibleName("Caption template category")
         self.category.addItems(CATEGORIES)
 
-        self.sync_mode = QComboBox()
+        self.sync_mode = protect_from_wheel(QComboBox())
         self.sync_mode.setAccessibleName("Caption timing mode")
         self.sync_mode.addItem("Timing: Precise", "precise")
         self.sync_mode.addItem("Timing: Readable", "readable")
@@ -443,7 +444,7 @@ class CaptionLibrary(QWidget):
             "Readable adds subtle lead-in and extended hold in silences."
         )
 
-        self.offset_spin = QSpinBox()
+        self.offset_spin = protect_from_wheel(QSpinBox())
         self.offset_spin.setRange(-500, 500)
         self.offset_spin.setSingleStep(20)
         self.offset_spin.setSuffix(" ms")
@@ -517,7 +518,7 @@ class CaptionLibrary(QWidget):
         slider_header.addWidget(self.y_value_label)
         pos_layout.addLayout(slider_header)
 
-        self.y_slider = QSlider(Qt.Orientation.Horizontal)
+        self.y_slider = protect_from_wheel(QSlider(Qt.Orientation.Horizontal))
         self.y_slider.setRange(round(CAPTION_Y_MIN * 100), round(CAPTION_Y_MAX * 100))
         self.y_slider.setSingleStep(1)
         self.y_slider.setPageStep(5)
@@ -532,7 +533,7 @@ class CaptionLibrary(QWidget):
         self.safe_area_check.setToolTip(
             "Overlays conservative platform UI bounds in preview only (never exported)."
         )
-        self.safe_platform_combo = QComboBox()
+        self.safe_platform_combo = protect_from_wheel(QComboBox())
         self.safe_platform_combo.setAccessibleName("Platform safe area preset")
         for key, safe in PLATFORM_SAFE_AREAS.items():
             self.safe_platform_combo.addItem(f"Guide: {safe.label}", key)

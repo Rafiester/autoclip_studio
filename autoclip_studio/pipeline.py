@@ -19,6 +19,7 @@ from .models import ProjectOptions, RenderedClip, Transcript
 from .paths import CACHE_DIR, OUTPUT_DIR
 from .performance import HardwareMonitor, resolve_profile_limits
 from .process import CancelledError, PausedError, ProcessManager
+from .project_naming import allocate_project_output_dir, derive_project_name
 from .providers import AIProvider, ProviderError
 from .rendering import render_clip, source_dimensions
 from .subtitles import parse_srt_file
@@ -75,11 +76,11 @@ class Pipeline:
                 limits.whisper_batch_size, limits.tracking_sample_interval,
             )
             job_dir.mkdir(parents=True, exist_ok=True)
+            youtube_source = is_youtube_url(options.source)
             if resume_analysis:
                 source, dimensions, transcript = _load_analysis(checkpoint)
                 yt_meta_obj = _metadata_from_options(options)
             else:
-                youtube_source = is_youtube_url(options.source)
                 yt_meta_obj = _metadata_from_options(options)
                 vid_id = youtube_id(options.source) if youtube_source else None
                 if youtube_source and vid_id and yt_meta_obj is None and (
@@ -197,8 +198,12 @@ class Pipeline:
             analysis_pending = False
             if not highlights:
                 raise RuntimeError("No usable highlights were found. Try shorter minimum duration or another video.")
-            project_output = self._output_root(options) / project_id
-            project_output.mkdir(parents=True, exist_ok=True)
+            resolved_dir_label = options.project_name.strip() or derive_project_name(
+                options.source,
+                youtube_title=yt_meta_obj.title if yt_meta_obj else "",
+                local_name=source.stem if not youtube_source else "",
+            )
+            project_output = allocate_project_output_dir(self._output_root(options), resolved_dir_label, project_id)
             if speech.export_srt:
                 export_transcript(transcript, project_output)
             rendered: list[RenderedClip] = []

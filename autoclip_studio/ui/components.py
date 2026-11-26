@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from .icons import lucide_icon
+from .style import WheelScrollGuard, configure_form_layout, configure_input, install_global_wheel_protection, protect_from_wheel
 from .theme import SPACING, theme_manager
 
 ButtonVariant = Literal["primary", "secondary", "ghost", "destructive", "subtle"]
@@ -87,6 +88,7 @@ def make_button(
     parent: QWidget | None = None,
 ) -> QPushButton:
     """Create a standardized button following global height, padding, icon alignment, and theme tokens."""
+    install_global_wheel_protection()
     btn = QPushButton(text, parent)
     obj_name = _VARIANT_OBJECT_NAME.get(variant, "")
     if obj_name:

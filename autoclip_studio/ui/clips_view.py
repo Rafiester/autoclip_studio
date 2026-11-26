@@ -15,6 +15,7 @@ from ..thumbnails import (
     ThumbnailResult, export_thumbnail, extract_frame_at,
     generate_clip_thumbnail, max_thumbnail_workers,
 )
+from .style import protect_from_wheel
 
 
 def _format_duration(seconds: float) -> str:
@@ -106,7 +107,7 @@ class FramePickerDialog(QDialog):
         layout.addWidget(self.preview, 1)
 
         slider_row = QHBoxLayout()
-        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider = protect_from_wheel(QSlider(Qt.Orientation.Horizontal))
         self.slider.setRange(0, max(1, int(round(self.duration * 20))))
         self.slider.setValue(int(round(self.selected_timestamp * 20)))
         self.time_label = QLabel(f"{self.selected_timestamp:.2f}s / {self.duration:.2f}s", objectName="muted")

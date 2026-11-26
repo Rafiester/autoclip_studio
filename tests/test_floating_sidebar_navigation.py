@@ -34,11 +34,15 @@ def test_floating_sidebar_hierarchy_collapse_routing_and_persistence(tmp_path: P
 
         # 1. Exact primary & Settings child hierarchy, clean footer, zero sidebar theme bar or tagline
         assert [r.label for r in PRIMARY_NAV_ROUTES] == [
-            "Dashboard", "New Project", "Processing Queue", "Generated Clips", "Caption Templates",
+            "Project", "Processing Queue", "Generated Clips", "Caption Templates",
         ]
         assert [r.label for r in SETTINGS_CHILD_ROUTES] == [
             "General", "Appearance", "AI Providers", "Transcription", "Performance", "Dependencies",
         ]
+        # Application launches directly into Project (no Dashboard route)
+        assert win1.stack.currentIndex() == win1.PAGE_PROJECT
+        assert win1.sidebar.primary_buttons["project"].isChecked() is True
+        assert "dashboard" not in win1.sidebar.primary_buttons
         assert "Version" in win1.sidebar.version_label.text()
         assert "Local-first" not in win1.sidebar.version_label.text()
         # No theme switcher inside sidebar; all 3 ThemePreviewCards live in Settings > Appearance
@@ -48,7 +52,7 @@ def test_floating_sidebar_hierarchy_collapse_routing_and_persistence(tmp_path: P
             assert isinstance(card, ThemePreviewCard)
 
         # 2. Expanded -> Collapsed expands main content width and preserves active page
-        win1.show_page(2)
+        win1.show_page(win1.PAGE_QUEUE)
         app.processEvents()
         expanded_content_w = win1.stack.width()
         assert win1.sidebar.width() == win1.sidebar.EXPANDED_WIDTH
@@ -57,7 +61,7 @@ def test_floating_sidebar_hierarchy_collapse_routing_and_persistence(tmp_path: P
         assert win1.sidebar.collapsed is True
         assert win1.sidebar.width() == win1.sidebar.COLLAPSED_WIDTH
         assert win1.stack.width() > expanded_content_w
-        assert win1.stack.currentIndex() == 2
+        assert win1.stack.currentIndex() == win1.PAGE_QUEUE
         assert win1.sidebar.primary_buttons["queue"].toolTip() == "Processing Queue"
         assert win1.sidebar_compact_check.isChecked() is True
 
@@ -67,10 +71,16 @@ def test_floating_sidebar_hierarchy_collapse_routing_and_persistence(tmp_path: P
         assert win1.sidebar.collapsed is False
         assert win1.sidebar_compact_check.isChecked() is False
 
+        # Legacy Dashboard / New Project routes redirect cleanly to Project (0)
+        win1.show_route("Dashboard")
+        assert win1.stack.currentIndex() == win1.PAGE_PROJECT
+        win1.show_route("New Project")
+        assert win1.stack.currentIndex() == win1.PAGE_PROJECT
+
         # 3. Expandable Settings & parent-child active association
         win1.show_route("Settings")
         app.processEvents()
-        assert win1.stack.currentIndex() == 9  # Settings > General
+        assert win1.stack.currentIndex() == win1.PAGE_GENERAL  # Settings > General
         assert win1.sidebar.settings_expanded is True
         assert win1.sidebar.settings_tree.isVisible() is True
         assert win1.sidebar.settings_button.is_visually_active() is True
@@ -79,18 +89,18 @@ def test_floating_sidebar_hierarchy_collapse_routing_and_persistence(tmp_path: P
 
         # 4. Legacy route redirects resolve to exact relocated pages
         win1.show_route("AI Provider Settings")
-        assert win1.stack.currentIndex() == 5
+        assert win1.stack.currentIndex() == win1.PAGE_AI_PROVIDERS
         win1.show_route("Speech-to-Text")
-        assert win1.stack.currentIndex() == 6
+        assert win1.stack.currentIndex() == win1.PAGE_TRANSCRIPTION
         win1.show_route("Performance")
-        assert win1.stack.currentIndex() == 7
+        assert win1.stack.currentIndex() == win1.PAGE_PERFORMANCE
         win1.show_route("Dependencies")
-        assert win1.stack.currentIndex() == 8
+        assert win1.stack.currentIndex() == win1.PAGE_DEPENDENCIES
 
         # 5. Settings > Appearance switches theme immediately and persists
         win1.show_route("settings.appearance")
         app.processEvents()
-        assert win1.stack.currentIndex() == 10
+        assert win1.stack.currentIndex() == win1.PAGE_APPEARANCE
         win1.appearance_buttons["light"].click()
         app.processEvents()
         assert win1._theme.resolved == "light"

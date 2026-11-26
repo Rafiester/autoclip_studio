@@ -111,7 +111,7 @@ def _setup_window(monkeypatch, tmp_path, *, projects_seed=None):
         projects_seed(db)
     window = MainWindow()
     window.show()
-    window.show_page(2)
+    window.show_page(window.PAGE_QUEUE)
     return window, db, settings
 
 
@@ -228,18 +228,17 @@ def test_queuing_pause_resume_and_sequential_dispatch(app, monkeypatch, tmp_path
     started = []
     monkeypatch.setattr(window, "_start_worker", lambda pid, opts, **kw: started.append((pid, opts.project_name)))
 
-    # Simulate an active worker while user submits a new project from New Project page
+    # Simulate an active worker while user submits a new project from Project page
     window.worker_thread = object()
-    window.show_page(1)
+    window.show_page(window.PAGE_PROJECT)
     window.source_stack.setCurrentIndex(1)
     window.local_source_input.setText(str(media_file))
-    window.project_name.setText("Queued Background Job")
     window.generate()
 
     assert started == []
     queued = db.next_queued_project()
     assert queued is not None
-    assert json.loads(queued["options"])["project_name"] == "Queued Background Job"
+    assert json.loads(queued["options"])["project_name"] == "video"
 
     # Pause blocks dispatch, Resume triggers next queued project once worker clears
     window.worker_thread = None
@@ -249,7 +248,7 @@ def test_queuing_pause_resume_and_sequential_dispatch(app, monkeypatch, tmp_path
 
     window.toggle_queue_paused(False)
     assert len(started) == 1
-    assert started[0] == (queued["id"], "Queued Background Job")
+    assert started[0] == (queued["id"], "video")
 
     # Contextual queue actions: cancel queued + remove from history without deleting media
     q2 = db.create_project(str(media_file), asdict(ProjectOptions(str(media_file), project_name="Cancelable Job")))

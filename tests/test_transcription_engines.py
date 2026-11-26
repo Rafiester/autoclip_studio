@@ -117,13 +117,13 @@ def test_speech_settings_and_progress_ui(monkeypatch, tmp_path):
     monkeypatch.setattr("autoclip_studio.gui.Database", lambda: Database(tmp_path / "projects.db"))
     window = MainWindow()
     window.show()
-    window.show_page(6)
+    window.show_page(window.PAGE_TRANSCRIPTION)
     window.speech_settings.model.setCurrentText("large-v3-turbo")
     window.speech_settings.language.setText("id")
     window.speech_settings.save()
     assert settings.speech().language == "id"
     assert window.whisper_model.currentText() == "large-v3-turbo"
-    window.show_page(2)
+    window.show_page(window.PAGE_QUEUE)
     window.on_progress(12, "Transcribing")
     window.on_speech_progress(SpeechProgress("Loading model", "Python", "small", "cpu", "int8", 1, duration=80))
     assert window.speech_progress.percent.text() == "—"

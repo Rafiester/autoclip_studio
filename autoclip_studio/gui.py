@@ -16,9 +16,9 @@ from PySide6.QtCore import QFileInfo, QSignalBlocker, QSize, QThread, Qt, QUrl, 
 from PySide6.QtGui import QCloseEvent, QDesktopServices, QIcon, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFileDialog, QFileIconProvider, QFormLayout, QFrame, QGridLayout,
-    QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
+    QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
     QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox,
-    QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QSplitter, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from .captions import TEMPLATE_DEFAULT, TEMPLATES
@@ -31,6 +31,7 @@ from .media import DownloadProgress, is_youtube_url, youtube_id, youtube_source_
 from .models import ProjectOptions
 from .paths import APP_ROOT, CACHE_DIR, OUTPUT_DIR, asset_path, ensure_directories
 from .pipeline import Pipeline
+from .project_naming import derive_project_name, resolve_existing_project_output_dir
 from .providers import AIProvider, ProviderError
 from .smart_reframe import REFRAME_MODES, REFRAME_STYLES
 from .speech_engine import MODELS
@@ -55,15 +56,29 @@ from .ui.sidebar import (
     ALL_ROUTES_BY_INDEX, ALL_ROUTES_BY_KEY, LEGACY_ROUTE_ALIASES, FloatingSidebar, ThemePreviewCard,
 )
 from .ui.speech_view import SpeechProgressView, SpeechSettingsView
-from .ui.style import STYLESHEET, SectionCard, configure_form_layout, configure_input, theme_manager
+from .ui.style import (
+    STYLESHEET, SectionCard, configure_form_layout, configure_input,
+    install_global_wheel_protection, protect_from_wheel, theme_manager,
+)
 from .ui.youtube_preview import YouTubePreview
 from .worker import FunctionThread, PipelineWorker
 from .youtube_metadata import YouTubeMetadata
 
 
 class MainWindow(QMainWindow):
+    PAGE_PROJECT = 0
+    PAGE_QUEUE = 1
+    PAGE_CLIPS = 2
+    PAGE_TEMPLATES = 3
+    PAGE_AI_PROVIDERS = 4
+    PAGE_TRANSCRIPTION = 5
+    PAGE_PERFORMANCE = 6
+    PAGE_DEPENDENCIES = 7
+    PAGE_GENERAL = 8
+    PAGE_APPEARANCE = 9
+
     NAV_ITEMS = [
-        "Dashboard", "New Project", "Processing Queue", "Generated Clips", "Caption Templates",
+        "Project", "Processing Queue", "Generated Clips", "Caption Templates",
         "AI Providers", "Transcription", "Performance", "Dependencies", "General", "Appearance",
     ]
 
@@ -105,6 +120,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(760, 560)
         self._theme = theme_manager()
         self._theme.apply(str(self.settings.data.get("appearance") or "dark"))
+        install_global_wheel_protection()
         self._build_ui()
         self._hydrating_ui = False
         self._theme.theme_changed.connect(self._on_theme_changed)
@@ -138,22 +154,21 @@ class MainWindow(QMainWindow):
         gutter_layout.addWidget(self.sidebar)
 
         self.stack = QStackedWidget()
-        self.stack.addWidget(self._dashboard_page())                     # 0: dashboard
-        self.stack.addWidget(self._new_project_page())                   # 1: new_project
-        self.stack.addWidget(self._queue_page())                         # 2: queue
-        self.stack.addWidget(self._clips_page())                         # 3: clips
-        self.stack.addWidget(self._templates_page())                     # 4: templates
-        self.stack.addWidget(self._scroll_page(self._settings_page()))   # 5: settings.ai_providers
-        self.stack.addWidget(self._scroll_page(self._speech_settings_page()))  # 6: settings.transcription
-        self.stack.addWidget(self._scroll_page(self._performance_page()))      # 7: settings.performance
-        self.stack.addWidget(self._scroll_page(self._dependencies_page()))     # 8: settings.dependencies
-        self.stack.addWidget(self._scroll_page(self._general_settings_page())) # 9: settings.general
-        self.stack.addWidget(self._scroll_page(self._appearance_settings_page()))  # 10: settings.appearance
+        self.stack.addWidget(self._project_page())                             # 0: project
+        self.stack.addWidget(self._queue_page())                               # 1: queue
+        self.stack.addWidget(self._clips_page())                               # 2: clips
+        self.stack.addWidget(self._templates_page())                           # 3: templates
+        self.stack.addWidget(self._scroll_page(self._settings_page()))         # 4: settings.ai_providers
+        self.stack.addWidget(self._scroll_page(self._speech_settings_page()))  # 5: settings.transcription
+        self.stack.addWidget(self._scroll_page(self._performance_page()))      # 6: settings.performance
+        self.stack.addWidget(self._scroll_page(self._dependencies_page()))     # 7: settings.dependencies
+        self.stack.addWidget(self._scroll_page(self._general_settings_page())) # 8: settings.general
+        self.stack.addWidget(self._scroll_page(self._appearance_settings_page()))  # 9: settings.appearance
 
         layout.addWidget(sidebar_gutter)
         layout.addWidget(self.stack, 1)
         self.setCentralWidget(root)
-        self.show_page(0)
+        self.show_page(self.PAGE_PROJECT)
 
     def _on_sidebar_collapsed_changed(self, collapsed: bool) -> None:
         if hasattr(self, "sidebar_compact_check"):
@@ -231,50 +246,8 @@ class MainWindow(QMainWindow):
         scroll.setWidget(content)
         return scroll
 
-    def _dashboard_page(self) -> QWidget:
-        outer, page = self._page("Dashboard", "Your local short-form production workspace")
-        metrics = QHBoxLayout()
-        metrics.setSpacing(12)
-        self.metric_projects = self._metric_card("Projects", "0")
-        self.metric_clips = self._metric_card("Generated clips", "0")
-        self.metric_active = self._metric_card("Queue status", "Idle")
-        for card in (self.metric_projects, self.metric_clips, self.metric_active):
-            metrics.addWidget(card, 1)
-        page.addLayout(metrics)
-        action_card = QFrame(objectName="card")
-        action_layout = QVBoxLayout(action_card)
-        action_layout.setContentsMargins(20, 18, 20, 18)
-        action_layout.setSpacing(10)
-        action_title = self._wrapping_label("Create polished vertical clips from any long video", object_name="sectionTitle")
-        action_layout.addWidget(action_title)
-        action_layout.addWidget(self._wrapping_label(
-            "Import locally or paste a YouTube link. Transcription, selection, framing, captions, and rendering run in one workflow.",
-            object_name="muted",
-        ))
-        new_button = QPushButton("Start a new project", objectName="primary")
-        new_button.clicked.connect(lambda: self.show_page(1))
-        action_layout.addWidget(new_button, alignment=Qt.AlignmentFlag.AlignLeft)
-        page.addWidget(action_card)
-        page.addWidget(QLabel("Recent projects", objectName="sectionTitle"))
-        self.recent_table = self._table(["Project", "Status", "Progress", "Created"])
-        header = self.recent_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for col in (1, 2, 3):
-            header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
-        page.addWidget(self.recent_table, 1)
-        return outer
-
-    def _metric_card(self, label: str, value: str) -> QFrame:
-        card = QFrame(objectName="card")
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(20, 16, 20, 16)
-        layout.addWidget(self._wrapping_label(label, object_name="muted"))
-        value_label = QLabel(value, objectName="metricValue")
-        layout.addWidget(value_label)
-        return card
-
-    def _new_project_page(self) -> QWidget:
-        outer, page = self._page("New Project", "Choose a source and configure your shorts")
+    def _project_page(self) -> QWidget:
+        outer, page = self._page("Project", "Choose a source and configure your shorts")
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -345,7 +318,6 @@ class MainWindow(QMainWindow):
         self.local_source_input.textChanged.connect(self._on_local_text_changed)
         local_layout.addWidget(self.local_source_input)
         self.local_preview = LocalVideoPreview()
-        self.local_preview.metadata_changed.connect(self._update_local_project_name)
         self.local_preview.replace_requested.connect(self.browse_source)
         self.local_preview.remove_requested.connect(lambda: self._set_local_source(""))
         self.local_preview.idle.connect(self._finish_close)
@@ -372,7 +344,7 @@ class MainWindow(QMainWindow):
         self.srt_input.textChanged.connect(self._validate_srt_inputs)
         srt_browse = QPushButton("Browse .srt")
         srt_browse.clicked.connect(self.browse_srt)
-        self.srt_offset = QDoubleSpinBox()
+        self.srt_offset = protect_from_wheel(QDoubleSpinBox())
         self.srt_offset.setRange(-60.0, 60.0)
         self.srt_offset.setSingleStep(0.25)
         self.srt_offset.setDecimals(2)
@@ -391,13 +363,6 @@ class MainWindow(QMainWindow):
         self._srt_error: str = ""
         self.srt_panel.hide()
         source_layout.addWidget(self.srt_panel)
-
-        name_row = configure_form_layout(QFormLayout())
-        self.project_name = configure_input(QLineEdit(placeholderText="Optional project name"))
-        self._auto_project_name = ""
-        name_row.addRow("Project name", self.project_name)
-        name_row.labelForField(self.project_name).setObjectName("projectNameLabel")
-        source_layout.addLayout(name_row)
         form.addWidget(source_group)
         proj_defaults = self.settings.project_defaults()
         settings_group = SectionCard("Clip settings")
@@ -535,7 +500,7 @@ class MainWindow(QMainWindow):
         page.addWidget(self.queue_overview)
 
         self.active_job_card = ActiveJobCard(self.cancel_processing, self.pause_processing)
-        self.active_job_card.new_project_requested.connect(lambda: self.show_page(1))
+        self.active_job_card.new_project_requested.connect(lambda: self.show_page(self.PAGE_PROJECT))
         page.addWidget(self.active_job_card)
 
         self.processing_status_row = self.active_job_card.processing_status_row
@@ -617,7 +582,7 @@ class MainWindow(QMainWindow):
         self.caption_library = CaptionLibrary(
             self.default_template(),
             self.choose_template,
-            lambda: self.show_page(1),
+            lambda: self.show_page(self.PAGE_PROJECT),
             sync_mode=sync_mode,
             offset_ms=offset_ms,
             on_timing_changed=self._on_caption_timing_changed,
@@ -799,16 +764,7 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _spin(minimum: int, maximum: int, value: int, suffix: str = "") -> QSpinBox:
         widget = QSpinBox(); widget.setRange(minimum, maximum); widget.setValue(value); widget.setSuffix(suffix)
-        return widget
-
-    @staticmethod
-    def _table(headers: list[str]) -> QTableWidget:
-        table = QTableWidget(0, len(headers)); table.setHorizontalHeaderLabels(headers)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        table.setAlternatingRowColors(True); table.verticalHeader().setVisible(False)
-        return table
+        return protect_from_wheel(widget)
 
     def _performance_page(self) -> QWidget:
         outer, page = self._page("Performance", "Adaptive resource profiles, thermal protection, and live hardware telemetry")
@@ -853,12 +809,12 @@ class MainWindow(QMainWindow):
         if isinstance(index, str):
             self.show_route(index)
             return
-        if self.stack.currentIndex() == 3 and index != 3 and hasattr(self, "clip_detail"):
+        if self.stack.currentIndex() == self.PAGE_CLIPS and index != self.PAGE_CLIPS and hasattr(self, "clip_detail"):
             self.clip_detail.release_media()
-        if self.stack.currentIndex() == 4 and index != 4:
+        if self.stack.currentIndex() == self.PAGE_TEMPLATES and index != self.PAGE_TEMPLATES:
             self.caption_library.stop()
         if hasattr(self, "performance_view"):
-            self.performance_view.set_polling(index == 7)
+            self.performance_view.set_polling(index == self.PAGE_PERFORMANCE)
         self.stack.setCurrentIndex(index)
         spec = ALL_ROUTES_BY_INDEX.get(index)
         if spec is not None and hasattr(self, "sidebar"):
@@ -868,12 +824,12 @@ class MainWindow(QMainWindow):
         else:
             for button_index, button in enumerate(self.nav_buttons):
                 button.setChecked(button_index == index)
-        if index in {0, 2, 3}:
+        if index in {self.PAGE_PROJECT, self.PAGE_QUEUE, self.PAGE_CLIPS}:
             self.refresh_all()
-            if index == 3 and hasattr(self, "clips_library"):
+            if index == self.PAGE_CLIPS and hasattr(self, "clips_library"):
                 self.clips_library.refresh_file_availability()
                 self.preview_selected()
-        elif index == 9:
+        elif index == self.PAGE_GENERAL:
             self._refresh_cache_footprint()
 
     def set_source_tab(self, index: int) -> None:
@@ -906,13 +862,6 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_local_text_changed(self, text: str) -> None:
         self.local_preview.set_file(text)
-
-    @Slot(object)
-    def _update_local_project_name(self, metadata: LocalVideoMetadata | None) -> None:
-        suggestion = metadata.path.stem if metadata else ""
-        if self.project_name.text() in ("", self._auto_project_name):
-            self.project_name.setText(suggestion)
-        self._auto_project_name = suggestion
 
     def _toggle_srt_panel(self, checked: bool) -> None:
         self.srt_panel.setVisible(checked)
@@ -1001,10 +950,6 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _update_project_name(self, metadata: YouTubeMetadata | None) -> None:
         self._latest_youtube_metadata = metadata
-        suggestion = metadata.title if metadata else ""
-        if self.project_name.text() in ("", self._auto_project_name):
-            self.project_name.setText(suggestion)
-        self._auto_project_name = suggestion
         if metadata is None:
             self.heatmap_widget.clear()
             self.yt_subtitles_hint.hide()
@@ -1073,7 +1018,11 @@ class MainWindow(QMainWindow):
         if metadata and (not youtube or metadata.video_id != youtube_id(source)):
             metadata = None
         local_meta = self.local_preview.result if using_local else None
-        default_name = (metadata.title if metadata else (local_meta.path.stem if local_meta else (Path(source).stem if not youtube else "")))
+        auto_project_name = derive_project_name(
+            source,
+            youtube_title=metadata.title if metadata else "",
+            local_name=local_meta.path.stem if local_meta else "",
+        )
         reframe_mode = str(self.reframe_combo.currentData() or "auto")
         reframe_style = str(self.reframe_style_combo.currentData() or "natural")
         provider_name = self.project_provider.currentText()
@@ -1102,7 +1051,7 @@ class MainWindow(QMainWindow):
             cache_enabled=self.cache.isChecked(), whisper_model=self.whisper_model.currentText(),
             whisper_device=self.whisper_device.currentText(), language=self.settings.speech().language or None,
             output_dir=self.settings.data.get("output_dir", ""),
-            project_name=self.project_name.text().strip() or default_name,
+            project_name=auto_project_name,
             youtube_metadata=asdict(metadata) if metadata else None,
             srt_path=srt_path,
             srt_offset_seconds=srt_offset,
@@ -1117,7 +1066,7 @@ class MainWindow(QMainWindow):
             reason = "queue paused" if self.queue_paused else "added to queue"
             self._log("INFO", f"Queued project {options.project_name or project_id} ({reason}).")
             self.refresh_all()
-            self.show_page(2)
+            self.show_page(self.PAGE_QUEUE)
             return
         self._start_worker(project_id, options)
 
@@ -1171,7 +1120,7 @@ class MainWindow(QMainWindow):
         )
         self.show_speech(False)
         self.show_download(not resume_analysis and is_youtube_url(options.source))
-        self.worker_thread.start(); self.show_page(2)
+        self.worker_thread.start(); self.show_page(self.PAGE_QUEUE)
         self.refresh_all()
 
     def _selected_project(self) -> dict | None:
@@ -1236,9 +1185,14 @@ class MainWindow(QMainWindow):
             options = {}
         custom_root = str(options.get("output_dir") or "").strip() if isinstance(options, dict) else ""
         root = Path(custom_root) if custom_root else OUTPUT_DIR
-        folder = root / str(project["id"])
-        if folder.exists():
-            return folder
+        project_id = str(project["id"])
+        clip_paths = [
+            c.get("path", "") for c in (self.clip_rows or self.database.clips())
+            if str(c.get("project_id") or "") == project_id
+        ]
+        found = resolve_existing_project_output_dir(root, project_id, clip_paths=clip_paths)
+        if found is not None:
+            return found
         source = str(project.get("source") or "").strip()
         if source and not is_youtube_url(source):
             src_parent = Path(source).parent
@@ -1261,7 +1215,7 @@ class MainWindow(QMainWindow):
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
         elif action == "view_clips":
             clips = [c for c in (self.clip_rows or self.database.clips()) if str(c.get("project_id") or "") == project_id]
-            self.show_page(3)
+            self.show_page(self.PAGE_CLIPS)
             if hasattr(self, "clips_library"):
                 self.clips_library.filter_by_project(project_id, project_display_name(project))
                 if clips:
@@ -1448,7 +1402,6 @@ class MainWindow(QMainWindow):
             self.show_speech(False)
         self.active_job_card.update_stage(value, message)
         self._log("INFO", message)
-        self.metric_active.findChild(QLabel, "metricValue").setText(f"{value}%")
         self._refresh_queue_overview(message)
 
     def on_completed(self, project_id: str, count: int) -> None:
@@ -1490,7 +1443,7 @@ class MainWindow(QMainWindow):
         projects = self.project_rows or self.database.projects()
         project = next((p for p in projects if str(p["id"]) == str(project_id)), None)
         clips = [c for c in (self.clip_rows or self.database.clips()) if str(c.get("project_id") or "") == str(project_id)]
-        self.show_page(3)
+        self.show_page(self.PAGE_CLIPS)
         if hasattr(self, "clips_library"):
             self.clips_library.filter_by_project(str(project_id), project_display_name(project) if project else "")
             if clips:
@@ -1502,7 +1455,6 @@ class MainWindow(QMainWindow):
         self.refresh_all()
         self.active_job_card.mark_finished("paused", message)
         self._log("INFO", f"{message} (job {project_id}). Click Resume Download to continue.")
-        self.metric_active.findChild(QLabel, "metricValue").setText("Paused")
 
     def on_failed(self, project_id: str, message: str) -> None:
         self.show_download(False)
@@ -1527,11 +1479,6 @@ class MainWindow(QMainWindow):
         )
         self.active_job_card.mark_finished(card_status, display_msg)
         self._log("WARNING" if (cancelled or rate_limited or auth_required) else "ERROR", message)
-        state = (
-            "Cancelled" if cancelled
-            else ("Rate Limited" if rate_limited else ("Auth Required" if auth_required else "Error"))
-        )
-        self.metric_active.findChild(QLabel, "metricValue").setText(state)
         if not cancelled and not retryable and not self.closing:
             low = message.lower()
             needs_deps = (not rate_limited and not auth_required) and any(
@@ -1568,7 +1515,6 @@ class MainWindow(QMainWindow):
         started_next = self.dispatch_next_queued_job()
         if not started_next:
             self.active_job_card.show_idle()
-            self.metric_active.findChild(QLabel, "metricValue").setText("Paused" if self.queue_paused else "Idle")
         self._update_retry_button()
         self._refresh_queue_overview()
         self._finish_close()
@@ -1579,12 +1525,10 @@ class MainWindow(QMainWindow):
         clips_changed = clips != self.clip_rows
         if projects_changed or clips_changed:
             selected_project = self._selected_project()
-            self._fill_projects(self.recent_table, projects[:8], compact=True)
             with QSignalBlocker(self.queue_panel):
                 self.queue_panel.set_data(projects, clips)
                 if selected_project:
                     self.queue_panel.select_project(str(selected_project["id"]))
-            self.metric_projects.findChild(QLabel, "metricValue").setText(str(self.database.project_count()))
             self.project_rows = projects
             self._update_retry_button()
             self._refresh_queue_overview()
@@ -1602,35 +1546,14 @@ class MainWindow(QMainWindow):
                 )
             if self.thumb_runner.is_busy(clip["id"]):
                 busy_ids.add(str(clip["id"]))
-        on_clips_page = hasattr(self, "stack") and self.stack.currentIndex() == 3
+        on_clips_page = hasattr(self, "stack") and self.stack.currentIndex() == self.PAGE_CLIPS
         with QSignalBlocker(self.clips_library):
             self.clips_library.set_clips(clips, busy_ids=busy_ids)
-        self.metric_clips.findChild(QLabel, "metricValue").setText(str(self.database.clip_count()))
         self.clip_rows = clips
         if on_clips_page:
             self.preview_selected()
         elif hasattr(self, "clip_detail") and not self.clip_detail.player.source().isEmpty():
             self.clip_detail.release_media()
-
-    def _fill_projects(self, table: QTableWidget, projects: list[dict], compact: bool) -> None:
-        table.setRowCount(len(projects))
-        for row, project in enumerate(projects):
-            source = Path(project["source"]).name if not is_youtube_url(project["source"]) else project["source"]
-            try:
-                options = json.loads(project["options"])
-            except (TypeError, ValueError):
-                options = {}
-            name = (options.get("project_name") if isinstance(options, dict) else None) or source
-            status = "AI analysis failed" if project["status"] == "analysis_failed" else project["status"]
-            detail = (project["created_at"][:16].replace("T", " ") if compact else redact(project["error"]))
-            values = [redact(str(name)), status, f"{project['progress']}%", detail.partition("\n")[0]]
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                if column == 0:
-                    item.setToolTip(redact(source))
-                if column == 0 and not compact:
-                    item.setData(Qt.ItemDataRole.UserRole, project)
-                table.setItem(row, column, item)
 
     @Slot(dict)
     def _on_clip_selected(self, clip: dict) -> None:
@@ -2294,6 +2217,7 @@ def run() -> int:
     app.setApplicationName("AutoClip Studio")
     app.setApplicationDisplayName("AutoClip Studio")
     app.setOrganizationName("AutoClip")
+    install_global_wheel_protection(app)
     icon_path = asset_path("autoclip.icns" if sys.platform == "darwin" else "autoclip.ico")
     symbol_path = asset_path("symbol.png")
     launcher = APP_ROOT / "AutoClipStudio.exe"

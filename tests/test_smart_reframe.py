@@ -232,7 +232,7 @@ def test_new_project_smart_reframe_selector_ui(tmp_path: Path, monkeypatch) -> N
     win = MainWindow()
     try:
         win.show()
-        win.show_page(1)
+        win.show_page(win.PAGE_PROJECT)
         assert win.reframe_combo.currentData() == "auto"
         codes = [win.reframe_combo.itemData(i) for i in range(win.reframe_combo.count())]
         assert codes == ["auto", "active_speaker", "split_screen", "single_subject", "fit_original", "off"]

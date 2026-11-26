@@ -127,11 +127,12 @@ def test_new_project_preview_debounce_stale_results_retry_and_creation(monkeypat
     window = MainWindow()
     window.resize(760, 560)
     window.show()
-    window.show_page(1)
+    window.show_page(window.PAGE_PROJECT)
     view = window.youtube_preview
     submitted = []
     monkeypatch.setattr(window, "_start_worker", lambda project_id, options: submitted.append(options))
     try:
+        assert not hasattr(window, "project_name")
         window.source_input.setText("https://www.youtube.com/playlist?list=PL123")
         assert "Playlist links" in view.status.text()
         window.source_input.setText(youtube_watch_url(OTHER))
@@ -147,26 +148,22 @@ def test_new_project_preview_debounce_stale_results_retry_and_creation(monkeypat
         release.set()
         _wait_for(view.retry.isVisible)
         assert "Could not reach YouTube" in view.status.text()
-        assert not window.project_name.text()
         view.retry.click()
         _wait_for(lambda: view.result is not None)
         assert "Video detected" in view.status.text()
         assert view.thumbnail.clock == "01:24:36"
         assert "1h 24m 36s" in view.stats.text()
         assert "1,234 views" in view.additional.text()
-        assert window.project_name.text() == "New video title"
         assert not db.projects()
-        window.project_name.setText("My custom project")
         window.source_input.setText(f"{youtube_watch_url(OTHER)}&list=PL123")
         assert len(calls) == 3
         window.generate()
         assert len(submitted) == 1
-        assert submitted[0].project_name == "My custom project"
+        assert submitted[0].project_name == "New video title"
         assert submitted[0].youtube_metadata["video_id"] == OTHER
-        assert json.loads(db.projects()[0]["options"])["project_name"] == "My custom project"
+        assert json.loads(db.projects()[0]["options"])["project_name"] == "New video title"
         window.source_input.setText(str(tmp_path / "local.mp4"))
         assert view.result is None and not view.isVisible()
-        assert window.project_name.text() == "My custom project"
     finally:
         release.set()
         window.close()

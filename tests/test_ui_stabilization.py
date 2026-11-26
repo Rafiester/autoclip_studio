@@ -99,12 +99,12 @@ def test_unified_controls_active_job_single_cancel_and_small_window_stability(tm
     try:
         win.resize(1280, 860)
         win.show()
-        win.show_page(1)
+        win.show_page(win.PAGE_PROJECT)
         app.processEvents()
 
         # Unified control heights across LineEdit, ComboBox, SpinBox, and Buttons (within 2px tolerance)
         heights = {
-            win.project_name.height(),
+            win.source_input.height(),
             win.reframe_combo.height(),
             win.reframe_style_combo.height(),
             win.generate_button.height(),
@@ -119,7 +119,7 @@ def test_unified_controls_active_job_single_cancel_and_small_window_stability(tm
         )
 
         # Processing Queue: single contextual Cancel CTA (no duplicate visible inner cancel button!)
-        win.show_page(2)
+        win.show_page(win.PAGE_QUEUE)
         win.active_job_card.start_job(
             {"id": pid, "source": "https://www.youtube.com/watch?v=dSq0Z5XpoLc", "options": {"project_name": "Podcast"}},
             options_dict={"source": "https://www.youtube.com/watch?v=dSq0Z5XpoLc"},
@@ -153,7 +153,7 @@ def test_unified_controls_active_job_single_cancel_and_small_window_stability(tm
         assert win.active_job_card.stage_box.height() >= 90
 
         # Generated Clips at small window (920x680) has zero horizontal scroll & non-overlapping transport
-        win.show_page(3)
+        win.show_page(win.PAGE_CLIPS)
         theme_manager().apply("light")
         app.processEvents()
         assert win.clips_library.scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff

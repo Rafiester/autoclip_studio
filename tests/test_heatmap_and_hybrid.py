@@ -179,7 +179,7 @@ def test_ui_heatmap_mode_fallback_and_clip_score_breakdown(tmp_path: Path, monke
     win = MainWindow()
     try:
         win.show()
-        win.show_page(1)
+        win.show_page(win.PAGE_PROJECT)
 
         # YouTube metadata WITH heatmap -> defaults to Hybrid
         meta_with_hm = YouTubeMetadata(
@@ -214,7 +214,7 @@ def test_ui_heatmap_mode_fallback_and_clip_score_breakdown(tmp_path: Path, monke
         assert "local video" in win.highlight_mode_note.text().lower()
 
         # Generated Clips detail panel shows Combined, AI, Replay scores & selection reason
-        win.show_page(3)
+        win.show_page(win.PAGE_CLIPS)
         clip_file = tmp_path / "sample.mp4"
         clip_file.write_bytes(b"fake")
         win.clip_detail.display_clip({

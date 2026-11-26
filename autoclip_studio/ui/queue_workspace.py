@@ -29,6 +29,7 @@ from .download_view import DownloadView
 from .icons import lucide_icon
 from .log_view import LogView
 from .speech_view import SpeechProgressView
+from .style import protect_from_wheel
 from .theme import theme_manager
 
 QUEUE_STATUS_META: dict[str, tuple[str, str, str, str]] = {
@@ -628,13 +629,12 @@ class ActiveJobCard(QFrame):
         idle_text = QVBoxLayout()
         idle_text.setSpacing(2)
         idle_title = QLabel("No active processing job", objectName="cardTitle")
-        idle_sub = QLabel("Queue a video from New Project or resume paused items below.")
+        idle_sub = QLabel("Queue a video from Project or resume paused items below.")
         idle_sub.setObjectName("muted")
         idle_sub.setWordWrap(True)
         idle_text.addWidget(idle_title)
         idle_text.addWidget(idle_sub)
-        idle_btn = QPushButton("New Project")
-        idle_btn.setObjectName("primary")
+        idle_btn = QPushButton("Open Project")
         idle_btn.clicked.connect(self.new_project_requested.emit)
         idle_lay.addWidget(self._idle_icon)
         idle_lay.addLayout(idle_text, 1)
@@ -1560,7 +1560,7 @@ class JobQueuePanel(QFrame):
         self.search_input.setMinimumWidth(0)
         self.search_input.textChanged.connect(self._rebuild_rows)
 
-        self.sort_combo = QComboBox()
+        self.sort_combo = protect_from_wheel(QComboBox())
         self.sort_combo.addItems(["Recent Activity", "Queue Order", "Newest First", "Oldest First", "Progress", "Name"])
         self.sort_combo.setMinimumWidth(130)
         self.sort_combo.currentIndexChanged.connect(self._rebuild_rows)
@@ -1805,7 +1805,7 @@ class CollapsibleLogsPanel(QFrame):
         filter_row = QHBoxLayout()
         filter_row.setContentsMargins(0, 0, 0, 0)
         filter_row.setSpacing(8)
-        self.level_combo = QComboBox()
+        self.level_combo = protect_from_wheel(QComboBox())
         self.level_combo.addItems(["All", "INFO", "SUCCESS", "WARNING", "ERROR"])
         self.level_combo.currentTextChanged.connect(self._apply_filter)
         self.search_input = QLineEdit()

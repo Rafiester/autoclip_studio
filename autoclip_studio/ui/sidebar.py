@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 from .. import __version__
 from ..paths import asset_path
 from .icons import lucide_icon
+from .style import install_global_wheel_protection
 from .theme import DARK_TOKENS, LIGHT_TOKENS, theme_manager
 
 
@@ -25,20 +26,19 @@ class NavRouteSpec:
 
 
 PRIMARY_NAV_ROUTES: tuple[NavRouteSpec, ...] = (
-    NavRouteSpec("dashboard", "Dashboard", "layout-dashboard", 0),
-    NavRouteSpec("new_project", "New Project", "square-plus", 1),
-    NavRouteSpec("queue", "Processing Queue", "list-video", 2),
-    NavRouteSpec("clips", "Generated Clips", "clapperboard", 3),
-    NavRouteSpec("templates", "Caption Templates", "captions", 4),
+    NavRouteSpec("project", "Project", "square-plus", 0),
+    NavRouteSpec("queue", "Processing Queue", "list-video", 1),
+    NavRouteSpec("clips", "Generated Clips", "clapperboard", 2),
+    NavRouteSpec("templates", "Caption Templates", "captions", 3),
 )
 
 SETTINGS_CHILD_ROUTES: tuple[NavRouteSpec, ...] = (
-    NavRouteSpec("settings.general", "General", "settings", 9),
-    NavRouteSpec("settings.appearance", "Appearance", "sun", 10),
-    NavRouteSpec("settings.ai_providers", "AI Providers", "globe", 5),
-    NavRouteSpec("settings.transcription", "Transcription", "captions", 6),
-    NavRouteSpec("settings.performance", "Performance", "clock", 7),
-    NavRouteSpec("settings.dependencies", "Dependencies", "download", 8),
+    NavRouteSpec("settings.general", "General", "settings", 8),
+    NavRouteSpec("settings.appearance", "Appearance", "sun", 9),
+    NavRouteSpec("settings.ai_providers", "AI Providers", "globe", 4),
+    NavRouteSpec("settings.transcription", "Transcription", "captions", 5),
+    NavRouteSpec("settings.performance", "Performance", "clock", 6),
+    NavRouteSpec("settings.dependencies", "Dependencies", "download", 7),
 )
 
 ALL_ROUTES_BY_KEY: dict[str, NavRouteSpec] = {
@@ -49,8 +49,10 @@ ALL_ROUTES_BY_INDEX: dict[int, NavRouteSpec] = {
 }
 
 LEGACY_ROUTE_ALIASES: dict[str, str] = {
-    "dashboard": "dashboard",
-    "new project": "new_project",
+    "dashboard": "project",
+    "new project": "project",
+    "new_project": "project",
+    "project": "project",
     "processing queue": "queue",
     "generated clips": "clips",
     "caption templates": "templates",
@@ -297,13 +299,14 @@ class FloatingSidebar(QFrame):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        install_global_wheel_protection()
         self.setObjectName("floatingSidebar")
         self._collapsed = bool(collapsed)
         self._settings_expanded = bool(settings_expanded)
         self._last_settings_route = (
             last_settings_route if last_settings_route in ALL_ROUTES_BY_KEY else "settings.general"
         )
-        self._active_route = "dashboard"
+        self._active_route = "project"
         self._resolved_theme = theme_manager().resolved
 
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)

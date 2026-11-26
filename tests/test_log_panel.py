@@ -103,7 +103,7 @@ def test_log_buttons_copy_clear_and_export_complete_redacted_log(app, monkeypatc
     monkeypatch.setattr("autoclip_studio.gui.Database", lambda: Database(tmp_path / "test.db"))
     monkeypatch.setattr("autoclip_studio.config.SettingsStore.api_key", lambda *_args: "")
     window = MainWindow()
-    window.show_page(2)
+    window.show_page(window.PAGE_QUEUE)
     buttons = {button.text(): button for button in window.findChildren(QPushButton)}
     error = "Authorization: Bearer secret-header\n" + "\n".join(f"detail {i}" for i in range(750))
     window.live_logs.add_entry("ERROR", error)
@@ -128,7 +128,7 @@ def test_provider_settings_persist_and_background_retry_keeps_gui_responsive(app
     monkeypatch.setattr("autoclip_studio.gui.SettingsStore", lambda: settings)
     monkeypatch.setattr("autoclip_studio.gui.Database", lambda: Database(tmp_path / "test.db"))
     window = MainWindow()
-    window.show_page(5)
+    window.show_page(window.PAGE_AI_PROVIDERS)
     window.settings_provider.setCurrentText("custom")
     window.auto_fallback_check.setChecked(True)
     window.fallback_models_input.setText(" model-a, model-b, model-a ")
@@ -192,7 +192,7 @@ def test_retry_button_switches_to_saved_custom_provider_and_keeps_clip_options(a
     window.save_provider()
     dispatched = []
     monkeypatch.setattr(window, "_start_worker", lambda *args, **kwargs: dispatched.append((args, kwargs)))
-    window.show_page(2)
+    window.show_page(window.PAGE_QUEUE)
     assert not window.retry_analysis_button.isEnabled()
     window.queue_panel.select_row(0)
     assert window.retry_analysis_button.isEnabled()

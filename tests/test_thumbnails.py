@@ -158,7 +158,7 @@ def test_generated_clips_ui_displays_thumbnail_and_actions(tmp_path: Path, monke
             thumbnail_timestamp=thumb2.timestamp,
             thumbnail_cache_key=thumb2.cache_key,
         )
-        window.show_page(3)
+        window.show_page(window.PAGE_CLIPS)
         app.processEvents()
 
         # Summary metrics reflect actual clip data

@@ -111,7 +111,7 @@ def test_queue_recent_activity_sorting_contextual_ctas_and_completion_popup(tmp_
     win = MainWindow()
     try:
         win.show()
-        win.show_page(2)
+        win.show_page(win.PAGE_QUEUE)
         app.processEvents()
         # No historical completion popup on startup!
         assert win._active_completion_dialog is None
@@ -137,7 +137,7 @@ def test_queue_recent_activity_sorting_contextual_ctas_and_completion_popup(tmp_
         # Primary CTA navigates to Generated Clips and filters to the completed project
         dlg.view_btn.click()
         app.processEvents()
-        assert win.stack.currentIndex() == 3
+        assert win.stack.currentIndex() == win.PAGE_CLIPS
         assert win.clips_library.project_filter_bar.isVisible()
         assert win.clips_library.card_count() == 1
 

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 from ..diagnostics import LOG
 from .clips_view import ClipThumbnailPreview, _format_duration
 from .icons import lucide_icon
+from .style import protect_from_wheel
 from .theme import theme_manager
 
 
@@ -516,7 +517,7 @@ class ClipLibraryPanel(QWidget):
         )
         self.search_input.textChanged.connect(self._rebuild_cards)
 
-        self.sort_combo = QComboBox()
+        self.sort_combo = protect_from_wheel(QComboBox())
         self.sort_combo.addItems(["Newest first", "Highest score", "Longest duration", "Title (A–Z)"])
         self.sort_combo.setAccessibleName("Sort generated clips")
         self.sort_combo.currentIndexChanged.connect(self._rebuild_cards)
@@ -1122,7 +1123,7 @@ class _FullscreenPlayerWindow(QWidget):
         tl.setSpacing(10)
         self.time_current = QLabel("00:00")
         self.time_current.setStyleSheet("color: #A0A5B2; font-size: 12px;")
-        self.seek_slider = QSlider(Qt.Orientation.Horizontal)
+        self.seek_slider = protect_from_wheel(QSlider(Qt.Orientation.Horizontal))
         self.seek_slider.setRange(0, max(0, player.duration()))
         self.seek_slider.setValue(max(0, player.position()))
         self.seek_slider.sliderPressed.connect(lambda: setattr(self, "_seeking", True))
@@ -1143,7 +1144,7 @@ class _FullscreenPlayerWindow(QWidget):
         self.mute_btn = QPushButton()
         self.mute_btn.setFixedSize(36, 32)
         self.mute_btn.clicked.connect(on_toggle_mute)
-        self.vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self.vol_slider = protect_from_wheel(QSlider(Qt.Orientation.Horizontal))
         self.vol_slider.setRange(0, 100)
         self.vol_slider.setValue(int(round(audio_output.volume() * 100)))
         self.vol_slider.setFixedWidth(96)
@@ -1263,7 +1264,7 @@ class ClipDetailPlayerPanel(QFrame):
         timeline = QHBoxLayout()
         timeline.setSpacing(8)
         self.time_current = QLabel("00:00", objectName="muted")
-        self.seek_slider = QSlider(Qt.Orientation.Horizontal)
+        self.seek_slider = protect_from_wheel(QSlider(Qt.Orientation.Horizontal))
         self.seek_slider.setRange(0, 0)
         self.seek_slider.setAccessibleName("Playback timeline")
         self.seek_slider.sliderPressed.connect(lambda: setattr(self, "_seeking", True))
@@ -1307,7 +1308,7 @@ class ClipDetailPlayerPanel(QFrame):
         self.mute_btn.setAccessibleName("Mute or unmute")
         self.mute_btn.clicked.connect(self.toggle_mute)
 
-        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_slider = protect_from_wheel(QSlider(Qt.Orientation.Horizontal))
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(80)
         self.volume_slider.setMinimumWidth(44)

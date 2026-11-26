@@ -66,12 +66,12 @@ def test_theme_manager_live_switching_and_persistence(tmp_path: Path, monkeypatc
         assert win.appearance_buttons["dark"].isChecked()
 
         # Switch to Light Mode without recreating window
-        win.show_page(5)
+        win.show_page(win.PAGE_AI_PROVIDERS)
         win.set_appearance("light")
         app.processEvents()
         assert theme_manager().mode == "light"
         assert theme_manager().resolved == "light"
-        assert win.stack.currentIndex() == 5
+        assert win.stack.currentIndex() == win.PAGE_AI_PROVIDERS
         assert win.appearance_buttons["light"].isChecked()
 
         # Persists across reload

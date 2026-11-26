@@ -228,7 +228,7 @@ def test_reframe_style_persistence_and_new_project_selector(tmp_path: Path, monk
     win = MainWindow()
     try:
         win.show()
-        win.show_page(1)
+        win.show_page(win.PAGE_PROJECT)
         assert win.reframe_style_combo.count() == len(REFRAME_STYLES)
         assert win.reframe_style_combo.currentData() == "natural"
         assert win.reframe_style_combo.isEnabled()

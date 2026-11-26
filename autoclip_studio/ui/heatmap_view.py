@@ -1,4 +1,4 @@
-"""Compact interactive YouTube Audience Replay Heatmap widget for the New Project page."""
+"""Compact interactive YouTube Audience Replay Heatmap widget for the Project page."""
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt

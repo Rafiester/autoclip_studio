@@ -123,7 +123,7 @@ def test_custom_provider_survives_multiple_restarts_and_single_save_load(tmp_pat
     # Session 1: Save custom provider BEFORE loading models, then Load Models once!
     win1 = MainWindow()
     try:
-        win1.show_page(5)
+        win1.show_page(win1.PAGE_AI_PROVIDERS)
         win1.settings_provider.setCurrentText("custom")
         win1.provider_name_input.setText("AppVerse AI")
         win1.api_key_input.setText("sk-custom-live-secret-999999999999")

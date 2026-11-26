@@ -163,7 +163,7 @@ def test_new_project_ui_tabs_and_srt_import(tmp_path: Path, monkeypatch) -> None
     window = MainWindow()
     try:
         window.show()
-        window.show_page(1)
+        window.show_page(window.PAGE_PROJECT)
         assert window.youtube_tab_btn.isChecked()
         assert not window.local_tab_btn.isChecked()
         assert window.source_stack.currentIndex() == 0

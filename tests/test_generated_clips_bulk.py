@@ -68,7 +68,7 @@ def test_clip_selection_mode_independent_of_playback_and_filter_scopes(tmp_path:
 
     try:
         win.show()
-        win.show_page(3)
+        win.show_page(win.PAGE_CLIPS)
         _app().processEvents()
 
         # Checkboxes hidden outside selection mode
@@ -144,7 +144,7 @@ def test_missing_file_states_individual_menus_and_quick_footer(tmp_path: Path, m
     try:
         win.resize(920, 680)
         win.show()
-        win.show_page(3)
+        win.show_page(win.PAGE_CLIPS)
         _app().processEvents()
 
         # Wait for initial thumbnail extraction to complete, then leave Generated Clips so media handle closes
@@ -152,10 +152,10 @@ def test_missing_file_states_individual_menus_and_quick_footer(tmp_path: Path, m
         while (win.thumb_runner.is_busy(cid_ok) or win.thumb_runner.is_busy(cid_gone)) and time.monotonic() < deadline:
             _app().processEvents()
             time.sleep(0.02)
-        win.show_page(0)
+        win.show_page(win.PAGE_PROJECT)
         _app().processEvents()
         c_gone.unlink()
-        win.show_page(3)
+        win.show_page(win.PAGE_CLIPS)
         _app().processEvents()
 
         gone_card = win.clips_library._cards[cid_gone]
@@ -259,7 +259,7 @@ def test_safe_deletion_protected_assets_partial_failure_and_persistence(tmp_path
 
     try:
         win.show()
-        win.show_page(3)
+        win.show_page(win.PAGE_CLIPS)
         _app().processEvents()
 
         # Dialog confirmation stats accuracy & Cancel safety

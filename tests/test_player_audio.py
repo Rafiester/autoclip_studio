@@ -209,7 +209,7 @@ def test_player_volume_persists_across_restart_and_page_navigation(tmp_path: Pat
     win1 = MainWindow()
     try:
         win1.show()
-        win1.show_page(3)
+        win1.show_page(win1.PAGE_CLIPS)
         app.processEvents()
         if native_gui:
             assert _wait_until(
@@ -224,12 +224,12 @@ def test_player_volume_persists_across_restart_and_page_navigation(tmp_path: Pat
             assert _wait_until(lambda: win1.clip_detail.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState)
 
         # Navigating away from Generated Clips stops playback cleanly (no background audio bleed)
-        win1.show_page(0)
+        win1.show_page(win1.PAGE_PROJECT)
         app.processEvents()
         assert win1.clip_detail.player.playbackState() == QMediaPlayer.PlaybackState.StoppedState
 
         # Returning to Generated Clips restores playable audio with saved volume
-        win1.show_page(3)
+        win1.show_page(win1.PAGE_CLIPS)
         app.processEvents()
         win1.clip_detail.toggle_play()
         if native_gui:

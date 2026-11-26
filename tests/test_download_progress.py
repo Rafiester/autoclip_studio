@@ -62,7 +62,7 @@ def test_download_card_metrics_activity_and_cancellation(app, monkeypatch, tmp_p
     window = MainWindow()
     window.resize(760, 560)
     window.show()
-    window.show_page(2)
+    window.show_page(window.PAGE_QUEUE)
     window.show_download(True)
     app.processEvents()
     view = window.download_view

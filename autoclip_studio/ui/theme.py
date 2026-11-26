@@ -1179,6 +1179,9 @@ class ThemeManager(QObject):
 
         app = QApplication.instance()
         if app is not None:
+            from .style import install_global_wheel_protection
+
+            install_global_wheel_protection(app)
             base_font = QFont(self._font_family)
             base_font.setPixelSize(13)
             base_font.setWeight(QFont.Weight.Normal)
