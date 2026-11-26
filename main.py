@@ -3,6 +3,13 @@ import logging
 import os
 import sys
 
+# On macOS, Qt 6.8's FFmpeg multimedia backend fails to resample 48 kHz AAC audio for
+# 44.1 kHz-capped Bluetooth CoreAudio devices, causing silent video playback.
+# Selecting Qt's native Apple AVFoundation ("darwin") backend before QApplication initializes
+# routes audio through macOS CoreAudio's native hardware sample-rate converter.
+if sys.platform == "darwin":
+    os.environ.setdefault("QT_MEDIA_BACKEND", "darwin")
+
 from autoclip_studio.diagnostics import LOG, configure_logging, log_error
 from autoclip_studio.paths import LOG_DIR
 

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 from dataclasses import asdict
 from pathlib import Path
 from threading import Event
 from typing import Callable
+
+if sys.platform == "darwin":
+    os.environ.setdefault("QT_MEDIA_BACKEND", "darwin")
 
 from PySide6.QtCore import QFileInfo, QSignalBlocker, QSize, QThread, Qt, QUrl, Slot
 from PySide6.QtGui import QCloseEvent, QDesktopServices, QIcon, QImage, QPixmap
@@ -612,6 +616,11 @@ class MainWindow(QMainWindow):
 
         self.clip_detail = ClipDetailPlayerPanel()
         self.player = self.clip_detail.player
+        ui_state = self.settings.ui_state()
+        saved_vol = int(ui_state.get("player_volume", 80))
+        saved_muted = bool(ui_state.get("player_muted", False))
+        self.clip_detail.set_audio_preferences(saved_vol, saved_muted)
+        self.clip_detail.audio_settings_changed.connect(self._on_player_audio_settings_changed)
         self.clip_detail.open_file_requested.connect(self.open_selected_clip)
         self.clip_detail.open_folder_requested.connect(self.open_selected_clip_folder)
         self.clip_detail.regenerate_thumb_requested.connect(self.regenerate_thumbnail)
@@ -736,6 +745,14 @@ class MainWindow(QMainWindow):
     def _save_performance_settings(self, perf) -> None:
         self.settings.data["performance"] = asdict(perf)
         self.settings.save()
+
+    def _on_player_audio_settings_changed(self, volume_pct: int, muted: bool) -> None:
+        if self._hydrating_ui:
+            return
+        self.settings.update_ui_state({
+            "player_volume": max(0, min(100, int(volume_pct))),
+            "player_muted": bool(muted),
+        }, debounced=True)
 
     def show_page(self, index: int) -> None:
         if self.stack.currentIndex() == 3 and index != 3 and hasattr(self, "clip_detail"):
@@ -2012,6 +2029,8 @@ class MainWindow(QMainWindow):
             self.output_input.setText(self.settings.data.get("output_dir", ""))
             self.hardware_check.setChecked(bool(self.settings.data.get("hardware_encoding", True)))
             self._theme.apply(str(self.settings.data.get("appearance") or "dark"))
+            if hasattr(self, "clip_detail"):
+                self.clip_detail.set_audio_preferences(80, False)
         finally:
             self._hydrating_ui = False
         self.connection_status.setText("Settings reset to defaults.")
@@ -2023,9 +2042,14 @@ class MainWindow(QMainWindow):
                 "window_width": int(self.width()),
                 "window_height": int(self.height()),
                 "window_maximized": bool(self.isMaximized()),
+                "player_volume": int(self.clip_detail.volume_slider.value()) if hasattr(self, "clip_detail") else 80,
+                "player_muted": bool(self.clip_detail.audio_output.isMuted()) if hasattr(self, "clip_detail") else False,
             }, debounced=False)
             self.settings.flush()
-            self.player.stop()
+            if hasattr(self, "clip_detail"):
+                self.clip_detail.release_media()
+            else:
+                self.player.stop()
             self.caption_library.stop()
             if hasattr(self, "performance_view"):
                 self.performance_view.set_polling(False)

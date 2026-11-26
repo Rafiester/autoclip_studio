@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 from typing import Callable
 
 import cv2
-from PySide6.QtCore import QRectF, QSize, Qt, QUrl, Signal, Slot
+from PySide6.QtCore import QRectF, QSignalBlocker, QSize, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QImage, QKeySequence, QPainter, QPainterPath, QResizeEvent, QShortcut
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimedia import QAudioDevice, QAudioOutput, QMediaDevices, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
@@ -15,6 +16,7 @@ from PySide6.QtWidgets import (
     QStackedWidget, QVBoxLayout, QWidget,
 )
 
+from ..diagnostics import LOG
 from .clips_view import ClipThumbnailPreview, _format_duration
 from .icons import lucide_icon
 from .theme import theme_manager
@@ -725,7 +727,15 @@ class _FullscreenPlayerWindow(QWidget):
     def sync_icons(self) -> None:
         playing = self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
         self.play_btn.setIcon(lucide_icon("pause" if playing else "play", "#F5F5F7", 16))
-        self.mute_btn.setIcon(lucide_icon("volume-x" if self._audio.isMuted() else "volume-2", "#F5F5F7", 15))
+        muted = self._audio.isMuted() or self._audio.volume() <= 0.001
+        self.mute_btn.setIcon(lucide_icon("volume-x" if muted else "volume-2", "#F5F5F7", 15))
+
+    def sync_volume(self, volume_pct: int) -> None:
+        clamped = max(0, min(100, int(volume_pct)))
+        if self.vol_slider.value() != clamped:
+            with QSignalBlocker(self.vol_slider):
+                self.vol_slider.setValue(clamped)
+        self.sync_icons()
 
     def sync_position(self, pos_ms: int) -> None:
         if not self._seeking:
@@ -759,6 +769,7 @@ class ClipDetailPlayerPanel(QFrame):
     delete_clip_requested = Signal()
     prev_clip_requested = Signal()
     next_clip_requested = Signal()
+    audio_settings_changed = Signal(int, bool)  # volume_pct (0-100), muted
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -769,6 +780,8 @@ class ClipDetailPlayerPanel(QFrame):
         self._seeking = False
         self._duration_ms = 0
         self._fullscreen_win: _FullscreenPlayerWindow | None = None
+        self._last_nonzero_volume = 80
+        self._applying_audio_prefs = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 14, 16, 14)
@@ -778,9 +791,17 @@ class ClipDetailPlayerPanel(QFrame):
         self.stage = AspectVideoStage(self)
         root.addWidget(self.stage, 3)
 
-        # Single shared Qt Multimedia player
-        self.audio_output = QAudioOutput(self)
+        # Single shared Qt Multimedia player with explicit default audio device tracking
+        self.media_devices = QMediaDevices(self)
+        self.media_devices.audioOutputsChanged.connect(self._on_audio_outputs_changed)
+        default_device = self._resolve_default_audio_device()
+        self.audio_output = QAudioOutput(default_device, self) if not default_device.isNull() else QAudioOutput(self)
+        self.audio_output.setMuted(False)
         self.audio_output.setVolume(0.8)
+        self.audio_output.volumeChanged.connect(self._on_audio_output_volume_changed)
+        self.audio_output.mutedChanged.connect(self._on_audio_output_muted_changed)
+        self.audio_output.deviceChanged.connect(self._on_audio_output_device_changed)
+
         self.player = QMediaPlayer(self)
         self.player.setAudioOutput(self.audio_output)
         self.player.setVideoOutput(self.stage.video_widget)
@@ -788,6 +809,8 @@ class ClipDetailPlayerPanel(QFrame):
         self.player.durationChanged.connect(self._on_duration)
         self.player.playbackStateChanged.connect(self._on_state_changed)
         self.player.mediaStatusChanged.connect(self._on_media_status)
+        self.player.tracksChanged.connect(self._ensure_active_audio_track)
+        self.player.hasAudioChanged.connect(self._on_has_audio_changed)
         self.player.errorOccurred.connect(self._on_error)
 
         # 2. Playback controls (below viewport, never overlapping captions)
@@ -1000,6 +1023,113 @@ class ClipDetailPlayerPanel(QFrame):
             sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             sc.activated.connect(fn)
 
+    @staticmethod
+    def _resolve_default_audio_device() -> QAudioDevice:
+        device = QMediaDevices.defaultAudioOutput()
+        if not device.isNull():
+            return device
+        outputs = QMediaDevices.audioOutputs()
+        if outputs:
+            return outputs[0]
+        return QAudioDevice()
+
+    def set_audio_preferences(self, volume_pct: int, muted: bool = False) -> None:
+        """Apply persisted volume (0-100) and mute state without emitting redundant save loops."""
+        clamped = max(0, min(100, int(volume_pct)))
+        if clamped > 0:
+            self._last_nonzero_volume = clamped
+        self._applying_audio_prefs = True
+        try:
+            with QSignalBlocker(self.volume_slider):
+                self.volume_slider.setValue(clamped)
+            self.audio_output.setVolume(clamped / 100.0)
+            self.audio_output.setMuted(bool(muted))
+            if self._fullscreen_win is not None:
+                self._fullscreen_win.sync_volume(clamped)
+            self._sync_mute_icon()
+        finally:
+            self._applying_audio_prefs = False
+
+    def audio_diagnostics(self) -> dict[str, object]:
+        dev = self.audio_output.device()
+        return {
+            "backend": os.environ.get("QT_MEDIA_BACKEND") or "default",
+            "audio_attached": self.player.audioOutput() is self.audio_output,
+            "device": dev.description() if not dev.isNull() else "none",
+            "device_valid": not dev.isNull(),
+            "volume": round(float(self.audio_output.volume()), 3),
+            "muted": bool(self.audio_output.isMuted()),
+            "has_audio": bool(self.player.hasAudio()),
+            "audio_tracks": len(self.player.audioTracks()),
+            "active_audio_track": int(self.player.activeAudioTrack()),
+        }
+
+    def _ensure_audio_ready(self) -> None:
+        """Guarantee QAudioOutput is attached to QMediaPlayer on a valid output device."""
+        if self.player.audioOutput() is not self.audio_output:
+            self.player.setAudioOutput(self.audio_output)
+        current_dev = self.audio_output.device()
+        default_dev = self._resolve_default_audio_device()
+        if current_dev.isNull() and not default_dev.isNull():
+            self.audio_output.setDevice(default_dev)
+        elif default_dev.isNull():
+            LOG.warning("Embedded video player: no system audio output device is available.")
+        self._ensure_active_audio_track()
+
+    @Slot()
+    def _ensure_active_audio_track(self) -> None:
+        tracks = self.player.audioTracks()
+        if tracks and self.player.activeAudioTrack() < 0:
+            self.player.setActiveAudioTrack(0)
+            LOG.debug("Embedded video player selected audio track 0 of %d.", len(tracks))
+
+    @Slot(bool)
+    def _on_has_audio_changed(self, has_audio: bool) -> None:
+        if has_audio:
+            self._ensure_active_audio_track()
+
+    @Slot()
+    def _on_audio_outputs_changed(self) -> None:
+        default_dev = self._resolve_default_audio_device()
+        if default_dev.isNull():
+            LOG.warning("System audio outputs changed: no default audio output device available.")
+            return
+        current_dev = self.audio_output.device()
+        if current_dev.isNull() or bytes(current_dev.id()) != bytes(default_dev.id()):
+            vol = self.audio_output.volume()
+            muted = self.audio_output.isMuted()
+            LOG.info(
+                "Embedded video player switching audio output device: %s -> %s",
+                current_dev.description() if not current_dev.isNull() else "none",
+                default_dev.description(),
+            )
+            self.audio_output.setDevice(default_dev)
+            self.audio_output.setVolume(vol)
+            self.audio_output.setMuted(muted)
+            if self.player.audioOutput() is not self.audio_output:
+                self.player.setAudioOutput(self.audio_output)
+
+    @Slot(float)
+    def _on_audio_output_volume_changed(self, volume: float) -> None:
+        pct = max(0, min(100, int(round(volume * 100.0))))
+        if pct > 0:
+            self._last_nonzero_volume = pct
+        if self.volume_slider.value() != pct:
+            with QSignalBlocker(self.volume_slider):
+                self.volume_slider.setValue(pct)
+        if self._fullscreen_win is not None:
+            self._fullscreen_win.sync_volume(pct)
+        self._sync_mute_icon()
+
+    @Slot(bool)
+    def _on_audio_output_muted_changed(self, _muted: bool) -> None:
+        self._sync_mute_icon()
+
+    @Slot()
+    def _on_audio_output_device_changed(self) -> None:
+        dev = self.audio_output.device()
+        LOG.debug("Embedded video player active audio device: %s", dev.description() if not dev.isNull() else "none")
+
     def _icon_fg(self) -> str:
         return theme_manager().tokens["text_primary"]
 
@@ -1010,7 +1140,7 @@ class ClipDetailPlayerPanel(QFrame):
             self._fullscreen_win.sync_icons()
 
     def _sync_mute_icon(self) -> None:
-        muted = self.audio_output.isMuted()
+        muted = self.audio_output.isMuted() or self.audio_output.volume() <= 0.001
         self.mute_btn.setIcon(lucide_icon("volume-x" if muted else "volume-2", self._icon_fg(), 15))
         if self._fullscreen_win is not None:
             self._fullscreen_win.sync_icons()
@@ -1097,6 +1227,7 @@ class ClipDetailPlayerPanel(QFrame):
         self.stage.stack.setCurrentIndex(0)
 
         source = QUrl.fromLocalFile(str(clip_path))
+        self._ensure_audio_ready()
         if source != self.player.source():
             self.player.setSource(source)
         self._set_controls_enabled(True, file_exists=True)
@@ -1146,12 +1277,18 @@ class ClipDetailPlayerPanel(QFrame):
         self.stage.stack.setCurrentIndex(0)
         self._sync_play_icon()
 
+    def release_media(self) -> None:
+        """Stop playback, close any fullscreen window, and release active media resources cleanly."""
+        self.stop_playback()
+        self.player.setSource(QUrl())
+
     def toggle_play(self) -> None:
         if not self.play_btn.isEnabled():
             return
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         else:
+            self._ensure_audio_ready()
             if self.player.mediaStatus() == QMediaPlayer.MediaStatus.EndOfMedia:
                 self.player.setPosition(0)
             if self._fullscreen_win is None:
@@ -1197,19 +1334,43 @@ class ClipDetailPlayerPanel(QFrame):
 
     @Slot(QMediaPlayer.MediaStatus)
     def _on_media_status(self, status: QMediaPlayer.MediaStatus) -> None:
-        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+        if status in (QMediaPlayer.MediaStatus.LoadedMedia, QMediaPlayer.MediaStatus.BufferedMedia):
+            self._ensure_audio_ready()
+            LOG.debug("Embedded video player media ready: %s", self.audio_diagnostics())
+        elif status == QMediaPlayer.MediaStatus.InvalidMedia:
+            LOG.error("Embedded video player invalid media (%s): %s", self.player.source().toLocalFile(), self.audio_diagnostics())
+        elif status == QMediaPlayer.MediaStatus.EndOfMedia:
             self._sync_play_icon()
 
     def toggle_mute(self) -> None:
-        muted = not self.audio_output.isMuted()
-        self.audio_output.setMuted(muted)
+        currently_silent = self.audio_output.isMuted() or self.audio_output.volume() <= 0.001
+        if currently_silent:
+            if self.audio_output.volume() <= 0.001:
+                restored = max(10, self._last_nonzero_volume)
+                with QSignalBlocker(self.volume_slider):
+                    self.volume_slider.setValue(restored)
+                self.audio_output.setVolume(restored / 100.0)
+            self.audio_output.setMuted(False)
+        else:
+            self.audio_output.setMuted(True)
         self._sync_mute_icon()
+        if self._fullscreen_win is not None:
+            self._fullscreen_win.sync_volume(self.volume_slider.value())
+        if not self._applying_audio_prefs:
+            self.audio_settings_changed.emit(self.volume_slider.value(), self.audio_output.isMuted())
 
     def _on_volume_changed(self, value: int) -> None:
-        self.audio_output.setVolume(value / 100.0)
-        if value > 0 and self.audio_output.isMuted():
+        clamped = max(0, min(100, int(value)))
+        if clamped > 0:
+            self._last_nonzero_volume = clamped
+        self.audio_output.setVolume(clamped / 100.0)
+        if clamped > 0 and self.audio_output.isMuted():
             self.audio_output.setMuted(False)
+        if self._fullscreen_win is not None:
+            self._fullscreen_win.sync_volume(clamped)
         self._sync_mute_icon()
+        if not self._applying_audio_prefs:
+            self.audio_settings_changed.emit(clamped, self.audio_output.isMuted())
 
     def toggle_fullscreen(self) -> None:
         if not self.fullscreen_btn.isEnabled():
@@ -1220,6 +1381,7 @@ class ClipDetailPlayerPanel(QFrame):
         # Seamless video output handoff to dedicated fullscreen QVideoWidget (preserves position, state, volume, mute!)
         was_playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
         pos = self.player.position()
+        self._ensure_audio_ready()
         fs = _FullscreenPlayerWindow(
             self.player,
             self.audio_output,
@@ -1231,6 +1393,8 @@ class ClipDetailPlayerPanel(QFrame):
         fs.exited.connect(self._exit_fullscreen)
         self._fullscreen_win = fs
         self.player.setVideoOutput(fs.video_widget)
+        self._ensure_audio_ready()
+        fs.sync_volume(self.volume_slider.value())
         fs.showFullScreen()
         fs.raise_()
         fs.activateWindow()
@@ -1248,6 +1412,7 @@ class ClipDetailPlayerPanel(QFrame):
         was_playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
         pos = self.player.position()
         self.player.setVideoOutput(self.stage.video_widget)
+        self._ensure_audio_ready()
         if not fs._closed:
             fs._closed = True
             fs.close()
@@ -1257,6 +1422,12 @@ class ClipDetailPlayerPanel(QFrame):
         if was_playing and self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
             self.player.play()
         self._sync_play_icon()
+        self._sync_mute_icon()
 
-    def _on_error(self, _error: QMediaPlayer.Error, message: str) -> None:
+    def _on_error(self, error: QMediaPlayer.Error, message: str) -> None:
+        diag = self.audio_diagnostics()
+        LOG.error(
+            "Embedded video player error (%s): %s | source=%s | audio=%s",
+            error, message, self.player.source().toLocalFile(), diag,
+        )
         self.desc_label.setText(f"Playback error: {message}")

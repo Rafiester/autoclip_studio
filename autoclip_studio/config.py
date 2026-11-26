@@ -124,6 +124,8 @@ DEFAULTS: dict[str, Any] = {
         "window_height": 820,
         "window_maximized": False,
         "last_page": 0,
+        "player_volume": 80,
+        "player_muted": False,
     },
 }
 
